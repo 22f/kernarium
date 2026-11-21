@@ -899,6 +899,8 @@ final class LiveRuntime: RuntimeDriver {
 
     func retireRunRecord() { runRecord?.retire() }
 
+    var retiredAnEarlierRun: Bool { runRecord?.retiredAnEarlierRun ?? false }
+
     func installRootApp() async throws {
         guard let release = rootRelease else { throw CancellationError() }
         let folder = storage.releaseDirectory

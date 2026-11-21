@@ -188,8 +188,12 @@ public enum BugReportAttachments {
     /// The most of one MetricKit report that is kept, copied or read.
     public static let maximumMetricKitBytes = 1 << 20
 
+    /// `includingEarlierRun` is the caller's word that `earlier-run.txt` is
+    /// this process's own: a launch drops or files an older process's
+    /// (`PreviousSession.settleEarlierRun`), and one it could not is not carried.
     public static func entries(
-        from diagnostics: URL, containers: [String], guest: [BugReportArchive.Entry] = []
+        from diagnostics: URL, containers: [String], guest: [BugReportArchive.Entry] = [],
+        includingEarlierRun: Bool = false
     ) -> [BugReportArchive.Entry] {
         var entries: [BugReportArchive.Entry] = []
         let files: [(String, String)] = [
@@ -199,6 +203,11 @@ public enum BugReportAttachments {
         ]
         var records: [SessionRecord?] = []
         for (file, name) in files {
+            // An earlier run that this process did not retire is an older process's.
+            if file == earlierRunRecord, !includingEarlierRun {
+                records.append(nil)
+                continue
+            }
             let (entry, record) = sessionEntry(diagnostics.appendingPathComponent(file), named: name, containers: containers)
             records.append(record)
             if let entry { entries.append(entry) }
@@ -354,9 +363,11 @@ public enum BugReportAttachments {
     /// them is shared as Android made it.
     @discardableResult
     public static func attach(
-        to file: URL, from diagnostics: URL, containers: [String], guest: [BugReportArchive.Entry] = []
+        to file: URL, from diagnostics: URL, containers: [String], guest: [BugReportArchive.Entry] = [],
+        includingEarlierRun: Bool = false
     ) -> Bool {
-        let entries = entries(from: diagnostics, containers: containers, guest: guest)
+        let entries = entries(
+            from: diagnostics, containers: containers, guest: guest, includingEarlierRun: includingEarlierRun)
         do {
             try BugReportArchive.append(entries, to: file)
             return true

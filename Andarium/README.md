@@ -958,7 +958,10 @@ address space holds, so this is a fallback.
   that was neither Android's own nor a stop, Home shows a notice with its cause
   (`SessionRecord.notice`). A bug report carries the previous process's record
   for the whole life of the process, and beside it the last earlier run of
-  this process (`RunRecord`), kept apart from it. The runtime writes the record without the serial
+  this process (`RunRecord`), kept apart from it. At launch, an earlier run
+  the process before left is not this process's: it becomes the previous
+  session's when that process left no other record (a failed start whose
+  pause was saved), and is dropped otherwise (`PreviousSession`). The runtime writes the record without the serial
   number, the adb key and the time zone the launch stated and without any
   hardware address in its colon spelling, so neither the bug report nor the
   previous session's copy has them.

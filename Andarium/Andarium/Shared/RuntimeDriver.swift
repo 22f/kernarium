@@ -279,6 +279,9 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// what was decided from it is saved (`RunRecord`): a launch that comes
     /// before the next run begins reads no record of a run that was settled.
     func retireRunRecord()
+    /// Whether the earlier run's record kept beside the others is this
+    /// process's own: a retirement moved one aside (`RunRecord`).
+    var retiredAnEarlierRun: Bool { get }
     /// The guest's shell, for the short questions about the Magisk app; nil
     /// when there is none to ask.
     var guestShell: (any GuestShell)? { get }
@@ -305,6 +308,7 @@ extension RuntimeDriver {
     var guestShell: (any GuestShell)? { nil }
     func currentSessionRecord() -> SessionRecord? { nil }
     func retireRunRecord() {}
+    var retiredAnEarlierRun: Bool { false }
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

@@ -836,6 +836,8 @@ final class AppModel {
     func adoptDiagnostics(in diagnostics: URL, containers: [String], endedOutOfForeground: Bool) {
         diagnosticsDirectory = diagnostics
         diagnosticsContainers = containers
+        // An earlier run a process before left there is not this process's.
+        PreviousSession.settleEarlierRun(in: diagnostics)
         guard let previous = PreviousSession.read(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
         else { return }
         print("Andarium: \(previous.record.summary)")
@@ -1422,9 +1424,11 @@ final class AppModel {
             if let diagnosticsDirectory {
                 let stalls = await driver?.guestStallFiles() ?? []
                 let guest = root.map { stalls + [$0] } ?? stalls
+                let earlierRun = driver?.retiredAnEarlierRun ?? false
                 _ = await Task.detached(priority: .userInitiated) {
                     BugReportAttachments.attach(
-                        to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
+                        to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest,
+                        includingEarlierRun: earlierRun)
                 }.value
             }
             // A cancel that came as the report finished: nobody takes the file.

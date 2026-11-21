@@ -527,6 +527,42 @@ final class RootStartTests {
         #expect(relaunchedDriver.savedGuest == nil)
     }
 
+    // MARK: An earlier run a process before left
+
+    @Test func aFailedStartThatWasPausedAndLeftIsThePreviousSessionAtTheNextLaunchAndDecidesNothing() throws {
+        // The process before ended with a failed start whose pause was saved and whose record
+        // was moved aside; there is no record at the run's place.
+        let directory = try diagnostics(record: record(end: "powered-off", ramdisk: "stock"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let place = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let earlier = directory.appendingPathComponent(BugReportAttachments.earlierRunRecord)
+        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        try FileManager.default.moveItem(at: place, to: kept)
+        try Data(record(end: "kernel-exit", status: 2, boot: "unobserved").utf8).write(to: earlier)
+        let (model, driver) = model(rootOn: true)
+        model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
+        // Its pause is saved already: nothing is decided from it again.
+        #expect(model.guest?.root.attention == nil)
+        #expect(driver.savedGuest == nil)
+        // It is the previous session's now, and the process before that is not.
+        #expect(SessionRecord.read(at: kept)?.end == "kernel-exit")
+        #expect(!FileManager.default.fileExists(atPath: earlier.path))
+    }
+
+    @Test func aLaunchDropsTheEarlierRunTheProcessBeforeLeftWhenItLeftARecordAtTheRunsPlace() throws {
+        let directory = try diagnostics(record: record(end: "guest-panic", boot: "unobserved"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let earlier = directory.appendingPathComponent(BugReportAttachments.earlierRunRecord)
+        try Data(record(end: "powered-off", ramdisk: "stock").utf8).write(to: earlier)
+        let (model, _) = model(rootOn: true)
+        model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
+        #expect(!FileManager.default.fileExists(atPath: earlier.path))
+        // The record at the run's place is the previous session's, as before.
+        #expect(model.guest?.root.attention == .failedStart)
+        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        #expect(SessionRecord.read(at: kept)?.end == "guest-panic")
+    }
+
     // MARK: The record of a run that is asked for
 
     /// The real runtime over empty storage, whose session record is the file

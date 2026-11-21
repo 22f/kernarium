@@ -379,6 +379,30 @@ public enum PreviousSession {
         try? FileManager.default.moveItem(at: current, to: kept)
     }
 
+    /// At launch, before anything is reported or decided from a record: no run
+    /// of this process has begun, so an `earlier-run.txt` is the process
+    /// before's (`RunRecord`). When that process left no `session.txt`, its
+    /// last run was one whose record was already moved aside, a start with
+    /// root that failed and whose pause was saved, and it is the previous
+    /// session's: it becomes `previous-session.txt`, and nothing is decided
+    /// from it. Otherwise the record at `session.txt` is the previous session's
+    /// and the earlier run is dropped. A move or removal that fails leaves the
+    /// file where it is, and a bug report does not carry an earlier run that
+    /// this process did not retire itself (`BugReportAttachments.entries`).
+    public static func settleEarlierRun(in diagnostics: URL) {
+        let manager = FileManager.default
+        let earlier = diagnostics.appendingPathComponent(BugReportAttachments.earlierRunRecord)
+        guard manager.fileExists(atPath: earlier.path) else { return }
+        let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        if manager.fileExists(atPath: current.path) {
+            try? manager.removeItem(at: earlier)
+        } else {
+            let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+            try? manager.removeItem(at: kept)
+            try? manager.moveItem(at: earlier, to: kept)
+        }
+    }
+
     /// `read`, then `keep`: for a reader that decides nothing from the record
     /// that must outlive the launch.
     public static func consume(in diagnostics: URL, endedOutOfForeground: Bool)
@@ -414,13 +438,20 @@ public final class RunRecord: @unchecked Sendable {
         /// could not be replaced) and was emptied where it was. The bug
         /// report does not carry it.
         case emptied
-        /// The record could be neither moved nor emptied; it is not read.
+        /// The record could be neither moved nor emptied; it is not read, and
+        /// a run that begins with it in place takes no root decision from a record.
         case stays
     }
 
     private let directory: URL
     private let lock = NSLock()
     private var staysInPlace = false
+    private var movedOne = false
+
+    /// Whether a retirement in this process moved a record aside: the file
+    /// `earlier-run.txt` is then this process's own. One a launch found
+    /// there is an older process's, and a bug report does not carry it.
+    public var retiredAnEarlierRun: Bool { lock.withLock { movedOne } }
 
     public init(in diagnostics: URL) {
         directory = diagnostics
@@ -448,7 +479,10 @@ public final class RunRecord: @unchecked Sendable {
                 outcome = .stays
             }
         }
-        lock.withLock { staysInPlace = outcome == .stays }
+        lock.withLock {
+            staysInPlace = outcome == .stays
+            if outcome == .moved { movedOne = true }
+        }
         return outcome
     }
 

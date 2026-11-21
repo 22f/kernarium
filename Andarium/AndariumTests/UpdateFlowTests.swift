@@ -89,6 +89,8 @@ final class StubDriver: RuntimeDriver {
     }
     /// How many times the model settled a run's record.
     private(set) var retiredRunRecords = 0
+    /// Whether the driver says the earlier run's record is this process's own.
+    var retiredAnEarlierRun = false
     func retireRunRecord() {
         retiredRunRecords += 1
         sessionRecord = nil
