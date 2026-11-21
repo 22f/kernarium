@@ -5618,7 +5618,8 @@ SMS_BINDER_DEVICES: dict[str, frozenset[str]] = {
     "hwbinder_device": SMS_BINDER_DEVICE_RIGHTS,
     "vndbinder_device": frozenset(),
 }
-# A debuggable build's platform policy lets every domain call and transfer through binder to the root shell (su).
+# A debuggable build's platform policy lets every domain call and transfer through binder to the root shell (su): the
+# holder and the waker hold exactly that pair on it there, and none in a user build.
 SMS_DEBUGGABLE_SU_BINDER_RIGHTS = frozenset({"call", "transfer"})
 # What the service holds on the holder's vsock sockets: it accepts, and reads and writes the connections that
 # inherit the holder's label, and shuts them down.
@@ -5892,6 +5893,11 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
                     fail(f"{domain} holds {sorted(extra)} on {target} of the {object_class} class in effect: only "
                          f"the platform's grants to every domain ({sorted(accepted)}) are accepted"
                          + (", and the lookup of the activity manager" if domain == SMS_WAKE else ""))
+        if build_variant != "user":
+            su_rights = held(domain, "binder").get("su", set())
+            if su_rights != SMS_DEBUGGABLE_SU_BINDER_RIGHTS:
+                fail(f"{domain} holds {sorted(su_rights)} on su of the binder class in effect in a {build_variant} "
+                     f"build: the platform gives every domain {sorted(SMS_DEBUGGABLE_SU_BINDER_RIGHTS)} there")
 
     # The handoff socket: init makes it and binds it and does not listen on it, so the holder listens and accepts on it
     # itself (a socket that is only bound polls as hung up and takes no connection).

@@ -508,8 +508,9 @@ def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str =
              "watch_reads write)))\n")
     # A debuggable build lets every domain call the root shell (the variant puts the rule in a user build, which has
     # no such shell).
-    if build_variant != "user" or variant == "su-binder-in-a-user-build":
-        plat += "(allow domain su (binder (call transfer)))\n"
+    if (build_variant != "user" or variant == "su-binder-in-a-user-build") and variant != "su-binder-removed":
+        su_rights = {"su-binder-call-only": "call", "su-binder-transfer-only": "transfer"}.get(variant or "", "call transfer")
+        plat += f"(allow domain su (binder ({su_rights})))\n"
     ext = (
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(type kernarium_sms_listener)\n(type kernarium_sms_listener_exec)\n(type kernarium_sms_socket)\n"
@@ -4345,15 +4346,23 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
 
         # The root shell of a debuggable build is the platform's: it may be called through binder from every domain,
-        # the holder's and the waker's among them (call and transfer), and nothing more of it is accepted.
-        widened = root / "userdebug-su-binder-widened.zip"
-        write_fixture(widened, build_variant="userdebug", sms_policy_variant="su-binder-widened")
-        result = run_tool(verifier, "--target-files", widened, "--build-variant", "userdebug", *kernel_options)
-        if result.returncode == 0 or not re.search(
-            r"kernarium_sms_listener holds \['impersonate'\] on su of the binder class in effect", result.stdout
+        # the holder's and the waker's among them, with call and transfer, and with neither less nor more.
+        for sms_variant, reason in (
+            ("su-binder-widened",
+             r"kernarium_sms_listener holds \['impersonate'\] on su of the binder class in effect"),
+            ("su-binder-removed",
+             r"kernarium_sms_listener holds \[\] on su of the binder class in effect in a userdebug build"),
+            ("su-binder-call-only",
+             r"kernarium_sms_listener holds \['call'\] on su of the binder class in effect in a userdebug build"),
+            ("su-binder-transfer-only",
+             r"kernarium_sms_listener holds \['transfer'\] on su of the binder class in effect in a userdebug build"),
         ):
-            fail(f"a userdebug build whose holder holds more than binder call and transfer on su verified: "
-                 f"{result.returncode} {result.stdout}")
+            su_fixture = root / f"userdebug-{sms_variant}.zip"
+            write_fixture(su_fixture, build_variant="userdebug", sms_policy_variant=sms_variant)
+            result = run_tool(verifier, "--target-files", su_fixture, "--build-variant", "userdebug", *kernel_options)
+            if result.returncode == 0 or not re.search(reason, result.stdout):
+                fail(f"a userdebug build with the {sms_variant} policy verified or failed for another reason: "
+                     f"{result.returncode} {result.stdout}")
 
         # Only a user build refuses a debuggable application: the diagnostics
         # variant is debuggable as a whole.
