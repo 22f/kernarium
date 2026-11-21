@@ -20,6 +20,9 @@
 #include "uml/emulator.h"
 #include "context.hpp"
 #include "cpu/arm64/jit/jit_test_api.hpp"
+#if UML_TEST_AOT
+#include "cpu/arm64/aot/aot_runtime.hpp"
+#endif
 #include "cpu/gadget_cache_budget.hpp"
 #include "device/sockets/socket_paths.hpp"
 #include "emulator_test_support.hpp"
@@ -846,6 +849,34 @@ void a_spent_end_stays_spent(Ending ending,
 	(void)close(world.control);
 }
 
+#if UML_TEST_AOT
+/* The ahead-of-time component is chosen once per session: a guest that ran
+ * without it (its launch stated no release) keeps it off until the session
+ * ends, and the release of the guest after its clean power-off ends it, so
+ * the next boot in the process can have the component for its own release. */
+void a_release_lets_the_next_session_choose_its_aot_afresh()
+{
+	const HandBackHooks hooks;
+	auto emulator = make_emulator(boot);
+	begin_restarts(emulator.get(), 0, Ending::power_off);
+	require(run(emulator.get()) == kernel_booted, "the guest did not boot");
+	const auto release = uml::cpu::arm64::aot::embedded_release();
+	require(release.has_value(), "the framework names no release");
+	require(!uml::runtime::select_aot(
+			uml::runtime::AotSelection::on, &*release),
+		"a session that ran without the component took it");
+	require(uml_emulator_release_guest(emulator.get()) == 0,
+		"a clean power-off could not release its guest");
+	require_hand_backs(1);
+	require(uml::runtime::select_aot(
+			uml::runtime::AotSelection::on, &*release),
+		"the released session held the next one off the component");
+	require(uml::cpu::arm64::aot::enabled(),
+		"the next session's choice was not taken");
+	(void)close(world.control);
+}
+#endif
+
 void clean_power_off_releases_the_process(bool fresh_handle, Ending ending)
 {
 	const HandBackHooks hooks;
@@ -1172,6 +1203,10 @@ int main(int argc, char **argv)
 			clean_power_off_releases_the_process(true, Ending::power_off);
 		else if (mode == "release-halt")
 			clean_power_off_releases_the_process(true, Ending::halt);
+#if UML_TEST_AOT
+		else if (mode == "release-reselects-aot")
+			a_release_lets_the_next_session_choose_its_aot_afresh();
+#endif
 		else if (mode == "release-borrowed-view")
 			a_clean_release_waits_for_resources(false);
 		else if (mode == "release-running-thread")

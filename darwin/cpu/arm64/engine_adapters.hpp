@@ -19,5 +19,8 @@ namespace uml::cpu::arm64::detail {
  * and refuses `on`. */
 [[nodiscard]] bool select_aot(AotSelection selection,
 	const AotRelease *release) noexcept;
+/* The end of a session of the process (its guest released after a clean
+ * power-off): the next run chooses again (cpu/arm64/aot). */
+void end_aot_session() noexcept;
 
 } // namespace uml::cpu::arm64::detail

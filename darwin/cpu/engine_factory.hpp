@@ -33,13 +33,18 @@ namespace uml::cpu {
 /* A launch's word on ahead-of-time code (cpu/arm64/aot) and the release it
  * boots (null when the guest is not an Android release): false when it cannot
  * be kept, which is `on` for a build or a framework without the component,
- * for a release the framework was not made from (or none), or in a process
+ * for a release the framework was not made from (or none), or in a session
  * that already runs without it. Before each run's first executor;
  * `automatic` is on for the release the framework was made from unless the
  * environment says DARWIN_UML_AOT=0, and off for any other. A later run of
  * the process that the framework no longer fits is off, never a failure. */
 [[nodiscard]] bool select_aot(AotSelection selection,
 	const AotRelease *release) noexcept;
+
+/* The end of a session of the process: its guest was released after Android's
+ * clean power-off, so the next run chooses afresh, as the first run of a
+ * process does. A restart inside a session is no end. */
+void end_aot_session() noexcept;
 
 /* Serializes JIT-capable emulator runs before any guest vCPU can allocate an
  * executor slot. Other engine kinds do not take this process-wide session.

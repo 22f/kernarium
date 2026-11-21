@@ -88,4 +88,11 @@ bool select_aot(AotSelection selection, const AotRelease *release) noexcept
 #endif
 }
 
+void end_aot_session() noexcept
+{
+#if UML_AOT
+	arm64::aot::end_session();
+#endif
+}
+
 } // namespace uml::cpu::arm64::detail

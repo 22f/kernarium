@@ -184,6 +184,19 @@ foreach(_uml_restart_mode IN ITEMS restart power-off halt stopped failed
         COMMAND uml_runtime_sequential_run_tests ${_uml_restart_mode})
 endforeach()
 unset(_uml_restart_mode)
+# Where the build has the ahead-of-time component: the release of a cleanly
+# powered-off guest ends its session, and the next one chooses the component
+# afresh, whatever the last one did.
+if(TARGET uml_arm64_aot_framework)
+    target_compile_definitions(uml_runtime_sequential_run_tests PRIVATE
+        UML_TEST_AOT=1)
+    uml_add_unit_test(
+        NAME runtime-release-reselects-aot
+        COMMAND uml_runtime_sequential_run_tests release-reselects-aot)
+else()
+    target_compile_definitions(uml_runtime_sequential_run_tests PRIVATE
+        UML_TEST_AOT=0)
+endif()
 
 add_executable(uml_runtime_x86_tier_tests x86_tier_tests.cpp)
 target_include_directories(uml_runtime_x86_tier_tests PRIVATE

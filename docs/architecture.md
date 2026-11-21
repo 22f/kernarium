@@ -697,7 +697,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   word beats the environment. Each run makes the choice before its first
   executor and any per-thread table exist; a restart in the same process
   decides again, and a release the blob no longer fits runs on the engine.
-  A process that ran without the component does not turn it on later. An
+  A session that ran without the component does not turn it on later, but the
+  release of its guest after Android's clean power-off ends the session, and
+  the next boot in the process decides again, for the release it states. An
   application's own word is the boot request's `android_aot_disabled`, which
   keeps the release out of the launch (Release, below): Andarium's Home switch
   sets it at each start, on by default. An

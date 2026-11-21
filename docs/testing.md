@@ -795,8 +795,12 @@ blocker in every one of them.
   on; another release ID, manifest digest or system-partition digest is off
   under `auto` and fails under `on`; a launch that states no release has no
   component and no tables; a restart in the process decides again, so a
-  release the blob no longer fits runs on the engine), each case in a process
-  of its own;
+  release the blob no longer fits runs on the engine; a session that ran
+  without the component keeps it off until it ends, and the next session, in
+  the same process, chooses afresh, for the release it states), each case in a
+  process of its own; `runtime-release-reselects-aot` (a build with the
+  component) boots the test kernel, powers it off, releases its guest, and
+  checks that the next session can take the component;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
   `aot-archive-switch` (tooling) selects the accepted artifact for each Apple

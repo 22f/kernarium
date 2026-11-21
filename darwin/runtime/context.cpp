@@ -540,6 +540,11 @@ bool select_aot(AotSelection selection, const AotRelease *release) noexcept
 	return ::uml::cpu::select_aot(selection, release);
 }
 
+void end_aot_session() noexcept
+{
+	::uml::cpu::end_aot_session();
+}
+
 bool acquire_translation_cache_run_session() noexcept
 {
 	return ::uml::cpu::acquire_translation_cache_run_session();

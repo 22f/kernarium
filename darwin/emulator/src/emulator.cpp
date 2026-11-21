@@ -565,8 +565,12 @@ public:
 		if (!process_admission.enter(runtime_))
 			return -UML_EMULATOR_RUNTIME_ERROR;
 		const int result = hand_back_guest();
-		if (result == 0)
+		if (result == 0) {
 			power_off_pending_ = false;
+			/* The session is over and none of its executors exists: the
+			 * next one chooses its ahead-of-time component afresh. */
+			::uml::runtime::end_aot_session();
+		}
 		return result;
 	}
 
