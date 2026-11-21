@@ -1509,13 +1509,16 @@ contract's frames. The service runs only while messages are in flight, behind a
 holder that keeps the port from boot, so the rows judge both: at idle the service
 has no process and the holder runs (N1, first in the mode); a request is handed
 over and answered, and a delivery asked from adb (a forward to the port) is
-refused; adbd refuses an `adb reverse` onto a vsock port, with the service
-running and with it disabled and stopped; the holder's domain and user, the
-service's domain and that it is not persistent, every denial of the path, and
-every vsock listener of the guest; neither the shell nor an application can create
+refused where adbd forwards to ports other than its own (`--adbd-vsock-forward`; neither
+image's does, and the rows are reported as not shown); adbd refuses an `adb reverse` onto a
+vsock port, with the service running and with it disabled and stopped; the holder's domain,
+user and group (judged from init's console lines, which keep its start from boot, and its
+status), the service's domain and that it is not persistent, every denial of the path, and
+every vsock process of an unreviewed domain; neither the shell nor an application can create
 a vsock socket, and the shell cannot connect to the handoff socket (N5). The record
-mode checks that no message is handed over twice across a crash, a reboot and fifty
-kills, and each restart is the next request's. `--mode proof` (a userdebug build)
+mode checks that no message is handed over twice across a crash, a clean power-off and
+restart on the same data image, and fifty kills that each end a process (`am force-stop`),
+and each restart is the next request's. `--mode proof` (a userdebug build)
 writes a pending record and traces the order of the record's writes; the variants
 without Messaging or without an SMS provider, the adbd topic and the kernel
 configuration are options of the runner (`--list-rows` names each row and what it

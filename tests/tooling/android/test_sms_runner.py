@@ -213,6 +213,15 @@ EVENTS = """\
 1731758420.100  1000  1000 I boot_progress_enable_screen: 15000
 """
 
+# What init writes to the launcher's console when it starts the holder: from boot, and kept for the whole run.
+CONSOLE = """\
+[    0.640284][    T1] init: Parsing file /system_ext/etc/init/kernarium_sms_listener.rc...
+[    6.674025][    T1] init: starting service 'kernarium_sms_listener'...
+[    6.674353][    T1] init: Created socket '/dev/socket/kernarium_sms', mode 660, user 1000, group 1000
+[    6.684367][    T1] init: ... started service 'kernarium_sms_listener' has pid 77
+"""
+STATUS = "Name:\tkernarium_sms_l\nUid:\t9999\t9999\t9999\t9999\nGid:\t9999\t9999\t9999\t9999\nGroups:\t\n"
+
 
 class ReaderTests(unittest.TestCase):
     def test_step_lines(self) -> None:
@@ -223,15 +232,40 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(runner.step_lines(LOG, "99999999" + "0" * 24), 0)
         self.assertEqual(len(runner.STEP_LINE.findall(LOG)), 4)
 
-    def test_epoch_lines_and_the_boot_order(self) -> None:
+    def test_epoch_lines(self) -> None:
         self.assertEqual([when for when, _ in runner.epoch_lines(EPOCH, "AndariumSms")], [1731758405.25, 1731758405.3])
-        # H7 keys on the holder, which starts with the boot; the service starts with the first message.
-        self.assertIsNone(runner.check_boot_order(HOLDER_EPOCH, EVENTS))
-        late = "1731758430.000   700   700 I kernarium.sms.listener: listening on vsock port 5560\n"
-        self.assertIn("after the boot finished", runner.check_boot_order(late, EVENTS))
-        self.assertIn("the holder logged no 'listening", runner.check_boot_order("", EVENTS))
-        self.assertIn("the holder logged no 'listening", runner.check_boot_order(EPOCH, EVENTS))
-        self.assertIn("no boot_progress_enable_screen", runner.check_boot_order(HOLDER_EPOCH, ""))
+
+    def test_the_holders_start_is_read_from_the_console(self) -> None:
+        """The holder's own log line ages out of the log ring; init's console lines stay for the whole run."""
+        starts = runner.holder_starts(CONSOLE)
+        self.assertEqual((starts.seconds, starts.pids, starts.socket_created), ((6.674025,), (77,), True))
+        self.assertEqual(runner.holder_boot_problems(CONSOLE, 77), [])
+        self.assertEqual(runner.holder_boot_problems(CONSOLE, None), [], "the pid is compared only when it is known")
+        self.assertIn("no init line that started the holder", runner.holder_boot_problems("", 77)[0])
+        self.assertIn("pid 78, init started pid 77", runner.holder_boot_problems(CONSOLE, 78)[0])
+        twice = CONSOLE + CONSOLE.replace("pid 77", "pid 91")
+        self.assertIn("started the holder 2 times (pids [77, 91])", runner.holder_boot_problems(twice, 91)[0])
+        self.assertIn("handoff socket with mode 660", runner.holder_boot_problems(
+            "\n".join(line for line in CONSOLE.splitlines() if "Created socket" not in line), 77)[0])
+        self.assertIn("handoff socket", runner.holder_boot_problems(CONSOLE.replace("mode 660", "mode 666"), 77)[0])
+        self.assertIn("handoff socket", runner.holder_boot_problems(CONSOLE.replace("user 1000", "user 2000"), 77)[0])
+
+    def test_the_boot_order_compares_uptimes(self) -> None:
+        # H7 keys on the holder, which init starts with the boot; the event's message is the milliseconds since boot.
+        self.assertIsNone(runner.check_boot_order(CONSOLE, EVENTS))
+        late = CONSOLE.replace("6.674025", "16.500000")
+        self.assertIn("after the boot finished at 15.000 s", runner.check_boot_order(late, EVENTS))
+        self.assertIn("no init line that started the holder", runner.check_boot_order("", EVENTS))
+        self.assertIn("no boot_progress_enable_screen", runner.check_boot_order(CONSOLE, ""))
+
+    def test_the_holders_status(self) -> None:
+        self.assertEqual(runner.holder_status_problems(STATUS), [])
+        self.assertEqual(runner.holder_status_problems(STATUS.replace("Groups:\t", "Groups:\t9999")), [])
+        self.assertIn("group ids are ['0', '0', '0', '0'], not nobody (9999)",
+                      runner.holder_status_problems(STATUS.replace("Gid:\t9999\t9999\t9999\t9999", "Gid:\t0\t0\t0\t0"))[0])
+        self.assertIn("user ids are", runner.holder_status_problems(STATUS.replace("Uid:\t9999", "Uid:\t1000", 1))[0])
+        self.assertIn("supplementary groups ['3003']", runner.holder_status_problems(STATUS.replace("Groups:\t", "Groups:\t3003"))[0])
+        self.assertIn("no Gid line", runner.holder_status_problems("Uid:\t9999\t9999\t9999\t9999\n")[0])
 
     def test_the_record_place(self) -> None:
         self.assertIsNone(runner.check_record_location(EPOCH))
@@ -417,25 +451,35 @@ class CatalogueTests(unittest.TestCase):
 
     def test_what_a_run_without_the_extras_skips(self) -> None:
         run, skipped = runner.plan_rows("channel", {"stock-adbd"})
-        self.assertEqual([row.name for row, _ in skipped], ["G2e", "G7", "H9"])
+        self.assertEqual([row.name for row, _ in skipped], ["G2b", "G2c", "G2d", "G2e", "G7", "H9"])
+        # The rows that no run of this guest can make are reported as not shown, with the reason, not as not run.
+        reasons = {row.name: reason for row, reason in skipped}
+        for name in ("G2b", "G2c", "G2d"):
+            self.assertTrue(reasons[name].startswith("NOT SHOWN"), reasons[name])
+            self.assertIn(name, [row.name for row in runner.ROWS if row.needs in runner.NOT_SHOWN_NEEDS])
+        self.assertFalse(reasons["G7"].startswith("NOT SHOWN"))
         self.assertEqual([row.name for row in run][:2], ["N1", "G1"], "N1 comes before the first request")
         self.assertIn("N5", [row.name for row in run])
         self.assertNotIn("N3", [row.name for row in run])
         self.assertIn("G9", [row.name for row in run])
         self.assertIn("H6", [row.name for row in run])
         run, skipped = runner.plan_rows("channel", {"adbd-topic", "kernel-config", "g7"})
+        self.assertEqual([row.name for row, _ in skipped], ["G2b", "G2c", "G2d", "H6"])
+        run, skipped = runner.plan_rows("channel", {"adbd-topic", "kernel-config", "g7", "vsock-forward"})
         self.assertEqual([row.name for row, _ in skipped], ["H6"])
         run, skipped = runner.plan_rows("record", set())
         self.assertEqual([row.name for row, _ in skipped], ["I7"])
         run, skipped = runner.plan_rows("proof", set())
         self.assertEqual([row.name for row in run], [])
-        self.assertEqual({row.name for row, _ in skipped}, {"I3", "I6"})
+        self.assertEqual({row.name for row, _ in skipped}, {"I3", "I6", "I9"})
         run, _ = runner.plan_rows("proof", {"proof"})
-        self.assertEqual([row.name for row in run], ["I3", "I6"])
+        self.assertEqual([row.name for row in run], ["I3", "I6", "I9"])
 
     def test_the_option_flags_make_the_rows_available(self) -> None:
         options = runner.build_parser().parse_args(["--adbd-topic", "--g7", "--variant", "no-provider"])
         self.assertEqual(runner.available_needs(options), {"adbd-topic", "g7", "no-provider"})
+        options = runner.build_parser().parse_args(["--adbd-vsock-forward"])
+        self.assertEqual(runner.available_needs(options), {"stock-adbd", "vsock-forward"})
         options = runner.build_parser().parse_args(["--mode", "proof"])
         self.assertEqual(runner.available_needs(options), {"stock-adbd", "proof"})
 
@@ -870,22 +914,26 @@ class DeliveryRowTests(unittest.TestCase):
         other = hidden.replace("Landroid/system/Os;->accept", "Landroid/app/Activity;->x")
         self.assertEqual(problems(self.LISTENING, other, "1402"), [])
 
-    HOLDER_LOG = "11-18 20:09:30.000   700   700 I kernarium.sms.listener: listening on vsock port 5560\n"
-
     def test_d3_reads_the_service_and_the_holder_without_needing_a_process(self) -> None:
         guest = self.Guest(["100"])
-        logs = {"-s kernarium.sms.listener:I": self.HOLDER_LOG}
+        logs = {"-s kernarium.sms.listener:I": ""}
+        console = [CONSOLE.replace("pid 77", "pid 100")]
         guest.service_log = lambda: self.LISTENING  # type: ignore[method-assign]
         guest.logcat = lambda *arguments: logs.get(" ".join(arguments), self.START_UP_DENIALS)  # type: ignore[method-assign]
-        self.run_row(runner.row_d3, guest)  # no process of the service: it ended at idle, and its log is the evidence
+        guest.log = SimpleNamespace(read_text=lambda errors="strict": console[0])  # type: ignore[attr-defined]
+        guest.holder_pid = lambda: 100  # type: ignore[attr-defined]
+        # No process of the service: it ended at idle, and its log is the evidence. The holder's own log line has
+        # aged out of the ring by now: init's console line is its start.
+        self.run_row(runner.row_d3, guest)
         guest.service_log = lambda: ""  # type: ignore[method-assign]
         with self.assertRaisesRegex(runner.Failure, "never logged that it serves"):
             self.run_row(runner.row_d3, guest)
         guest.service_log = lambda: self.LISTENING  # type: ignore[method-assign]
-        logs["-s kernarium.sms.listener:I"] = ""
-        with self.assertRaisesRegex(runner.Failure, "the holder never logged that it listens"):
+        console[0] = ""
+        with self.assertRaisesRegex(runner.Failure, "no init line that started the holder"):
             self.run_row(runner.row_d3, guest)
-        logs["-s kernarium.sms.listener:I"] = self.HOLDER_LOG + (
+        console[0] = CONSOLE.replace("pid 77", "pid 100")
+        logs["-s kernarium.sms.listener:I"] = (
             "11-18 20:09:31.000   700   700 E kernarium.sms.listener: cannot listen on vsock port 5560: errno 98\n")
         with self.assertRaisesRegex(runner.Failure, "the holder logged an error"):
             self.run_row(runner.row_d3, guest)
@@ -925,7 +973,12 @@ class Simulation:
         self.holder = 77
         self.holder_restarts = False    # the holder ends and init starts it again: another pid at every look
         self.holder_looks = 0
-        self.holder_log = "11-20 10:00:00.000    77    77 I kernarium.sms.listener: listening on vsock port 5560\n"
+        self.holder_log = ""            # the holder logs its listening once, early: the ring does not keep it
+        self.console = CONSOLE          # init's lines from boot, which the launcher's console keeps
+        self.holder_status = STATUS
+        self.su = False                 # a user build has no su
+        self.killed = 0
+        self.kill_succeeds = True
         self.starts = 0
         self.rows: list[tuple[int, str, str]] = []
         self.step_log: list[str] = []
@@ -970,6 +1023,24 @@ class SimulatedGuest:
     def pid(self) -> int | None:
         return self.sim.session()
 
+    @property
+    def log(self) -> SimpleNamespace:
+        return SimpleNamespace(read_text=lambda errors="strict": self.sim.console)
+
+    def has_su(self) -> bool:
+        return self.sim.su
+
+    def su(self, command: str, timeout: float = 0, check: bool = True) -> str:
+        return self.shell(command, timeout, check)
+
+    def kill_service(self) -> bool:
+        """am force-stop: the process ends at once."""
+        self.sim.commands.append(f"am force-stop {runner.PACKAGE}")
+        self.sim.killed += 1
+        if self.sim.kill_succeeds:
+            self.sim.pid = None
+        return self.sim.kill_succeeds
+
     def holder_pid(self) -> int | None:
         self.sim.holder_looks += 1
         if self.sim.holder is not None and self.sim.holder_restarts:
@@ -1004,6 +1075,8 @@ class SimulatedGuest:
         if command.startswith("dumpsys power"):
             return (f"  mWakefulness={'Asleep' if self.sim.screen_off else 'Awake'}\n"
                     f"Wake Locks: size={len(self.sim.wake_locks.splitlines())}\n{self.sim.wake_locks}")
+        if command.startswith("cat /proc/") and command.endswith("/status"):
+            return self.sim.holder_status
         if command.startswith("ps -A -Z"):
             listing = PS_AT_IDLE if self.sim.holder else PS_AT_IDLE.replace("kernarium_sms_listener:s0", "system_app:s0")
             return listing + (SERVICE_PS_LINE.format(pid=self.sim.session()) if self.sim.session() else "")
@@ -1038,15 +1111,50 @@ class SimulatedHost:
         return runner.Answer(self.sim.answer_kind, fields[2], "1")
 
 
+class RecordingHost(SimulatedHost):
+    """A host whose service keeps a record: a first message is handed over once, and its retry, and a first message
+    sent again, are answered as handed over earlier, as the record does across a process that ended."""
+
+    def __init__(self, simulation: Simulation) -> None:
+        super().__init__(simulation)
+        self.known: set[str] = set()
+
+    def reply(self, payload: bytes) -> tuple[str, str, str]:
+        fields = payload.decode().split(".")
+        if fields[1] == "ping":
+            return "refused-version", "", ""
+        identifier = fields[2]
+        if identifier in self.known:
+            return "handed-over-earlier", identifier, "1"
+        if fields[1] == "retry":
+            return "uncertain", identifier, "unknown"
+        self.known.add(identifier)
+        sender, text = base64.b64decode(fields[3]).decode(), base64.b64decode(fields[4]).decode()
+        self.sim.step_log.append(f"11-18 20:09:43.609  1402  1480 I AndariumSms: step 1 of {identifier[:8]}\n")
+        self.sim.rows.append((len(self.sim.rows) + 1, sender, text))
+        return "handed-over", identifier, "1"
+
+    def exchange(self, payload: bytes, seconds: float = 0) -> object:
+        self.sim.touch()
+        kind, identifier, detail = self.reply(payload)
+        data = runner.answer_bytes(kind) if kind == "refused-version" else runner.answer_bytes(kind, identifier, detail)
+        return runner.Exchange("answered", data)
+
+    def answer(self, payload: bytes, seconds: float = 0) -> object:
+        self.sim.touch()
+        kind, identifier, detail = self.reply(payload)
+        return runner.Answer(kind, identifier, detail)
+
+
 class OnDemandTests(unittest.TestCase):
     """What the service's on-demand life adds: the readers of its process, its socket and its wake locks, and the
     rows N1 to N6, G2e, G4 and G5 over a simulated guest."""
 
-    def run_row(self, row, simulation: Simulation, **options: object) -> "runner.Run":
+    def run_row(self, row, simulation: Simulation, host: type = SimulatedHost, **options: object) -> "runner.Run":
         guest = SimulatedGuest(simulation)
         run = runner.Run(SimpleNamespace(variant="messaging", vsockprobe_dex=Path("/x/vsockprobe.dex"), **options),
                          guest, {})
-        run.host = SimulatedHost(simulation)
+        run.host = host(simulation)
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
             stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
@@ -1128,10 +1236,16 @@ class OnDemandTests(unittest.TestCase):
 
     def test_n1_wants_a_holder_that_stays_up_and_logs_no_error(self) -> None:
         """The holder that ends at once and is started again by init shows as a process most of the time (the first
-        image of this change did, on a handoff socket it never listened on), so N1 looks twice, and reads its log."""
+        image of this change did, on a handoff socket it never listened on), so N1 looks twice, reads init's console
+        lines for its starts, and reads its log for errors. The holder does not repeat its listening line: the
+        console's start line is the evidence that remains."""
         simulation = Simulation()
         simulation.holder_restarts = True
         with self.assertRaisesRegex(runner.Failure, r"pid 78 after \d+ s, was 77: it ends and init starts it again"):
+            self.run_row(runner.row_n1, simulation)
+        simulation = Simulation()
+        simulation.console += CONSOLE.replace("pid 77", "pid 91").replace("6.67", "9.67")
+        with self.assertRaisesRegex(runner.Failure, r"init started the holder 2 times \(pids \[77, 91\]\)"):
             self.run_row(runner.row_n1, simulation)
         simulation = Simulation()
         simulation.holder_log += ("11-20 10:00:01.000    77    77 E kernarium.sms.listener: "
@@ -1139,9 +1253,13 @@ class OnDemandTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Failure, "the holder logged an error: 'the handoff socket failed"):
             self.run_row(runner.row_n1, simulation)
         simulation = Simulation()
-        simulation.holder_log = ""
-        with self.assertRaisesRegex(runner.Failure, "never logged that it listens on the vsock port"):
+        simulation.console = ""
+        with self.assertRaisesRegex(runner.Failure, "no init line that started the holder"):
             self.run_row(runner.row_n1, simulation)
+        # No log line of the holder at all, which is what a ring that has rotated shows: not a failure.
+        simulation = Simulation()
+        simulation.holder_log = ""
+        self.run_row(runner.row_n1, simulation)
 
     def test_n2_a_first_message_at_idle(self) -> None:
         simulation = Simulation()
@@ -1201,20 +1319,44 @@ class OnDemandTests(unittest.TestCase):
             self.run_row(runner.row_n4, refusing)
 
     def test_n5_the_shell_cannot_reach_the_handoff(self) -> None:
+        """Where there is su the file's mode, owner and label are read; on a user build the shell cannot stat
+        /dev/socket, so init's console line is the evidence and the connect probe is the rest. The probe runs
+        whatever the first half found."""
         listing = ("srw-rw---- 1 system system u:object_r:kernarium_sms_socket:s0 0 2026-11-20 10:00 "
                    "/dev/socket/kernarium_sms\n")
         simulation = Simulation()
-        simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n", "ls -lZ": listing}
-        self.run_row(runner.row_n5, simulation)
+        simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n"}
+        run = self.run_row(runner.row_n5, simulation)
         self.assertEqual(simulation.starts, 0)
         self.assertTrue(any("VsockProbe unix /dev/socket/kernarium_sms" in command for command in simulation.commands))
+        self.assertFalse(any("ls -lZ" in command for command in simulation.commands), "a user build cannot stat it")
+        self.assertTrue(any("no su" in note for note in run.notes), run.notes)
         for output, problem in (("connect: ok\n", "connected to"), ("connect: errno=2 ENOENT\n", "errno=2"),
                                 ("socket: errno=13 EACCES\n", "older vsockprobe.dex")):
             simulation = Simulation()
-            simulation.property_output = {"VsockProbe unix": output, "ls -lZ": listing}
+            simulation.property_output = {"VsockProbe unix": output}
             with self.assertRaisesRegex(runner.Failure, problem):
                 self.run_row(runner.row_n5, simulation)
+        # The console line is missing: that is reported, and the probe ran all the same.
         simulation = Simulation()
+        simulation.console = CONSOLE.replace("mode 660", "mode 666")
+        simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n"}
+        with self.assertRaisesRegex(runner.Failure, "handoff socket with mode 660"):
+            self.run_row(runner.row_n5, simulation)
+        self.assertTrue(any("VsockProbe unix" in command for command in simulation.commands))
+        simulation = Simulation()
+        simulation.console = ""
+        simulation.property_output = {"VsockProbe unix": "connect: ok\n"}
+        with self.assertRaisesRegex(runner.Failure, "handoff socket with mode 660.*connected to"):
+            self.run_row(runner.row_n5, simulation)
+        # With su, the listing is read as before, and the probe still runs when it is wrong.
+        simulation = Simulation()
+        simulation.su = True
+        simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n", "ls -lZ": listing}
+        self.run_row(runner.row_n5, simulation)
+        self.assertTrue(any("ls -lZ" in command for command in simulation.commands))
+        simulation = Simulation()
+        simulation.su = True
         simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n",
                                       "ls -lZ": listing.replace("srw-rw----", "srw-rw-rw-")}
         with self.assertRaisesRegex(runner.Failure, "the handoff socket"):
@@ -1348,6 +1490,189 @@ class OnDemandTests(unittest.TestCase):
         nobody.holder = None  # type: ignore[assignment]
         with self.assertRaisesRegex(runner.Failure, "kernarium_sms_listener"):
             go(nobody)
+        # The holder's group: init leaves it at root when the rc names none.
+        root = Simulation()
+        root.step_log = list(simulation.step_log)
+        root.holder_status = STATUS.replace("Gid:\t9999\t9999\t9999\t9999", "Gid:\t0\t0\t0\t0")
+        with self.assertRaisesRegex(runner.Failure, "group ids are"):
+            go(root)
+
+    def test_g4_runs_every_check_and_reports_every_problem(self) -> None:
+        """The service's checks no longer wait behind the holder's: a holder with no console line AND a persistent
+        service are both reported, and the checks after the failed one ran."""
+        class Guest4(SimulatedGuest):
+            def logcat(self, *arguments: str) -> str:
+                joined = " ".join(arguments)
+                if "boot_progress_enable_screen" in joined:
+                    return EVENTS
+                if "-s AndariumSms:I" in joined:
+                    return EPOCH
+                return ""
+
+            def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+                if command.startswith("dumpsys activity processes"):
+                    return "  *PERS* UID 1000 ProcessRecord{x}\n"
+                if command.startswith("dumpsys package"):
+                    return "    flags=[ SYSTEM HAS_CODE ]\n"
+                return super().shell(command, timeout, check)
+
+        simulation = Simulation()
+        simulation.console = ""
+        simulation.step_log.append("11-16 12:00:01.001  1000  1200 I AndariumSms: step 1 of 00112233\n")
+        guest = Guest4(simulation)
+        run = runner.Run(SimpleNamespace(variant="messaging", vsockprobe_dex=Path("/x")), guest, {})
+        run.host = SimulatedHost(simulation)
+        run.vectors = {"request-first-number": "x"}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+            stack.enter_context(mock.patch.object(runner, "golden_request", lambda vectors, name: SimpleNamespace(
+                identifier="00112233" + "0" * 24)))
+            with self.assertRaises(runner.Failure) as caught:
+                runner.row_g4(run)
+        message = str(caught.exception)
+        self.assertIn("no init line that started the holder", message)
+        self.assertIn("persistent", message, "the service's checks ran after the holder's failed")
+        self.assertIn("the launcher's console has no init line", message)
+
+    # ---- I4, I2, I9, G6 and the rows that this guest cannot show
+
+    def test_i4_counts_only_rounds_that_ended_a_process(self) -> None:
+        """Each round starts from a process that a ping started, ends it with am force-stop, and the next request is
+        answered by another pid. A kill that did nothing is a failure, and so is a service with no process to end."""
+        simulation = Simulation()
+        with mock.patch.object(runner, "KILL_ROUNDS", 6):
+            run = self.run_row(runner.row_i4, simulation, RecordingHost)
+        self.assertEqual(simulation.killed, 6, "a kill in every round")
+        self.assertTrue(all(command.startswith("am force-stop") for command in simulation.commands
+                            if "force-stop" in command or "crash" in command), "no crash: it leaves the process serving")
+        self.assertFalse(any("am crash" in command for command in simulation.commands))
+        self.assertTrue(any("6 rounds, each of which ended a process" in note for note in run.notes), run.notes)
+        # A kill that does not end the process (the command succeeds and nothing dies, as with a crash dialog) is not
+        # a round: the next request is answered by the same pid, which the row does not accept.
+        survives = Simulation()
+        original = SimulatedGuest.kill_service
+
+        def spared(self: SimulatedGuest) -> bool:
+            original(self)
+            self.sim.pid = self.sim.pid or self.sim.counter  # still the same process
+            return True
+
+        with mock.patch.object(SimulatedGuest, "kill_service", spared), mock.patch.object(runner, "KILL_ROUNDS", 3):
+            with self.assertRaisesRegex(runner.Failure, "the service restarting: the pid is"):
+                self.run_row(runner.row_i4, survives, RecordingHost)
+        failing = Simulation()
+        failing.kill_succeeds = False
+        with mock.patch.object(runner, "KILL_ROUNDS", 3):
+            with self.assertRaisesRegex(runner.Failure, "'am force-stop android.kernarium.sms' did not succeed"):
+                self.run_row(runner.row_i4, failing, RecordingHost)
+        # A round whose ping leaves no process (the service answered from none) has nothing to end.
+        class NoProcess(SimulatedGuest):
+            def pid(self) -> int | None:
+                return None
+
+        simulation = Simulation()
+        guest = NoProcess(simulation)
+        run = runner.Run(SimpleNamespace(variant="messaging"), guest, {})
+        run.host = RecordingHost(simulation)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+            with self.assertRaisesRegex(runner.Failure, "round 0: no process of android.kernarium.sms after the service "
+                                                        "answered"):
+                runner.row_i4(run)
+
+    def test_i2_restarts_the_instance_cleanly_and_judges_every_part(self) -> None:
+        """A clean power-off and a new launcher on the same data image: the console's line of the holder, no process at
+        idle, the retry and a new message answered, and the process gone after the window."""
+        simulation = Simulation()
+
+        def restart(run: "runner.Run") -> None:
+            simulation.commands.append("restart the instance")
+            simulation.pid = None  # the new boot has no service process, and its log has no line of the old session
+            simulation.step_log.clear()
+
+        with mock.patch.object(runner, "restart_instance", restart):
+            self.run_row(runner.row_i2, simulation, RecordingHost)
+        self.assertIn("restart the instance", simulation.commands)
+        self.assertEqual(simulation.starts, 2, "the first message, and the session that the retry starts")
+        # A record that did not survive the restart answers the retry as uncertain, which is reported (and the new
+        # message is still judged): the finding of the second boot of the first guest series.
+        class Forgetful(RecordingHost):
+            def reply(self, payload: bytes) -> tuple[str, str, str]:
+                if payload.decode().split(".")[1] == "retry":
+                    return "unsettled", payload.decode().split(".")[2], "store"
+                return super().reply(payload)
+
+        forgetful = Simulation()
+        with mock.patch.object(runner, "restart_instance", lambda run: forgetful.step_log.clear()):
+            with self.assertRaisesRegex(runner.Failure, "the retry after the restart was answered .*unsettled"):
+                self.run_row(runner.row_i2, forgetful, Forgetful)
+        # The holder's start is judged on the new console.
+        nothing = Simulation()
+
+        def restart_without_a_console_line(run: "runner.Run") -> None:
+            nothing.console = ""
+            nothing.step_log.clear()
+
+        with mock.patch.object(runner, "restart_instance", restart_without_a_console_line):
+            with self.assertRaisesRegex(runner.Failure, "no init line that started the holder"):
+                self.run_row(runner.row_i2, nothing, RecordingHost)
+
+    def test_i9_ends_the_holder_and_wants_the_port_back(self) -> None:
+        simulation = Simulation()
+        simulation.su = True
+
+        class Killing(SimulatedGuest):
+            def su(self, command: str, timeout: float = 0, check: bool = True) -> str:
+                self.sim.commands.append(command)
+                if command.startswith("kill -9"):
+                    self.sim.holder += 40
+                    self.sim.console += CONSOLE.replace("pid 77", f"pid {self.sim.holder}").replace("6.67", "90.67")
+                return ""
+
+        guest = Killing(simulation)
+        run = runner.Run(SimpleNamespace(variant="messaging", vsockprobe_dex=Path("/x")), guest, {})
+        run.host = SimulatedHost(simulation)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+            stack.enter_context(mock.patch.object(runner.os, "urandom", side_effect=self.unique_bytes))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            runner.row_i9(run)
+        self.assertIn("kill -9 77", simulation.commands)
+        self.assertTrue(simulation.rows, "a message after the holder's restart was handed over")
+        # Init that does not start it again (the pid does not change) fails, with the wait bounded.
+        dead = Simulation()
+        dead.su = True
+        guest = SimulatedGuest(dead)
+        run = runner.Run(SimpleNamespace(variant="messaging", vsockprobe_dex=Path("/x")), guest, {})
+        run.host = SimulatedHost(dead)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", dead.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", dead.clock.sleep))
+            with self.assertRaisesRegex(runner.Failure, "the holder started again: it has no new process"):
+                runner.row_i9(run)
+
+    def test_g6_names_the_sweep_it_does_not_make(self) -> None:
+        simulation = Simulation()
+        simulation.property_output = {"test -x /apex/com.android.virt/bin/vm": "", "pidof crosvm": "",
+                                      "pm list packages": ""}
+
+        class Guest6(SimulatedGuest):
+            def probe_call(self, call: str, seconds: float = 0) -> str:
+                return "vm: refused"
+
+        guest = Guest6(simulation)
+        run = runner.Run(SimpleNamespace(variant="messaging", adbd_vsock_forward=False), guest, {})
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(mock.patch.object(runner, "open_vsock_through_adbd",
+                                                  side_effect=AssertionError("the sweep ran")))
+            runner.row_g6(run)
+        self.assertTrue(any("port sweep is not shown" in note for note in run.notes), run.notes)
 
     def test_g5_reports_the_session_and_the_holder(self) -> None:
         simulation = Simulation()
