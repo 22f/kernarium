@@ -396,7 +396,7 @@ nonisolated struct AdbGuestOperations: Sendable {
             try session.run { connection in
                 session.watchdog.arm(idle: .seconds(15), overall: .seconds(30))
                 let stream = try connection.open(PackageInstallCommand.abandonSession(id))
-                _ = try stream.readToEnd(limit: 64 * 1024)
+                _ = try stream.readToEnd(limit: PackageInstallCommand.replyBudgetBytes)
             }
         }
     }

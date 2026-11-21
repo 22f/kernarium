@@ -95,7 +95,8 @@ nonisolated enum ApkInstallOperation {
                 throw AdbFailure(message: shortage.message(device: device))
             }
             let stream = try connection.open(
-                PackageInstallCommand.service(size: size, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock))
+                PackageInstallCommand.service(size: size, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock),
+                outputLimit: PackageInstallCommand.replyBudgetBytes)
             var sent = 0
             do {
                 while sent < size {
@@ -114,7 +115,7 @@ nonisolated enum ApkInstallOperation {
                 progress: sendingShare, detail: String(localized: "The virtual machine is installing the app\u{2026}"),
                 cancellable: false))
             watchdog.arm(idle: nil, overall: commitLimit)
-            let text = String(decoding: try stream.readToEnd(limit: 64 * 1024), as: UTF8.self)
+            let text = String(decoding: try stream.readToEnd(limit: PackageInstallCommand.replyBudgetBytes), as: UTF8.self)
             // The one refusal that is asked about, when the flag was not sent:
             // Settings decides what follows (`LegacyInstallFlow`). With the
             // flag it is an ordinary failure.
