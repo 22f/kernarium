@@ -21,12 +21,16 @@ driver filled every handle it was offered and has more to give.
 VkPipelineBinaryKHR joins the object handle union and the recognized object
 types, and the device teardown path destroys any binary the guest left behind.
 
-vkGetPipelineKeyKHR refuses a request whose VkPipelineCreateInfoKHR carries no
-chain. The driver reads that chain for the pipeline it is asked to key and
-does not check it first, and the specification gives the command no form that
-names no pipeline, so an empty request is one no renderer may forward. The
-protocol now carries the chain, so this guards against a guest that sends
-something the specification forbids rather than against the transport.
+vkGetPipelineKeyKHR forwards a request with no create info, the key of the
+device itself, and refuses a create info whose chain does not begin with a
+graphics, compute or ray tracing pipeline's. The driver reads the first
+structure of that chain as the create info of one of those pipelines without
+checking its type, so a request that arrives with another structure first, or
+with none, would have it read the fields of one structure as another's, past
+the end of what the codec decoded. The refused request is answered with
+VK_ERROR_VALIDATION_FAILED, and its reply carries a zeroed key: the codec
+decodes only the type and chain of the key, so its size and bytes would
+otherwise be whatever the decoder's temp pool held last.
 
 vkGetPipelineBinaryDataKHR drops the blob from a reply whose data size grew
 across the call. Every other command that returns a blob beside an in-out size
@@ -40,15 +44,44 @@ aborts the process. A reply that carries no blob is what the specification
 describes and what the existing codec already reads, so the guest learns the
 size it needs and its buffer is left alone.
 
+vkCreatePipelineBinariesKHR refuses an import whose keys claim a size other
+than a key's. The codec decodes keySize as a plain field beside a key array
+that always holds VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR bytes, so the field says
+nothing about how many key bytes arrived, and a driver that reads keySize
+bytes reads past the decoded key. The driver refuses the same sizes itself;
+the renderer does not rely on that, and refuses the whole call before
+forwarding it, with VK_ERROR_VALIDATION_FAILED, so no object is made for any
+of its binaries. The driver keeps the binaries it made before a failure and
+returns the first failure it met; a result the renderer does not publish
+destroys them, since no object names them. VK_PIPELINE_BINARY_MISSING_KHR is a
+success code of the command and is published like VK_INCOMPLETE: the entries
+the driver could not make are returned as VK_NULL_HANDLE, so the guest does not
+keep an id for a binary that does not exist.
+
+The commands that take a handle also refuse what would reach the driver as a
+null pointer. The codec's lookup yields NULL for object id 0 and leaves the
+refusal to the handler; an id the context never made, or made and destroyed,
+is refused by the lookup itself. So vkGetPipelineBinaryDataKHR and
+vkReleaseCapturedPipelineDataKHR end the context when the binary or the
+pipeline they read is null, and so do vkCreateGraphicsPipelines,
+vkCreateComputePipelines and vkCreateRayTracingPipelinesKHR when a
+VkPipelineBinaryInfoKHR they chain names a null binary.
+vkDestroyPipelineBinaryKHR still takes a null handle as the no-op the
+command defines. vkCreatePipelineBinariesKHR answers
+VK_ERROR_VALIDATION_FAILED to a request that names none of the keys and data
+to import, a pipeline and a pipeline create info, because the driver would
+read the import the request does not have.
+
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  src/venus/vkr_common.c   |   1 +
  src/venus/vkr_common.h   |   3 +
  src/venus/vkr_context.c  |   1 +
  src/venus/vkr_device.c   |   3 +
- src/venus/vkr_pipeline.c | 173 +++++++++++++++++++++++++++++++++++++++
- src/venus/vkr_pipeline.h |  10 +++
- 6 files changed, 191 insertions(+)
+ src/venus/vkr_pipeline.c | 318 +++++++++++++++++++++++++++++++++++++++
+ src/venus/vkr_pipeline.h |  10 ++
+ 6 files changed, 336 insertions(+)
 
 diff --git a/src/venus/vkr_common.c b/src/venus/vkr_common.c
 index fc526b6f2877fb983f5cc5d64105ef7138c5671c..7a4436330a70f4c42ca08b39f46e72912e8f1132 100644
@@ -110,13 +143,109 @@ index 0711db10d5a38eca6a049a654a5c86b7861cad40..9343e4d77c5433eff6aeca41c135622b
           vkr_log("Unhandled vkr_object(%p) with VkObjectType(%u)", obj,
                   (uint32_t)obj->type);
 diff --git a/src/venus/vkr_pipeline.c b/src/venus/vkr_pipeline.c
-index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909c82cea5a 100644
+index d0d6f8364bf6c109bc31e5d01940853ce42669cc..514a39fa8f1a0b34edaae7f504404b79d05f0e87 100644
 --- a/src/venus/vkr_pipeline.c
 +++ b/src/venus/vkr_pipeline.c
-@@ -199,6 +199,163 @@ vkr_dispatch_vkGetRayTracingShaderGroupStackSizeKHR(
+@@ -105,6 +105,32 @@ vkr_dispatch_vkMergePipelineCaches(UNUSED struct vn_dispatch_context *dispatch,
+                                        args->pSrcCaches);
+ }
+ 
++/* A pipeline is created from binaries when its create info chains a
++ * VkPipelineBinaryInfoKHR, and the driver reads every binary it names.  The
++ * codec looks each handle up and yields NULL for object id 0, which no
++ * pipeline-binary object has, leaving the refusal to the handler (an id the
++ * context never made is refused by the lookup itself).  A null binary is
++ * therefore a null pointer the driver would dereference.  The handles still
++ * hold the objects here; they are replaced by the driver's handles only when
++ * the call is forwarded. */
++static bool
++vkr_pipeline_binary_infos_hold_binaries(const void *pnext)
++{
++   for (const VkBaseInStructure *chain = pnext; chain; chain = chain->pNext) {
++      if (chain->sType != VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR)
++         continue;
++
++      const VkPipelineBinaryInfoKHR *info = (const VkPipelineBinaryInfoKHR *)chain;
++      if (info->binaryCount && !info->pPipelineBinaries)
++         return false;
++      for (uint32_t i = 0; i < info->binaryCount; i++) {
++         if (!info->pPipelineBinaries[i])
++            return false;
++      }
++   }
++   return true;
++}
++
+ static void
+ vkr_dispatch_vkCreateGraphicsPipelines(struct vn_dispatch_context *dispatch,
+                                        struct vn_command_vkCreateGraphicsPipelines *args)
+@@ -114,6 +140,13 @@ vkr_dispatch_vkCreateGraphicsPipelines(struct vn_dispatch_context *dispatch,
+    struct vkr_device *dev = vkr_device_from_handle(args->device);
+    struct object_array arr;
+ 
++   for (uint32_t i = 0; i < args->createInfoCount; i++) {
++      if (!vkr_pipeline_binary_infos_hold_binaries(args->pCreateInfos[i].pNext)) {
++         vkr_context_set_fatal(ctx);
++         return;
++      }
++   }
++
+    if (!vkr_graphics_pipeline_create_array(ctx, args, &arr))
+       return;
+ 
+@@ -129,6 +162,13 @@ vkr_dispatch_vkCreateComputePipelines(struct vn_dispatch_context *dispatch,
+    struct vkr_device *dev = vkr_device_from_handle(args->device);
+    struct object_array arr;
+ 
++   for (uint32_t i = 0; i < args->createInfoCount; i++) {
++      if (!vkr_pipeline_binary_infos_hold_binaries(args->pCreateInfos[i].pNext)) {
++         vkr_context_set_fatal(ctx);
++         return;
++      }
++   }
++
+    if (!vkr_compute_pipeline_create_array(ctx, args, &arr))
+       return;
+ 
+@@ -152,6 +192,13 @@ vkr_dispatch_vkCreateRayTracingPipelinesKHR(
+    struct vkr_device *dev = vkr_device_from_handle(args->device);
+    struct object_array arr;
+ 
++   for (uint32_t i = 0; i < args->createInfoCount; i++) {
++      if (!vkr_pipeline_binary_infos_hold_binaries(args->pCreateInfos[i].pNext)) {
++         vkr_context_set_fatal(ctx);
++         return;
++      }
++   }
++
+    if (!vkr_ray_tracing_pipeline_create_array(ctx, args, &arr))
+       return;
+ 
+@@ -199,6 +246,261 @@ vkr_dispatch_vkGetRayTracingShaderGroupStackSizeKHR(
                                                          args->group, args->groupShader);
  }
  
++/* A key says how much of key[] is valid in keySize, and the codec decodes that
++ * field as a plain number beside a key array of exactly
++ * VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR bytes: whatever keySize the guest wrote,
++ * only that many key bytes arrive.  The registry marks keySize
++ * noautovalidity, so nothing else bounds it, and a driver that trusts it
++ * reads, and may copy, bytes past the end of the decoded key.
++ *
++ * The driver this renderer serves names a binary by one 32-byte hash, which
++ * fills the whole key array, so it refuses every other size itself.  Refuse it
++ * here as well, before the call is forwarded, so that the renderer never hands
++ * a driver a key that claims more bytes than it decoded. */
++static bool
++vkr_pipeline_binary_keys_are_sized(const VkPipelineBinaryKeysAndDataKHR *import)
++{
++   for (uint32_t i = 0; i < import->binaryCount; i++) {
++      if (import->pPipelineBinaryKeys[i].keySize != VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR)
++         return false;
++   }
++   return true;
++}
++
 +static void
 +vkr_dispatch_vkCreatePipelineBinariesKHR(
 +   struct vn_dispatch_context *dispatch,
@@ -127,6 +256,31 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
 +   struct vkr_device *dev = vkr_device_from_handle(args->device);
 +   struct vn_device_proc_table *vk = &dev->proc_table;
 +   struct object_array arr;
++
++   /* VK_ERROR_VALIDATION_FAILED is the result a command gives when the
++    * implementation detects invalid usage, and the driver gives the same one
++    * for a key it refuses.  The whole call is refused: no object is made for
++    * any of its binaries.
++    *
++    * The binaries come from the keys and data to import, from a pipeline, or
++    * from a pipeline create info, and a request that names none of them has
++    * nothing to read: the driver would dereference the import it does not
++    * have. */
++   if (!args->pCreateInfo->pKeysAndDataInfo && !args->pCreateInfo->pipeline &&
++       !args->pCreateInfo->pPipelineCreateInfo) {
++      vkr_log("vkCreatePipelineBinariesKHR: the request names no source for its "
++              "binaries");
++      args->ret = VK_ERROR_VALIDATION_FAILED;
++      return;
++   }
++
++   if (args->pCreateInfo->pKeysAndDataInfo &&
++       !vkr_pipeline_binary_keys_are_sized(args->pCreateInfo->pKeysAndDataInfo)) {
++      vkr_log("vkCreatePipelineBinariesKHR: a key is not %u bytes",
++              VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR);
++      args->ret = VK_ERROR_VALIDATION_FAILED;
++      return;
++   }
 +
 +   /* The count is an in-out parameter, and the driver asks how many binaries
 +    * a pipeline has before it names any, so a query carries no handles and
@@ -147,13 +301,31 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
 +      return;
 +   }
 +
++   /* The driver writes the handles of the binaries it makes and none of the
++    * others, so the array is cleared first: a handle that is still null names
++    * no binary. */
++   VkPipelineBinaryKHR *natives = arr.handle_storage;
++   memset(natives, 0, sizeof(*natives) * count);
++
 +   VkPipelineBinaryHandlesInfoKHR handles = *args->pBinaries;
-+   handles.pPipelineBinaries = arr.handle_storage;
++   handles.pPipelineBinaries = natives;
 +
 +   vn_replace_vkCreatePipelineBinariesKHR_args_handle(args);
 +   args->ret =
 +      vk->CreatePipelineBinariesKHR(args->device, args->pCreateInfo, NULL, &handles);
-+   if (args->ret != VK_SUCCESS && args->ret != VK_INCOMPLETE) {
++
++   /* The driver keeps the binaries it made before a failure and returns the
++    * first failure it met, so a result that is not published leaves binaries
++    * the renderer owns and no object names.  VK_PIPELINE_BINARY_MISSING_KHR is a
++    * success code of this command: it says the entries the driver could not
++    * make are null, as it does the entries a smaller count leaves, and the
++    * guest keeps the ids of the binaries that were made. */
++   if (args->ret != VK_SUCCESS && args->ret != VK_INCOMPLETE &&
++       args->ret != VK_PIPELINE_BINARY_MISSING_KHR) {
++      for (uint32_t i = 0; i < count; i++) {
++         if (natives[i] != VK_NULL_HANDLE)
++            vk->DestroyPipelineBinaryKHR(args->device, natives[i], NULL);
++      }
 +      object_array_fini(&arr);
 +      return;
 +   }
@@ -210,19 +382,35 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
 +   struct vkr_device *dev = vkr_device_from_handle(args->device);
 +   struct vn_device_proc_table *vk = &dev->proc_table;
 +
-+   /* A pipeline key is derived from the pipeline create info the caller
-+    * chains onto VkPipelineCreateInfoKHR, and the driver reads that chain
-+    * without checking it.  The protocol carries the chain, so a request that
-+    * still arrives empty is one the driver cannot be handed.  Only a key for
-+    * the device itself names no pipeline, and the specification does not give
-+    * this command such a form.  VK_ERROR_UNKNOWN, not one of the
-+    * out-of-memory codes the command otherwise returns: an out-of-memory
-+    * result tells a caller that retrying may work and makes a test suite
-+    * abandon its whole run, while this request can never be served. */
-+   if (args->pPipelineCreateInfo == NULL ||
-+       args->pPipelineCreateInfo->pNext == NULL) {
-+      args->ret = VK_ERROR_UNKNOWN;
-+      return;
++   /* The key is an out parameter: the codec decodes only its type and chain, so
++    * its size and bytes are whatever the decoder's temp pool held last, and a
++    * reply the driver does not fill would hand them back to the guest.  The
++    * pointer is not optional, so the codec ends the context when the guest
++    * sends none. */
++   args->pPipelineKey->keySize = 0;
++   memset(args->pPipelineKey->key, 0, sizeof(args->pPipelineKey->key));
++
++   /* No create info is the key of the device itself, which the driver serves.
++    * A key for a pipeline is derived from the pipeline create info the caller
++    * chains onto VkPipelineCreateInfoKHR, and the driver reads the first
++    * structure of that chain as the create info of a graphics, compute or ray
++    * tracing pipeline without checking its type.  The protocol carries the
++    * chain, so a request whose first structure is anything else, or that
++    * arrives with none, is one the driver cannot be handed: it would read the
++    * fields of another structure as a pipeline's, past the end of what was
++    * decoded.  The whole call is refused, as are the other requests of this
++    * extension that the implementation finds invalid. */
++   if (args->pPipelineCreateInfo) {
++      const VkBaseInStructure *first = args->pPipelineCreateInfo->pNext;
++      if (!first ||
++          (first->sType != VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &&
++           first->sType != VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO &&
++           first->sType != VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR)) {
++         vkr_log("vkGetPipelineKeyKHR: the create info does not begin with a "
++                 "graphics, compute or ray tracing pipeline's");
++         args->ret = VK_ERROR_VALIDATION_FAILED;
++         return;
++      }
 +   }
 +
 +   vn_replace_vkGetPipelineKeyKHR_args_handle(args);
@@ -232,12 +420,22 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
 +
 +static void
 +vkr_dispatch_vkGetPipelineBinaryDataKHR(
-+   UNUSED struct vn_dispatch_context *dispatch,
++   struct vn_dispatch_context *dispatch,
 +   struct vn_command_vkGetPipelineBinaryDataKHR *args)
 +{
 +   TRACE_FUNC();
++   struct vkr_context *ctx = dispatch->data;
 +   struct vkr_device *dev = vkr_device_from_handle(args->device);
 +   struct vn_device_proc_table *vk = &dev->proc_table;
++
++   /* The binary is not optional.  The codec yields NULL for object id 0 and
++    * leaves the refusal to the handler (an id the context never made is
++    * refused by the lookup itself), and the driver reads the binary it is
++    * given. */
++   if (!args->pInfo || !args->pInfo->pipelineBinary) {
++      vkr_context_set_fatal(ctx);
++      return;
++   }
 +
 +   /* The data size is in-out, and this is the one command whose out value can
 +    * exceed the in value: a buffer smaller than the binary is answered with
@@ -264,11 +462,19 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
 +
 +static void
 +vkr_dispatch_vkReleaseCapturedPipelineDataKHR(
-+   UNUSED struct vn_dispatch_context *dispatch,
++   struct vn_dispatch_context *dispatch,
 +   struct vn_command_vkReleaseCapturedPipelineDataKHR *args)
 +{
++   struct vkr_context *ctx = dispatch->data;
 +   struct vkr_device *dev = vkr_device_from_handle(args->device);
 +   struct vn_device_proc_table *vk = &dev->proc_table;
++
++   /* The pipeline is not optional, and the codec yields NULL for object id 0
++    * as it does for the binary above. */
++   if (!args->pInfo || !args->pInfo->pipeline) {
++      vkr_context_set_fatal(ctx);
++      return;
++   }
 +
 +   vn_replace_vkReleaseCapturedPipelineDataKHR_args_handle(args);
 +   args->ret = vk->ReleaseCapturedPipelineDataKHR(args->device, args->pInfo, NULL);
@@ -277,7 +483,7 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
  void
  vkr_context_init_shader_module_dispatch(struct vkr_context *ctx)
  {
-@@ -247,3 +404,19 @@ vkr_context_init_pipeline_dispatch(struct vkr_context *ctx)
+@@ -247,3 +549,19 @@ vkr_context_init_pipeline_dispatch(struct vkr_context *ctx)
     dispatch->dispatch_vkGetRayTracingShaderGroupStackSizeKHR =
        vkr_dispatch_vkGetRayTracingShaderGroupStackSizeKHR;
  }
