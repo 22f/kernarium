@@ -255,6 +255,64 @@ class AcceptanceTests(unittest.TestCase):
                 "--acceptance", str(other.acceptance))
 
 
+class InstallerPathTests(unittest.TestCase):
+    """The installer's own path, with a descriptor that matches the manifest: only the
+    deep check of the patched image can refuse these releases, and it must."""
+
+    def setUp(self) -> None:
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def refuses(self, fixture: ReleaseFixture, pattern: str) -> None:
+        destination = self.directory / f"releases-{len(list(self.directory.iterdir()))}"
+        installer = load_installer()
+        arguments = [
+            "install-release.py", "--source", str(fixture.release),
+            "--destination-root", str(destination), "--acceptance", str(fixture.acceptance)]
+        with tools_stubbed(), mock.patch.object(sys, "argv", arguments), \
+                self.assertRaisesRegex(SystemExit, pattern):
+            installer.main()
+        self.assertEqual([path for path in destination.glob("*") if not path.name.startswith(".")], [])
+
+    @staticmethod
+    def replace(fixture: ReleaseFixture, name: str, payload: bytes) -> None:
+        """Change a root file and keep the record and the descriptor in step with it."""
+        (fixture.release / "root" / name).write_bytes(payload)
+        manifest = copy.deepcopy(fixture.manifest)
+        entry = manifest["root"]["apk" if name.endswith(".apk") else "boot_image"]
+        entry.update(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload))
+        fixture.write(manifest)
+
+    def test_a_good_release_installs(self) -> None:
+        fixture = ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)))
+        destination = self.directory / "good"
+        arguments = [
+            "install-release.py", "--source", str(fixture.release),
+            "--destination-root", str(destination), "--acceptance", str(fixture.acceptance)]
+        with tools_stubbed(), mock.patch.object(sys, "argv", arguments):
+            load_installer().main()
+        self.assertTrue((destination / fixture.name / "root/init_boot-magisk.img").is_file())
+
+    def test_a_patched_image_that_does_not_verify_is_not_installed(self) -> None:
+        fixture = ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)))
+        self.replace(fixture, "init_boot-magisk.img", fixture.synthetic.stock_image)
+        self.refuses(fixture, "lz4 legacy")
+
+    def test_an_apk_whose_binaries_are_not_in_the_image_is_not_installed(self) -> None:
+        fixture = ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)))
+        other = fixture.directory / "other.apk"
+        make_apk_bytes(other, magisk_fixture.apk_members(patch_script()) | {
+            "lib/arm64-v8a/libmagiskinit.so": b"another build"})
+        self.replace(fixture, f"Magisk-{TEST_VERSION}.apk", other.read_bytes())
+        self.refuses(fixture, "not the APK's arm64 magiskinit")
+
+    def test_stock_digests_that_are_not_the_disks_are_not_installed(self) -> None:
+        fixture = ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)))
+        manifest = copy.deepcopy(fixture.manifest)
+        manifest["root"]["boot_image"]["stock_init_boot_sha256"] = "0" * 64
+        fixture.write(manifest)
+        self.refuses(fixture, "stock digests are not those of the release's init_boot")
+
+
 class ManifestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
