@@ -196,7 +196,11 @@ runtime validates the values (`KernariumAdbChannel.hpp`,
 eth0 address, which the runtime keeps in `identity.json` beside the data disk
 ([the identity](../darwin/device/block/README.md#installation-identity)); a
 request states values only for a run that needs fixed ones
-(`android_serial_number` and `android_ethernet_mac`, API 42).
+(`android_serial_number` and `android_ethernet_mac`, API 42). The launcher
+states the release an Android guest boots to the emulator, which the
+ahead-of-time component needs; a request keeps it out with
+`android_aot_disabled` (API 44), as Andarium's Home switch does, and Kernarium
+sends none.
 
 ## Devices and display
 

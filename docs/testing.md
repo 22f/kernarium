@@ -384,7 +384,9 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest. `kernarium-camera` (unit) checks
+request carries to an Android guest, and `kernarium-aot-release` (unit) the boot
+request's word that keeps the ahead-of-time component out of a launch.
+`kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
 boot, the lens cover, the host memory a live session reserves (none for a

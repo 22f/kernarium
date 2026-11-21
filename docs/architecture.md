@@ -698,6 +698,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   executor and any per-thread table exist; a restart in the same process
   decides again, and a release the blob no longer fits runs on the engine.
   A process that ran without the component does not turn it on later. An
+  application's own word is the boot request's `android_aot_disabled`, which
+  keeps the release out of the launch (Release, below): Andarium's Home switch
+  sets it at each start, on by default. An
   archive of Andarium's Release configuration carries the component only when
   `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the iOS
   device runtimes take the accepted artifact only then.
@@ -715,8 +718,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   values from the verified release it boots (`Storage::releaseIdentity()`) and
   states them to the emulator (`--aot-release=`). Selection compares them
   before anything else: another release, a proof or test image, an updated
-  image whose blob is stale, or a launch that states none (a Linux guest, or a
-  release with no identity) runs without the component under `auto` and fails
+  image whose blob is stale, or a launch that states none (a Linux guest, a
+  release with no identity, or a boot request with `android_aot_disabled`) runs
+  without the component under `auto` and fails
   UNSUPPORTED under `on`, and allocates no AOT state. Only a launcher that
   attaches an Android release states the release; the Linux launcher refuses
   `--aot-release=` on its command line. The tests of a build with
