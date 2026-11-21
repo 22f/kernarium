@@ -760,6 +760,35 @@ class RootFilesTests(unittest.TestCase):
                     self.assertFalse(self.output.exists())
 
 
+    def test_a_directory_that_is_a_link_is_refused_before_anything_is_read_through_it(self):
+        # Each directory the script reads below must be a real one. The disk behind a
+        # linked guest/ is not the one the manifest names, so that is the refusal if
+        # the script reads through the link first.
+        def link(name, disk=None):
+            def edit(directory, manifest):
+                (directory / name).rename(directory / f"{name}.real")
+                (directory / name).symlink_to(f"{name}.real")
+                if disk is not None:
+                    (directory / f"{name}.real/system.img").write_bytes(disk)
+            return edit
+
+        cases = {
+            "guest": link("guest", b"another disk"),
+            "boot": link("boot"),
+            "root": link("root"),
+        }
+        for proof in (False, True):
+            for name, edit in cases.items():
+                with self.subTest(name, proof=proof):
+                    directory = self.root / f"link-{int(proof)}-{name}"
+                    directory.mkdir()
+                    release = rooted_release(directory, proof=proof, edit=edit)
+                    result = self.stage(release, proof=proof)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertRegex(result.stderr, f"the release's {name}/ must be a real directory")
+                    self.assertFalse(self.output.exists())
+
+
 class StagedRootFilesTests(unittest.TestCase):
     """What is staged is what was validated and what verifies: the record that names the
     destinations is the one that was read, the destinations are the two canonical paths,

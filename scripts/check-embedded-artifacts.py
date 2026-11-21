@@ -309,8 +309,31 @@ def descriptor_of(repo, relative):
 # ---------------------------------------------------------------- Android --
 
 
+def real_system_directories(report, system, label):
+    """The system directory and the two directories the checks read below it
+    (guest/ and boot/) are real directories, checked before any is read: a link
+    stays behind when the package is moved, whatever it holds now. A directory that
+    is missing is left to the check that reads it."""
+    for relative in ("", "guest", "boot"):
+        path = system / relative
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError:
+            continue
+        if not stat.S_ISDIR(mode):
+            report.error(
+                f"{label} {f'has a {relative}/ that is' if relative else 'is'} not a real directory",
+                f"{path} is a link or a file: stage the accepted release with "
+                "Andarium/scripts/stage-system-image.py and package that",
+            )
+            return False
+    return True
+
+
 def check_staged_system(report, release_id, descriptor, system, label):
     """The staged or packaged system is the accepted release; returns its manifest."""
+    if not real_system_directories(report, system, label):
+        return None
     manifest_path = system / MANIFEST
     if not manifest_path.is_file():
         report.error(

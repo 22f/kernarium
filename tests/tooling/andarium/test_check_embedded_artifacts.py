@@ -487,6 +487,35 @@ class CheckTests(unittest.TestCase):
                         app=False, decision=RELEASE_ID)
                     self.fails(result, "the packaged system" if packaged else "the staged system", message)
 
+    def test_a_system_directory_that_is_a_link_is_refused_staged_and_packaged(self) -> None:
+        # A package is moved, and what a link points to stays behind: the system
+        # directory and what the checks read below it must be real directories, and
+        # that is checked before the first of them is read.
+        def link(directory: Path) -> None:
+            real = directory.with_name(directory.name + ".real")
+            directory.rename(real)
+            directory.symlink_to(real)
+
+        staged = self.repo / ".build/andarium-system"
+        packaged = lambda: self.fixture.app / "andarium-system"  # noqa: E731
+        for label, find, message in (
+            ("the packaged system", packaged, "is not a real directory"),
+            ("the staged system", lambda: staged, "is not a real directory"),
+            ("the packaged system", lambda: packaged() / "guest", "has a guest/ that is not a real directory"),
+            ("the staged system", lambda: staged / "boot", "has a boot/ that is not a real directory"),
+        ):
+            with self.subTest(label=label, message=message):
+                for leftover in (staged, staged.with_name("andarium-system.real"), self.fixture.app):
+                    if leftover.is_symlink():
+                        leftover.unlink()
+                    elif leftover.exists():
+                        shutil.rmtree(leftover)
+                self.with_root()
+                link(find())
+                result = self.fixture.run(decision=RELEASE_ID) if label == "the packaged system" else self.fixture.run(
+                    app=False, decision=RELEASE_ID)
+                self.fails(result, label, message)
+
     def test_the_installed_root_record_is_the_one_the_descriptor_binds(self) -> None:
         # A schema 8 descriptor names the digest of the reviewed root record, or none.
         # The installed release is the reference of the check, so it must be that one.

@@ -31,7 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
 
@@ -84,6 +84,17 @@ def fail(message: str) -> None:
 def read_strict_json(path: Path) -> dict:
     """Reads a JSON object, refusing a key repeated in any object."""
     return contract_checks.load_json_object(path, StageError)
+
+
+def check_release_directories(release: Path) -> None:
+    """Each directory of the release that the script reads or copies from is a real
+    one, a link to none. This runs before the first read, so nothing is read, sized
+    or hashed through a linked directory and then refused. A directory that is
+    missing is left to the checks of the files in it."""
+    below = {PurePosixPath(relative).parent.as_posix() for relative in FILES} | {ROOT_DIRECTORY}
+    for relative in sorted(below - {"."}):
+        if os.path.lexists(release / relative):
+            magisk_image.real_directory(release / relative, f"the release's {relative}/", StageError)
 
 
 def read_manifest(release: Path) -> bytes:
@@ -497,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         release = release.resolve()
         if not release.is_dir():
             raise StageError(f"the Android release is not installed: {release}")
+        check_release_directories(release)
         manifest_bytes = read_manifest(release)
         manifest = parse_object(manifest_bytes, MANIFEST)
         is_proof = manifest.get("acceptance") == UNSIGNED_PROOF
