@@ -259,6 +259,30 @@ struct TranslatedLibrariesTests {
             .contains("translated-libraries off") == true)
     }
 
+    /// The same sequence with the read of B's start record failing once, as it
+    /// does when no file descriptor is free, and succeeding by the time the
+    /// report is made: a record that could not be marked is not kept, or it
+    /// would be paired with the retained session unmarked.
+    @Test func aStartRecordThatCannotBeReadForTheRotationIsNotKept() throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try put(sessionText(process: 7, started: 300), BugReportAttachments.sessionRecord, in: directory)
+        start(.on, process: 7, at: 290).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) != nil)
+        let startFile = directory.appendingPathComponent(BugReportAttachments.startRecord)
+        let keptFile = directory.appendingPathComponent(BugReportAttachments.previousStartRecord)
+        start(.off, process: 7, at: 200).write(to: startFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: startFile.path)
+        try #require(!FileManager.default.isReadableFile(atPath: startFile.path), "the record is still readable")
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) == nil)
+        // Readable again by the time the report is made.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keptFile.path)
+        let names = BugReportAttachments.entries(from: directory, containers: []).map(\.name)
+        #expect(names.contains("andarium/session-previous.txt"))
+        #expect(!names.contains("andarium/start-previous.txt"))
+        #expect(!FileManager.default.fileExists(atPath: startFile.path))
+    }
+
     @Test func anOrphanedStartRecordReadsBackAndBelongsToNoSession() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }

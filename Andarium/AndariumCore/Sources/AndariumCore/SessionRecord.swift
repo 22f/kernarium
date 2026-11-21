@@ -364,16 +364,19 @@ public enum PreviousSession {
     }
 
     /// Moves the start record to its kept place. With no session record of its
-    /// own to go with it, the record is marked first, so that no retained
-    /// session whose process and time happen to fit can take it for its own.
+    /// own to go with it, the record is kept only if it can be marked first,
+    /// so that no retained session whose process and time happen to fit can
+    /// take it for its own: one that cannot be read, or written marked, is
+    /// dropped.
     private static func keep(_ start: URL, as kept: URL, orphaned: Bool) {
-        if orphaned, var record = StartRecord.read(at: start) {
-            record.orphaned = true
-            // A record that cannot be kept marked is not kept.
-            if !record.write(to: kept) { try? FileManager.default.removeItem(at: kept) }
-            try? FileManager.default.removeItem(at: start)
+        guard orphaned else {
+            try? FileManager.default.moveItem(at: start, to: kept)
             return
         }
-        try? FileManager.default.moveItem(at: start, to: kept)
+        if var record = StartRecord.read(at: start) {
+            record.orphaned = true
+            if !record.write(to: kept) { try? FileManager.default.removeItem(at: kept) }
+        }
+        try? FileManager.default.removeItem(at: start)
     }
 }
