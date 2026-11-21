@@ -4,10 +4,8 @@ import AndariumCore
 import Foundation
 import UIKit
 
-#if !APP_STORE
-
 /// The tool's answers, played: the Simulator preview's, and the probe session's
-/// of the UI tests (an App Store build compiles it out). It answers as
+/// of the UI tests. It answers as
 /// `kernarium_apps` is specified to: a digest, a listing, the icons of up to
 /// eight apps and the start of an app's launcher activity. The names and the
 /// pictures are made up.
@@ -261,5 +259,3 @@ nonisolated enum ScriptedAppIcons {
             blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
     }
 }
-
-#endif

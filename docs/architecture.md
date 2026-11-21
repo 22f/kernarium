@@ -373,12 +373,9 @@ The region is sized from the process's JIT cache budget, which is the gadget
 cache's term of the guest memory budget (executors times the arena, the tracked
 store and the single-instruction arena), so the GPU budget and the memory limit
 do not move; a process prepares it once, for the guest memory and vCPU count of
-its first run. Only the development configurations compile it
-(`UML_IOS_DEBUGGER_JIT`): the App Store runtime has no JIT engine, no owner and
-no entry, Andarium's JIT row and the loader's preparation entries are compiled
-out of its application, and `check-app-store-bundle.py` refuses the symbols,
-text and the `brk` instruction. A start that cannot have the JIT runs on
-gadgets and says why; it never fails. Andarium asks for the preparation through
+its first run. Only the iOS device product compiles it
+(`UML_IOS_DEBUGGER_JIT`). A start that cannot have the JIT runs on gadgets and
+says why; it never fails. Andarium asks for the preparation through
 runtime API 30 (`prepare_jit`, `use_jit`) as it opens, because StikDebug spins
 until it is served and is ended by the system within a minute; the region then
 sits wired until the process ends, and a run that does not use it (the JIT is
@@ -696,14 +693,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   word beats the environment. Each run makes the choice before its first
   executor and any per-thread table exist; a restart in the same process
   decides again, and a release the blob no longer fits runs on the engine.
-  A process that ran without the component does not turn it on later. The
-  App Store runtime
-  reads no environment for it. An archive
-  configuration (App Store, TestFlight) carries the component only when
-  `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the
-  device runtimes take no accepted artifact before, and the App Store runtime
-  configuration fails to configure with an explicit `UML_AOT_ARTIFACT` unless
-  the field is `yes`. `scripts/check-embedded-artifacts.py --aot` fails a
+  A process that ran without the component does not turn it on later. An
+  archive of Andarium's Release configuration carries the component only when
+  `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the iOS
+  device runtimes take the accepted artifact only then.
+  `scripts/check-embedded-artifacts.py --aot` fails a
   packaged framework without an accepted artifact or while the field is `no`,
   one whose blob is not the accepted digest or was not made from the packaged
   system (the three values the launch compares, below), and an application whose
@@ -1138,8 +1132,7 @@ values of the launch's `androidboot.serialno`, `androidboot.kernarium.adb_key`
 and `androidboot.kernarium.timezone` arguments wherever they stand (also a
 write that ends inside one), the assignments of those names and any hardware
 address in its colon spelling are replaced by `<masked>`, `<time zone>` and
-`<address>`, the words the application's start log uses, so no reader of the
-file has them. An end is the last state on disk unless the process dies between
+`<address>`, so no reader of the file has them. An end is the last state on disk unless the process dies between
 a delayed checkpoint's write and its repair: the end formats its record before
 it writes it, and a checkpoint whose write lands after it writes that record
 again at once. The file is text of a fixed layout (`uml-session 8`) of 19200

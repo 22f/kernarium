@@ -306,7 +306,7 @@ the Virtio devices it creates so that no other device's index moves; its
 argument handling in `darwin/app/macos/main.cpp` is the reference for the
 options and their values. It reaches the platform cameras through
 `UML::CameraSource` (`camera_source.hpp`): the host's camera, the synthetic
-camera (an App Store runtime has none) and a read of the camera permission.
+camera and a read of the camera permission.
 The `host` source needs the system's camera permission granted to the program
 (or the terminal it runs in) beforehand: nothing in the launcher or the device
 asks for it, and the launcher refuses to start, saying how to grant it, when it

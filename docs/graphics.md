@@ -265,11 +265,16 @@ begun on a framebuffer whose attachment view, or the view's image, the guest
 has destroyed marks the context lost before the command reaches the driver
 (`gpu-venus-render-pass-lifetime`). Nor can it make the host call a driver
 entry point that is not there: a command the device's version and enabled
-extensions do not expose marks the context lost (same test). The guest binds
-image and buffer memory without waiting for the answer, so a bind the driver
-refused marks the context lost before the next command runs
-(`gpu-venus-bind-failure`), and a copy that names an image or buffer the
-driver never bound is refused by the driver
+extensions do not expose marks the context lost (same test). Nor can it hand a
+driver a null it reads: a handle the specification requires that arrives as
+object id 0 marks the context lost, a pipeline stage that names no shader is
+refused, and a host image copy, between memory and an image or between two
+images, is bounded by the images' mip levels, aspects, layers and extent and by
+the memory the guest gave it, and returns no host bytes the driver did not write
+(`gpu-venus-required-handles`). The guest binds image and buffer memory without
+waiting for the answer, so a bind the driver refused marks the context lost
+before the next command runs (`gpu-venus-bind-failure`), and a copy that names
+an image or buffer the driver never bound is refused by the driver
 ([contracts](#kosmickrisp-driver-contracts)).
 
 ### Host-visible memory is bounded by the blob aperture
@@ -669,6 +674,22 @@ file older than an hour is a dead writer's and is replaced. iOS ends a process
 it suspends while it holds a file lock, and a cache write can be in flight at
 the suspension. The database and single-file formats lock their files and stay
 off.
+
+KosmicKrisp keeps the variants of its dynamic vertex-input pipelines in the same
+cache, so a first draw that finds one builds its Metal pipelines from the
+stored MSL instead of translating the shaders again, in a later process as well
+as in a later boot. An entry is a small descriptor and the MSL texts it names;
+texts are stored once under the hash of their content, and most variants share
+all but one. The key is the stripped NIR the variant is built from, the device
+and driver identity, the pipeline's lowered state and layout hashes, and the
+vertex-input state. A missing entry, one of another build, one that is
+truncated or damaged, one that is not what its key names, one that holds a
+shader description no writer wrote, and one that is not a variant of the
+pipeline asking for it are each a miss: the variant is translated and stored
+again, and an entry's lengths and counts are checked before they are used. No
+behavior depends on a variant entry surviving. `MESA_KK_VARIANT_CACHE=0` turns
+the variant cache off and `MESA_KK_VARIANT_LOG=1` logs each lookup; the apps and
+emulators set neither.
 
 ## Validation
 

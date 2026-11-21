@@ -77,9 +77,6 @@ final class LiveRuntime: RuntimeDriver {
     private let cameraDirectory: URL?
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
-    /// The time zone the run's guest was booted with, which the person may
-    /// have left since (`guestIdentifiers`).
-    private var bootTimeZone: String?
     /// What this run puts in the names of its imports' partial files, new at
     /// every start and at every restart of the guest inside the run
     /// (`GuestRunMark`).
@@ -131,11 +128,9 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's end of the thermal connection where a UI test's probe
     /// stands in for it; nil is the real one, over vsock.
     private let thermalOpener: (any GuestStreamOpener)?
-    #if !APP_STORE
     /// A UI test's probe session runs the thermal session as a normal run
     /// does (`beginThermalProbe`).
     private var thermalProbe = false
-    #endif
     private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
     /// The device's position for the guest's GNSS receiver, read from Core
     /// Location only while the person's Location switch, iOS, the foreground,
@@ -216,7 +211,7 @@ final class LiveRuntime: RuntimeDriver {
     /// The person's stop of the run in hand (`RunStop`), from the launch until
     /// the run's end is reported.
     private var runStop: RunStop?
-    #if DEBUG && !APP_STORE
+    #if DEBUG
     /// A test's stand-in for the preparation of the files, where it holds a
     /// start.
     var prepareFilesOverride: (@MainActor (Guest) async throws -> Void)?
@@ -386,12 +381,6 @@ final class LiveRuntime: RuntimeDriver {
         storage.measuredUsedBytes()
     }
 
-    func guestIdentifiers() -> GuestIdentifiers {
-        GuestIdentifiers.reading(
-            identityFile: InstanceFiles(directory: storage.locations.directory).identity,
-            adbKey: adbIdentity?.publicKeyLine, timeZones: [bootTimeZone, GuestTimeZone.current()].compactMap { $0 })
-    }
-
     /// The update's Restore: after the snapshot operation under way, as a
     /// start is. It changes the guest's files (it completes a snapshot
     /// restore that did not finish first), so what a screen has listed is stale.
@@ -517,13 +506,9 @@ final class LiveRuntime: RuntimeDriver {
         if launchWasStopped(generation) { return }
         preparing = false
         model?.preparingDisk = false
-        #if APP_STORE
-        let extras = StartExtras()
-        #else
         var extras = StartExtras()
         extras.jit = await prepareJit(for: run)
         if launchWasStopped(generation) { return }
-        #endif
         guard let view, let geometry else {
             end(startFailure: "the display is not ready")
             return
@@ -535,7 +520,7 @@ final class LiveRuntime: RuntimeDriver {
     /// finishes first, and the update rules then apply to what it left (a
     /// restore that did not finish completes here).
     func prepareFiles(for guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
-        #if DEBUG && !APP_STORE
+        #if DEBUG
         if let prepareFilesOverride {
             try await prepareFilesOverride(guest)
             return
@@ -551,7 +536,6 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    #if !APP_STORE
     /// Whether the guest boots on the JIT (`AppModel.startOnJit`).
     private func prepareJit(for run: PendingRun) async -> Bool {
         guard let model, model.jitAvailable else { return false }
@@ -566,7 +550,6 @@ final class LiveRuntime: RuntimeDriver {
     func prepareJit(wanted: Bool, shape: JitShape) async -> JitAnswer {
         await JitDebugger.prepare(wanted: wanted, shape: shape, flavor: Self.androidFlavor)
     }
-    #endif
 
     private func preparingDisk(_ fraction: Double) {
         guard preparing, let model else { return }
@@ -586,9 +569,7 @@ final class LiveRuntime: RuntimeDriver {
     /// What a start decides before the runtime runs, beyond the guest: in a
     /// development build, whether the guest boots on the JIT engine.
     private struct StartExtras: Sendable {
-        #if !APP_STORE
         var jit = false
-        #endif
     }
 
     private func launch(
@@ -670,7 +651,6 @@ final class LiveRuntime: RuntimeDriver {
         // The zone the host is in now, read at every start: the guest follows
         // it while its own automatic time zone is on.
         let timeZone = GuestTimeZone.current()
-        bootTimeZone = timeZone
         let sessionRecordPath = sessionRecord?.path
         // The run occupies its thread for the guest's whole life and the GPU
         // service reaches the main queue while it starts, so it must not be
@@ -741,10 +721,8 @@ final class LiveRuntime: RuntimeDriver {
                                 // colour data a Bayer still teaches is kept.
                                 request.android_camera_mode = cameraMode
                                 request.android_camera_calibration_path = calibration
-                                #if !APP_STORE
                                 // The JIT engine, once its memory is prepared; gadgets otherwise.
                                 request.use_jit = extras.jit ? 1 : 0
-                                #endif
                                 return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }
                             }
                         }
@@ -1047,8 +1025,7 @@ final class LiveRuntime: RuntimeDriver {
 
     func guestRestarted(_ event: GuestRestartEvent) {
         print("Andarium: \(event)")
-        guard case let .began(restartCount) = event, let model else { return }
-        model.guestRestartsCounted(restartCount)
+        guard case .began = event, let model else { return }
         // The boot that follows is another one: it ends an update only by
         // reaching sys.boot_completed itself, and its console is read afresh.
         reachedBootCompleted = false
@@ -1102,9 +1079,7 @@ final class LiveRuntime: RuntimeDriver {
         geometry = nil
         launching = false
         UIApplication.shared.isIdleTimerDisabled = false
-        #if !APP_STORE
         print(ConsoleReport.runtimeReturned(result))
-        #endif
         // A start that reached sys.boot_completed and ended with Android's own
         // power-off is a completed one (`lastCompleted`); the pending update it
         // may have started ended when the start booted.
@@ -1290,7 +1265,6 @@ final class LiveRuntime: RuntimeDriver {
         keyboardMouse.setPointerAsTouch(on)
     }
 
-    #if !APP_STORE
     /// A UI test's launch (`InputProbeLaunch`) has no guest: the session is
     /// treated as one whose run has started, so the guest's keyboard and mouse
     /// can be exercised. Nothing else of a run (rotation, sensors, haptics)
@@ -1311,7 +1285,6 @@ final class LiveRuntime: RuntimeDriver {
         updateThermal()
         thermalMonitor.start()
     }
-    #endif
 
     func pointerLockDidChange(_ locked: Bool) {
         keyboardMouse.pointerLockChanged(locked)
@@ -1463,19 +1436,16 @@ final class LiveRuntime: RuntimeDriver {
     // Two readers of the thermal state. The guest's thermal HAL is told how
     // hot the device is in every build (`ThermalSession`). The state and the
     // uptime also go to the console for the iPad harness
-    // (`Shared/ConsoleReport.swift`); an App Store build prints neither line
-    // and reads no system uptime.
+    // (`Shared/ConsoleReport.swift`).
 
     /// The guest's thermal HAL is told while a normal run goes on; Recovery
     /// has none.
     private func updateThermal() {
         thermal.setLimit(model?.heatLimitOn ?? true)
-        #if !APP_STORE
         if thermalProbe {
             thermal.update(running: true, booted: true)
             return
         }
-        #endif
         thermal.update(running: normalRun, booted: reachedBootCompleted)
     }
 
@@ -1488,42 +1458,32 @@ final class LiveRuntime: RuntimeDriver {
     /// Android starts to lower its frame rate: the first time in the run that
     /// the device is hot enough and the HAL has heard of it.
     private func thermalCapStarted() {
-        #if !APP_STORE
         guard runActive, normalRun || thermalProbe else { return }
-        #else
-        guard runActive, normalRun else { return }
-        #endif
         model?.thermalCapStarted()
     }
 
-    #if !APP_STORE
     private func reportThermalState(_ phase: ConsoleReport.ThermalPhase) {
         print(ConsoleReport.thermal(
             phase: phase, state: ProcessInfo.processInfo.thermalState,
             uptime: ProcessInfo.processInfo.systemUptime, heatLimitOn: model?.heatLimitOn ?? true
         ))
     }
-    #endif
 
     private func startThermalObservation() {
-        #if !APP_STORE
         reportThermalState(.start)
         thermalObserver = NotificationCenter.default.addObserver(
             forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.reportThermalState(.change) }
         }
-        #endif
     }
 
     private func stopThermalObservation() {
-        #if !APP_STORE
         reportThermalState(.finish)
         if let thermalObserver {
             NotificationCenter.default.removeObserver(thermalObserver)
             self.thermalObserver = nil
         }
-        #endif
     }
 
     // MARK: Free space
@@ -1676,9 +1636,7 @@ final class LiveRuntime: RuntimeDriver {
     private func observeLifecycle() {
         let edges: [(Notification.Name, @MainActor (LiveRuntime) -> Void)] = [
             (UIApplication.willResignActiveNotification, {
-                #if !APP_STORE
                 print(ConsoleReport.application(active: false))
-                #endif
                 $0.active = false
                 $0.model?.applicationActive = false
                 $0.motion.stop()
@@ -1710,9 +1668,7 @@ final class LiveRuntime: RuntimeDriver {
     /// The person may have changed the permissions or the storage while
     /// Andarium was away.
     private func didBecomeActive() {
-        #if !APP_STORE
         print(ConsoleReport.application(active: true))
-        #endif
         active = true
         updateGuestRotation()
         if normalRun { thermalMonitor.refresh() }

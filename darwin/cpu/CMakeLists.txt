@@ -81,8 +81,7 @@ set(UML_AOT_SOURCE "")
 set(UML_AOT_ARTIFACT_DIR "")
 set(UML_AOT_ARTIFACT_ACCEPTED "")
 # Every Apple product that runs Android carries it: macOS, the iOS Simulator
-# and the iOS device (the App Store runtime too, which reads no environment
-# for it).
+# and the iOS device.
 if(UML_AOT_MODE STREQUAL "OFF")
     if(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
         message(STATUS "UML_AOT_MODE=OFF: building without the AOT component")
@@ -99,14 +98,6 @@ elseif(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
         endif()
         set(UML_AOT_SOURCE image)
     else()
-        # An App Store runtime takes a named artifact under the same switch
-        # as the accepted one.
-        if(UML_APP_STORE_RUNTIME)
-            include(UmlAotArchives)
-            uml_aot_require_archives(
-                "${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env"
-                "${UML_AOT_ARTIFACT}")
-        endif()
         set(UML_AOT_SOURCE artifact)
         set(UML_AOT_ARTIFACT_DIR "${UML_AOT_ARTIFACT}")
     endif()
@@ -114,58 +105,17 @@ elseif(UML_TARGET_MACOS OR UML_KERNEL_PRODUCT STREQUAL "android-17")
     # The accepted artifact: the descriptor names the release it was built
     # from, and it is installed beside the accepted release. An iOS runtime
     # of the Linux product has no Android library to rewrite and takes none.
-    set(_uml_aot_accepted
-        ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env)
-    set(_uml_aot_release
-        ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-release.env)
-    if(EXISTS "${_uml_aot_accepted}")
-        file(STRINGS "${_uml_aot_accepted}" _uml_aot_accepted_id
-            REGEX "^LINEAGE24_ACCEPTED_AOT_RELEASE_ID='.*'$")
-        file(STRINGS "${_uml_aot_release}" _uml_aot_release_id_line
-            REGEX "^LINEAGE24_ACCEPTED_RELEASE_ID='.*'$")
-        file(STRINGS "${_uml_aot_release}" _uml_aot_release_dir_line
-            REGEX "^LINEAGE24_ACCEPTED_DIRECTORY_NAME='.*'$")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_accepted_id "${_uml_aot_accepted_id}")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_release_id_line "${_uml_aot_release_id_line}")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_release_dir "${_uml_aot_release_dir_line}")
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-            "${_uml_aot_accepted}" "${_uml_aot_release}")
-        if(NOT _uml_aot_accepted_id STREQUAL _uml_aot_release_id_line)
-            message(FATAL_ERROR
-                "accepted-aot.env accepts the artifact of "
-                "'${_uml_aot_accepted_id}', but the accepted release is "
-                "'${_uml_aot_release_id_line}'")
-        endif()
-        # An archive configuration takes it only when the descriptor says so
-        # (LINEAGE24_ACCEPTED_AOT_ARCHIVES): the device runtimes are the ones
-        # an App Store or TestFlight archive embeds. macOS and the Simulator
-        # take every accepted artifact.
-        include(UmlAotArchives)
-        uml_aot_archives_state(_uml_aot_archives "${_uml_aot_accepted}")
-        set(_uml_aot_archive_product FALSE)
-        if(UML_APPLE_PLATFORM STREQUAL "ios" OR UML_APP_STORE_RUNTIME)
-            set(_uml_aot_archive_product TRUE)
-        endif()
-        set(_uml_aot_default
-            "${PROJECT_SOURCE_DIR}/.build/android/aot/${_uml_aot_release_dir}")
-        if(_uml_aot_archive_product AND NOT _uml_aot_archives STREQUAL "yes")
-            message(STATUS
-                "The accepted AOT artifact is not accepted for archives "
-                "yet (LINEAGE24_ACCEPTED_AOT_ARCHIVES): building without the "
-                "AOT component")
-        elseif(EXISTS "${_uml_aot_default}/artifact.json")
-            set(UML_AOT_SOURCE artifact)
-            set(UML_AOT_ARTIFACT_DIR "${_uml_aot_default}")
-            set(UML_AOT_ARTIFACT_ACCEPTED "${_uml_aot_accepted}")
-        elseif(UML_AOT_MODE STREQUAL "AUTO")
-            message(STATUS
-                "The accepted AOT artifact is not installed at "
-                "${_uml_aot_default}: building without the AOT component")
-        endif()
-    endif()
+    # An iOS device runtime, the one an archive of Andarium's Release
+    # configuration embeds, takes it only when the descriptor says so
+    # (LINEAGE24_ACCEPTED_AOT_ARCHIVES); macOS and the Simulator take every
+    # accepted artifact (cmake/UmlAotArchives.cmake).
+    include(UmlAotArchives)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env"
+        "${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-release.env")
+    uml_aot_accepted_artifact("${PROJECT_SOURCE_DIR}" "${UML_APPLE_PLATFORM}"
+        "${UML_AOT_MODE}"
+        UML_AOT_SOURCE UML_AOT_ARTIFACT_DIR UML_AOT_ARTIFACT_ACCEPTED)
 endif()
 if(UML_AOT_MODE STREQUAL "ON" AND NOT UML_AOT_SOURCE)
     message(FATAL_ERROR
@@ -316,15 +266,6 @@ _uml_add_cpu_objects(uml_arm64_execution_helpers shared
 option(UML_GADGET_EXECUTION_HISTOGRAM
     "Count executed gadget entries (diagnostic builds only)"
     OFF)
-# An App Store runtime carries no diagnostic instrumentation, so it refuses the
-# two diagnostic builds instead of silently ignoring them.
-if(UML_APP_STORE_RUNTIME AND
-   (UML_GADGET_CACHE_CENSUS OR UML_GADGET_EXECUTION_HISTOGRAM))
-    message(FATAL_ERROR
-        "UML_APP_STORE_RUNTIME conflicts with UML_GADGET_CACHE_CENSUS and "
-        "UML_GADGET_EXECUTION_HISTOGRAM: an App Store runtime has no "
-        "diagnostic instrumentation")
-endif()
 # GadgetExecutor's layout follows this switch, so every consumer of the gadget
 # headers must see the value the library was built with, and
 # execution_histogram.hpp refuses to compile without one. The CPU contract
@@ -434,12 +375,8 @@ set(_uml_arm64_gadget_a32_sources
 set(UML_GADGET_BLOCK_INSTRUCTIONS "64" CACHE STRING
     "Guest instructions fetched per translation attempt")
 # The guest sampler suspends the vCPU carriers and reads their registers
-# (guest_sampler.hpp); an App Store runtime has the disabled stand-in.
-if(UML_APP_STORE_RUNTIME)
-    set(_uml_arm64_guest_sampler arm64/gadgets/guest_sampler_disabled.cpp)
-else()
-    set(_uml_arm64_guest_sampler arm64/gadgets/guest_sampler.cpp)
-endif()
+# (guest_sampler.hpp).
+set(_uml_arm64_guest_sampler arm64/gadgets/guest_sampler.cpp)
 _uml_add_cpu_objects(uml_arm64_gadgets gadget
     arm64/gadgets/afp_twin.cpp
     arm64/gadgets/gadget_memory_selection.cpp
@@ -512,11 +449,7 @@ else()
         "gadget translation IPO unavailable: ${_uml_gadget_ipo_error}")
 endif()
 
-# The arm64 JIT engine. The App Store runtime carries none of it: not the
-# compiler, the executor, the engine adapter nor the executable-memory owner
-# (UML_ARM64_JIT_ENGINE is off there), so the application has no JIT code to
-# find (Andarium/scripts/check-app-store-bundle.py).
-if(UML_ARM64_JIT_ENGINE)
+# The arm64 JIT engine.
 
 # JIT SME sources: the compiler's SME sources and the streaming-mode
 # transitions in the first list (absolute paths, like the compiler's),
@@ -611,8 +544,6 @@ if(UML_BUILD_UNIT_TESTS)
     _uml_add_jit_executor(uml_arm64_jit_diagnostics_executor 1)
 endif()
 
-endif()
-
 # Some CPU implementation translation units contain inline assembly using the
 # same optional vocabulary as the standalone assembly sources. Keep that
 # option confined to implementation targets that contain those bodies instead
@@ -620,12 +551,9 @@ endif()
 if(UML_APPLE_CPU_INLINE_ASM_COMPILE_OPTION)
     set(_uml_inline_asm_targets
         uml_arm64_aarch32_semantics
-        uml_arm64_gadgets)
-    if(TARGET uml_arm64_jit)
-        list(APPEND _uml_inline_asm_targets
-            uml_arm64_jit
-            uml_arm64_jit_executor)
-    endif()
+        uml_arm64_gadgets
+        uml_arm64_jit
+        uml_arm64_jit_executor)
     if(TARGET uml_arm64_jit_diagnostics_executor)
         list(APPEND _uml_inline_asm_targets
             uml_arm64_jit_diagnostics_executor)
@@ -638,7 +566,7 @@ if(UML_APPLE_CPU_INLINE_ASM_COMPILE_OPTION)
     unset(_uml_inline_asm_targets)
 endif()
 
-if(UML_BUILD_UNIT_TESTS AND UML_ARM64_JIT_ENGINE)
+if(UML_BUILD_UNIT_TESTS)
     # Test-only diagnostics and publication-gate probes are a separate source
     # owner. Focused tests link this object beside the exact production
     # executor instead of recompiling that executor with test definitions.
@@ -702,42 +630,34 @@ target_link_libraries(uml_arm64_gadget_engine PUBLIC uml_arm64_gadget_executor)
 target_compile_definitions(uml_arm64_gadget_engine PRIVATE
     UML_AOT=$<BOOL:${UML_AOT}>)
 
-if(UML_ARM64_JIT_ENGINE)
-    _uml_add_cpu_objects(uml_arm64_jit_engine native
-        arm64/jit/engine_adapter.cpp)
-    target_link_libraries(uml_arm64_jit_engine PUBLIC
-        uml_arm64_jit
-        uml_arm64_jit_executor)
-endif()
+_uml_add_cpu_objects(uml_arm64_jit_engine native
+    arm64/jit/engine_adapter.cpp)
+target_link_libraries(uml_arm64_jit_engine PUBLIC
+    uml_arm64_jit
+    uml_arm64_jit_executor)
 
 _uml_add_cpu_objects(uml_cpu_engine_factory mixed engine_factory.cpp)
 target_link_libraries(uml_cpu_engine_factory PUBLIC
     uml_arm64_gadget_engine
     uml_arm64_execution_helpers)
-target_compile_definitions(uml_cpu_engine_factory PRIVATE
-    UML_ARM64_JIT_ENGINE=$<BOOL:${UML_ARM64_JIT_ENGINE}>)
-if(UML_ARM64_JIT_ENGINE)
-    target_link_libraries(uml_cpu_engine_factory PUBLIC uml_arm64_jit_engine)
-endif()
+target_link_libraries(uml_cpu_engine_factory PUBLIC uml_arm64_jit_engine)
 
 # OBJECT libraries avoid duplicate compilation, but CMake does not propagate
 # their contents transitively. These link components expose the supported
 # adapter graph for consumers that select one engine or the factory.
-if(UML_ARM64_JIT_ENGINE)
-    add_library(uml_cpu_jit_component INTERFACE)
-    uml_declare_architecture_target(uml_cpu_jit_component cpu native)
-    target_link_libraries(uml_cpu_jit_component INTERFACE
-        UML::CpuContract
-        UML::MemoryComponent)
-    target_sources(uml_cpu_jit_component INTERFACE
-        $<TARGET_OBJECTS:uml_arm64_jit_engine>
-        $<TARGET_OBJECTS:uml_cpu_executable_memory>
-        $<TARGET_OBJECTS:uml_arm64_jit>
-        $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
-        $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
-        $<TARGET_OBJECTS:uml_arm64_jit_executor>
-        $<TARGET_OBJECTS:uml_arm64_execution_helpers>)
-endif()
+add_library(uml_cpu_jit_component INTERFACE)
+uml_declare_architecture_target(uml_cpu_jit_component cpu native)
+target_link_libraries(uml_cpu_jit_component INTERFACE
+    UML::CpuContract
+    UML::MemoryComponent)
+target_sources(uml_cpu_jit_component INTERFACE
+    $<TARGET_OBJECTS:uml_arm64_jit_engine>
+    $<TARGET_OBJECTS:uml_cpu_executable_memory>
+    $<TARGET_OBJECTS:uml_arm64_jit>
+    $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
+    $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
+    $<TARGET_OBJECTS:uml_arm64_jit_executor>
+    $<TARGET_OBJECTS:uml_arm64_execution_helpers>)
 
 # The CPU-owned implementation carrier deliberately excludes memory objects.
 # Production and test runtime compositions can pair these exact engine objects
@@ -765,13 +685,11 @@ if(UML_AOT)
         $<TARGET_OBJECTS:${_aot_runtime}>)
 endif()
 # The JIT engine's objects, and the executable-memory owner they alone link.
-if(UML_ARM64_JIT_ENGINE)
-    target_sources(uml_cpu_engine_objects INTERFACE
-        $<TARGET_OBJECTS:uml_arm64_jit_engine>
-        $<TARGET_OBJECTS:uml_cpu_executable_memory>
-        $<TARGET_OBJECTS:uml_arm64_jit>
-        $<TARGET_OBJECTS:uml_arm64_jit_executor>)
-endif()
+target_sources(uml_cpu_engine_objects INTERFACE
+    $<TARGET_OBJECTS:uml_arm64_jit_engine>
+    $<TARGET_OBJECTS:uml_cpu_executable_memory>
+    $<TARGET_OBJECTS:uml_arm64_jit>
+    $<TARGET_OBJECTS:uml_arm64_jit_executor>)
 if(TARGET uml_x86_64_gadgets)
     target_link_libraries(uml_cpu_engine_objects INTERFACE
         UML::ThirdPartyCephes128)

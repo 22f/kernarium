@@ -293,8 +293,8 @@ enum {
      * count, and the debugger, if one made it, has detached. A boot that sets
      * use_jit runs on the JIT. */
     KERNARIUM_RUNTIME_JIT_READY = 0,
-    /* This runtime has no JIT: an App Store runtime, or a build for the
-     * Simulator or a host that cannot make executable memory. */
+    /* This runtime has no JIT: a build for the Simulator or a host that cannot
+     * make executable memory. */
     KERNARIUM_RUNTIME_JIT_UNSUPPORTED = 1,
     /* No debugger is attached to the process, or the one that was left
      * before it served the request, so none prepared the memory. A boot
@@ -424,10 +424,7 @@ typedef void (*kernarium_runtime_console_output_callback)(
 typedef void (*kernarium_runtime_set_console_output_callback_function)(
     kernarium_runtime_console_output_callback callback,
     void* context);
-/* Writes to the guest's console. An App Store runtime (the
- * kernarium-ios-device-android-app-store preset) has no console input: its
- * entry stays in the table, so the table's layout and version are the same in
- * every runtime, and answers -ENOTSUP. */
+/* Writes to the guest's console. */
 typedef int (*kernarium_runtime_send_console_input_function)(
     const void* buffer,
     size_t length);
@@ -474,9 +471,7 @@ typedef void (*kernarium_runtime_frame_sink)(void* context, void* pixel_buffer);
  * A null sink stops the mirror, and returns only once no call to the previous
  * sink is running or will start, so its context may be released; the sink must
  * not call this. Returns 0, or a negative value for a width or rate of zero.
- * The setting applies to the guest's display whenever one exists. An App Store
- * runtime has no mirror: its entry stays in the table and answers -ENOTSUP for
- * any arguments. */
+ * The setting applies to the guest's display whenever one exists. */
 typedef int (*kernarium_runtime_set_frame_sink_function)(
     kernarium_runtime_frame_sink sink,
     void* context,
