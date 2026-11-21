@@ -23,7 +23,7 @@ final class Server implements Runnable {
 
     /** Where connections come from. */
     interface Listener {
-        /** Waits for the next connection. */
+        /** Waits for the next connection; null when there will be none, which ends the server. */
         Conn accept() throws IOException;
     }
 
@@ -65,11 +65,12 @@ final class Server implements Runnable {
         this.retryMillis = retryMillis;
     }
 
+    /** Serves until the listener has no more connections to give, or the thread is interrupted. */
     @Override
     public void run() {
         while (!Thread.currentThread().isInterrupted()) {
             try {
-                serveOne();
+                if (!serveOne()) return;
             } catch (IOException | RuntimeException e) {
                 log.accept("host channel: " + e.getClass().getSimpleName());
                 try {
@@ -81,14 +82,16 @@ final class Server implements Runnable {
         }
     }
 
-    /** Accepts one connection and serves it to completion. */
-    void serveOne() throws IOException {
+    /** Accepts one connection and serves it to completion; false when the listener gave none, for good. */
+    boolean serveOne() throws IOException {
         final Conn conn = listener.accept();
+        if (conn == null) return false;
         try {
             serve(conn);
         } finally {
             conn.close();
         }
+        return true;
     }
 
     private void serve(Conn conn) {

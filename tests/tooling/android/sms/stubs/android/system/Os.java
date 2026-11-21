@@ -15,19 +15,14 @@ import java.net.SocketException;
  * public API, with its signatures, and nothing else: the service is compiled against the platform's stubs, which
  * leave out everything @hide. A hidden member is declared without {@code public}, so that code outside
  * android.system cannot call it (javac refuses, as the image's compile does) and reflection still finds it.
- * test_sms_service.py holds the list of what is public.
+ * Socket, bind and listen are not here at all: the service never makes or binds a socket (the holder of the port
+ * does), so a call to one does not compile. test_sms_service.py holds the list of what is public.
  */
 public final class Os {
     private Os() {}
 
     /** What a test scripts: the world the calls see. */
     public interface Backend {
-        FileDescriptor socket(int domain, int type, int protocol) throws ErrnoException;
-
-        void bind(FileDescriptor fd, SocketAddress address) throws ErrnoException, SocketException;
-
-        void listen(FileDescriptor fd, int backlog) throws ErrnoException;
-
         FileDescriptor accept(FileDescriptor fd, SocketAddress peer) throws ErrnoException, SocketException;
 
         int poll(StructPollfd[] fds, int timeoutMillis) throws ErrnoException;
@@ -44,18 +39,6 @@ public final class Os {
     }
 
     public static volatile Backend backend;
-
-    public static FileDescriptor socket(int domain, int type, int protocol) throws ErrnoException {
-        return backend.socket(domain, type, protocol);
-    }
-
-    public static void bind(FileDescriptor fd, SocketAddress address) throws ErrnoException, SocketException {
-        backend.bind(fd, address);
-    }
-
-    public static void listen(FileDescriptor fd, int backlog) throws ErrnoException {
-        backend.listen(fd, backlog);
-    }
 
     /** The public overload: the platform fills an InetSocketAddress only; null asks for no address. */
     public static FileDescriptor accept(FileDescriptor fd, InetSocketAddress peerAddress)

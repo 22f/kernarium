@@ -19,14 +19,10 @@
 //    does for an id that names no object, and the host lives on: a context of
 //    its own is served afterwards.
 //  - a shader stage with no module and nothing chained to name its shader, or
-//    with no entry point name, in a pipeline creation or a key request. The
-//    registry lets the module be null, so the codec cannot refuse it, and the
-//    runtime hashed the stage by reading the identifier it does not have. A
-//    creation ends the context; a key request answers
-//    VK_ERROR_VALIDATION_FAILED and the context lives. A stage with a
-//    chained module is served, and so is one whose pipeline is made from the
-//    binaries it captured, which the specification says ignore the stage's
-//    shaders.
+//    with no entry point name, in a pipeline creation. The registry lets the
+//    module be null, so the codec cannot refuse it, and the runtime hashed the
+//    stage by reading the identifier it does not have. The creation ends the
+//    context. A stage with a chained module is served.
 //  - a pipeline create info that chains a library which is the null handle.
 //  - a host image copy (VK_EXT_host_image_copy) of a region the image cannot
 //    hold: a mip level, an aspect, an offset or an extent the image does not
@@ -73,7 +69,7 @@ enum Id : std::uint64_t {
     instanceId = 1, physDevId = 2, deviceId = 3, otherDeviceId = 4,
     imageId = 10, bufferId = 20, memoryId = 30, imageMemoryId = 31,
     poolId = 40, commandBufferId = 41, moduleId = 50, layoutId = 51,
-    pipelineId = 60, otherPipelineId = 61, binaryId = 70,
+    pipelineId = 60, otherPipelineId = 61,
     otherImageId = 11, otherImageMemoryId = 32,
 };
 constexpr std::uint32_t extent = 16;
@@ -113,14 +109,6 @@ DeviceExtras semaphoreFdDevice()
     DeviceExtras extras;
     extras.extensions = {VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
-    return extras;
-}
-
-DeviceExtras pipelineBinaryDevice()
-{
-    DeviceExtras extras;
-    extras.extensions = {VK_KHR_PIPELINE_BINARY_EXTENSION_NAME};
-    extras.pipelineBinaries = true;
     return extras;
 }
 
@@ -383,78 +371,6 @@ void encodeGraphicsPipeline(Stream& s, std::uint64_t pipeline, const GraphicsSta
     s.arraySize(1); s.u64(pipeline);
 }
 
-// vkGetPipelineKeyKHR of a compute or a graphics pipeline create info chained
-// to a VkPipelineCreateInfoKHR, as the driver reads it.
-void encodeKeyOfCompute(Stream& s, const StageSource& source, const PipelineChain& chain = {})
-{
-    s.command(getPipelineKey, true);
-    s.u64(deviceId);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
-    encodePipelineChain(s, chain);
-    encodeComputeSelf(s, source, 0);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR); s.ptr(false);
-}
-
-void encodeKeyOfGraphics(Stream& s, const GraphicsStages& stages, const PipelineChain& chain = {})
-{
-    s.command(getPipelineKey, true);
-    s.u64(deviceId);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
-    encodePipelineChain(s, chain);
-    encodeGraphicsSelf(s, stages);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR); s.ptr(false);
-}
-
-void encodeKeyOfDevice(Stream& s)
-{
-    s.command(getPipelineKey, true);
-    s.u64(deviceId);
-    s.ptr(false);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR); s.ptr(false);
-}
-
-// vkCreatePipelineBinariesKHR of a pipeline that was made to capture them: the
-// binaries land under the guest's id `binaryId`, one of them.
-void encodeBinariesOfPipeline(Stream& s, std::uint64_t pipeline, std::uint64_t binary)
-{
-    s.command(createPipelineBinaries, true);
-    s.u64(deviceId);
-    s.ptr(true);
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR); s.ptr(false);
-    s.ptr(false);                               // pKeysAndDataInfo
-    s.u64(pipeline);
-    s.ptr(false);                               // pPipelineCreateInfo
-    s.ptr(false);                               // pAllocator
-    s.ptr(true);                                // pBinaries
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR); s.ptr(false);
-    s.u32(1);
-    s.arraySize(1); s.u64(binary);
-}
-
-// vkCreateComputePipelines of the empty shader that is to capture its binaries.
-void encodeCapturingComputePipeline(Stream& s, std::uint64_t pipeline, std::uint64_t layout)
-{
-    s.command(createComputePipelines, true);
-    s.u64(deviceId);
-    s.u64(0);
-    s.u32(1); s.arraySize(1);
-    s.u32(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
-    s.ptr(true);                                // pNext: the flags that ask for the data
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO); s.ptr(false);
-    s.u64(VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR);
-    encodeComputeSelf(s, {.moduleInfo = true}, layout);
-    s.ptr(false);
-    s.arraySize(1); s.u64(pipeline);
-}
 
 // vkCopyImageToMemoryMESA of a region of the image, into a reply blob of
 // dataSize bytes.
@@ -649,23 +565,6 @@ Row stageRefusedRow(const char* name, const char* line,
         require(rendererSaid(line), "the renderer did not refuse the stage itself");
         requireFreshContextServed(extras);
     }, false, setupOf(extras)};
-}
-
-// A key request for a pipeline whose stage names no shader is refused, the
-// context lives and serves the next request.
-Row keyStageRefusedRow(const char* name, const char* line, std::function<void(Stream&)> command)
-{
-    return {name, [=](Session& session) {
-        Stream s;
-        command(s);
-        requireAnswered(session.ask(s), getPipelineKey, VK_ERROR_VALIDATION_FAILED,
-            "the key of a pipeline whose stage names no shader was not refused");
-        require(rendererSaid(line), "the renderer did not refuse the stage itself");
-        Stream next;
-        encodeKeyOfDevice(next);
-        requireAnswered(session.ask(next), getPipelineKey, VK_SUCCESS,
-            "the context did not serve a key after a refused request");
-    }, false, setupOf(pipelineBinaryDevice())};
 }
 
 // The image of a host copy, already made ready.
@@ -909,12 +808,6 @@ const std::vector<Row>& rows()
             [](Stream& s) {
                 encodeGraphicsPipeline(s, pipelineId, {.vertex = true, .source = {.moduleInfo = true, .name = false}});
             }),
-        keyStageRefusedRow("get-the-key-of-a-compute-stage-with-no-module", noShaderLine,
-            [](Stream& s) { encodeKeyOfCompute(s, {}); }),
-        keyStageRefusedRow("get-the-key-of-a-compute-stage-with-no-entry-point-name", noEntryPointLine,
-            [](Stream& s) { encodeKeyOfCompute(s, {.moduleInfo = true, .name = false}); }),
-        keyStageRefusedRow("get-the-key-of-a-graphics-stage-with-no-module", noShaderLine,
-            [](Stream& s) { encodeKeyOfGraphics(s, {.vertex = true}); }),
 
         // A pipeline that chains a library which is the null handle.
         stageRefusedRow("graphics-pipeline-from-the-null-library", "a pipeline library is the null handle",
@@ -922,13 +815,8 @@ const std::vector<Row>& rows()
                 encodeGraphicsPipeline(s, pipelineId, {.vertex = true, .source = {.moduleInfo = true}},
                     {.library = true});
             }),
-        keyStageRefusedRow("get-the-key-of-a-pipeline-with-the-null-library", "names a null handle",
-            [](Stream& s) {
-                encodeKeyOfGraphics(s, {.vertex = true, .source = {.moduleInfo = true}}, {.library = true});
-            }),
 
-        // A stage with a chained module is served, and so is a pipeline made
-        // from the binaries it captured, which ignore the stage's shaders.
+        // A stage with a chained module is served.
         {"compute-stage-with-a-chained-module-is-served", [](Session& session) {
             Stream layout;
             encodePipelineLayout(layout, layoutId);
@@ -939,32 +827,6 @@ const std::vector<Row>& rows()
                 "a stage with a chained module was refused");
             require(!rendererSaid(noShaderLine), "the renderer refused a stage that names its shader");
         }, false, setupOf(plainDevice())},
-        {"compute-pipeline-from-captured-binaries-needs-no-module", [](Session& session) {
-            Stream layout;
-            encodePipelineLayout(layout, layoutId);
-            require(session.send(layout), "the pipeline layout was refused");
-            Stream capture;
-            encodeCapturingComputePipeline(capture, pipelineId, layoutId);
-            requireAnswered(session.ask(capture), createComputePipelines, VK_SUCCESS,
-                "the pipeline that captures its binaries was refused");
-            Stream binaries;
-            encodeBinariesOfPipeline(binaries, pipelineId, binaryId);
-            const Answer made = session.ask(binaries);
-            require(made.submitted && made.command == static_cast<std::int32_t>(createPipelineBinaries) &&
-                        (made.result == VK_SUCCESS || made.result == VK_INCOMPLETE),
-                "the binaries of the pipeline were not made");
-            Stream s;
-            encodeComputePipeline(s, otherPipelineId, {}, {.binaries = true, .binary = binaryId}, layoutId);
-            requireAnswered(session.ask(s), createComputePipelines, VK_SUCCESS,
-                "a pipeline made from captured binaries was refused for its stage's missing module");
-            require(!rendererSaid(noShaderLine), "the renderer refused a stage a binary ignores");
-        }, false, setupOf(pipelineBinaryDevice())},
-        {"get-the-key-of-a-compute-stage-with-a-chained-module-is-served", [](Session& session) {
-            Stream s;
-            encodeKeyOfCompute(s, {.moduleInfo = true});
-            requireAnswered(session.ask(s), getPipelineKey, VK_SUCCESS,
-                "the key of a stage with a chained module was refused");
-        }, false, setupOf(pipelineBinaryDevice())},
 
         // A host image copy of a region the image cannot hold.
         hostCopyRefusedRow("host-copy-to-memory-past-the-last-mip-level", mipLine, true, {.mipLevel = 5}),

@@ -2,8 +2,9 @@
 //
 // The host channel's server (Server, HostFrame, and VsockListener over a scripted android.system.Os) on a
 // plain JVM: admission by the peer's CID, the frame, the handler's results, the order of the connections,
-// the listening socket's retries, and the record's entry point behind the shipped server. The rows are U4 of
-// the channel's design and R23 of the record's. test_sms_service.py runs it.
+// the listening socket's retries, the listener over a descriptor it is given (never a socket, bind or listen;
+// the session ends at idle or on an accept that fails), and the record's entry point behind the shipped server.
+// The rows are U4 of the channel's design and R23 of the record's. test_sms_service.py runs it.
 
 package android.kernarium.sms;
 
@@ -127,6 +128,8 @@ public final class ChannelTest {
         final BlockingQueue<Server.Conn> conns = new LinkedBlockingQueue<>();
         final AtomicInteger accepts = new AtomicInteger();
         final List<String> events;
+        /** The listener has nothing more to give when the queue is empty: accept returns null, as an idle listener's does. */
+        boolean endsWhenEmpty;
 
         Queue(List<String> events) {
             this.events = events;
@@ -136,6 +139,7 @@ public final class ChannelTest {
         public Server.Conn accept() throws IOException {
             events.add("accept");
             accepts.incrementAndGet();
+            if (endsWhenEmpty) return conns.poll();
             try {
                 final Server.Conn conn = conns.poll(30, TimeUnit.SECONDS);
                 if (conn == null) throw new IOException("nothing queued");
@@ -487,34 +491,20 @@ public final class ChannelTest {
         final Map<FileDescriptor, Sock> socks = new HashMap<>();
         final Deque<Sock> queued = new ArrayDeque<>();
         final FileDescriptor listener = new FileDescriptor();
-        final List<ErrnoException> bindFailures = new ArrayList<>();
         final List<ErrnoException> acceptFailures = new ArrayList<>();
         /** A failure of the other kinds, thrown by the next accept that is polled ready. */
         Exception acceptOther;
         /** The address each accept was given to fill. */
         final List<SocketAddress> acceptAddresses = new ArrayList<>();
-        SocketAddress bound;
-        int listens;
-        int sockets;
+        /** The world's own clock, in nanoseconds: a poll that finds nothing ready waits out its timeout on it. */
+        long now = 5_000_000_000L;
+        /** The timeout of every poll of the listener that found nothing, in milliseconds. */
+        final List<Integer> waits = new ArrayList<>();
+        /** Run after each poll of the listener: a test queues a connection at a moment of the clock. */
+        Runnable onListenerPoll;
 
-        @Override
-        public FileDescriptor socket(int domain, int type, int protocol) {
-            calls.add("socket " + domain);
-            ++sockets;
-            return listener;
-        }
-
-        @Override
-        public void bind(FileDescriptor fd, SocketAddress address) throws ErrnoException {
-            calls.add("bind");
-            if (!bindFailures.isEmpty()) throw bindFailures.remove(0);
-            bound = address;
-        }
-
-        @Override
-        public void listen(FileDescriptor fd, int backlog) {
-            calls.add("listen");
-            ++listens;
+        long clock() {
+            return now;
         }
 
         /** Like libjavacore's accept: a VmSocketAddress it is given is filled with the peer's port and CID. */
@@ -566,6 +556,10 @@ public final class ChannelTest {
                     if ((p.events & OsConstants.POLLIN) != 0
                             && (!queued.isEmpty() || !acceptFailures.isEmpty() || acceptOther != null)) {
                         p.revents = (short) OsConstants.POLLIN;
+                    } else if (timeoutMillis > 0) {
+                        waits.add(timeoutMillis);
+                        now += timeoutMillis * 1_000_000L;
+                        if (onListenerPoll != null) onListenerPoll.run();
                     }
                 } else {
                     final Sock sock = socks.get(p.fd);
@@ -623,227 +617,257 @@ public final class ChannelTest {
         }
     }
 
-    private static final class Pauses implements VsockListener.Sleeper {
-        final List<Long> pauses = new ArrayList<>();
-
-        @Override
-        public void sleep(long millis) {
-            pauses.add(millis);
-        }
-    }
-
-    /** The glue over a scripted world: the peer's CID, the short writes, the listener's retries. */
-    private static void glue() throws Exception {
-        final World world = new World();
-        Os.backend = world;
-        final byte[] request = frame("frame-request-first-number");
-        final byte[] answer = frame("frame-answer-handed-over-1");
-        final Handling handling = new Handling();
-        handling.answers = p -> Golden.bytes(golden.fields("frame-answer-handed-over-1")[0]);
-        final Pauses pauses = new Pauses();
-        final List<String> log = new ArrayList<>();
-        final VsockListener listener = new VsockListener(log::add, pauses);
-        final Server server = new Server(listener, handling, log::add, System::nanoTime, 1);
-
-        // The host, a byte at a time, and a short write on the way back.
+    /** A host connection for the world to hand out. */
+    private static World.Sock hostSock(byte[] request) {
         final World.Sock host = new World.Sock();
         host.cid = OsConstants.VMADDR_CID_HOST;
         host.incoming = request;
         host.ends = false;
-        world.queued.add(host);
-        server.serveOne();
-        same(1, handling.payloads.size(), "the host's request is dispatched");
-        check(Arrays.equals(answer, host.written.toByteArray()), "the answer arrived whole over short writes");
-        check(host.shutdown && host.closed && host.nonblocking, "shut down, closed, and non-blocking");
-        check(host.closeOnExec, "the accepted descriptor is close-on-exec");
-        check(world.bound instanceof VmSocketAddress && ((VmSocketAddress) world.bound).getSvmPort() == 5560
-                && ((VmSocketAddress) world.bound).getSvmCid() == OsConstants.VMADDR_CID_ANY, "listening on port 5560, any CID");
-        same("socket " + OsConstants.AF_VSOCK, world.calls.get(0), "a vsock socket");
-        check(log.contains("listening on vsock port 5560"), "the first listen is logged");
-        // The peer is what accept reported: the address it was given to fill, never getpeername, which
-        // fails for AF_VSOCK on the image (the stub's Os.getpeername throws as the guest's library does).
-        check(world.acceptAddresses.size() == 1 && world.acceptAddresses.get(0) instanceof VmSocketAddress,
-                "accept is given a VmSocketAddress to fill: " + world.acceptAddresses);
-        final int firstRead = world.calls.indexOf("read");
-        check(firstRead > world.calls.indexOf("accept") && world.calls.indexOf("accept") >= 0,
-                "the peer is known from the accept, before the first read: " + world.calls);
-        check(!log.stream().anyMatch(line -> line.startsWith("refused")), "the host is not refused: " + log);
-
-        // Another CID: closed unread and unwritten, and refused in the line that names it, once.
-        final int refusalsLogged = log.size();
-        for (int cid : new int[] {0, 1, 3, 4, Integer.MIN_VALUE}) {
-            final int callsBefore = world.calls.size();
-            final World.Sock other = new World.Sock();
-            other.cid = cid;
-            other.incoming = request;
-            other.ends = false; // a request that was admitted would be dispatched
-            world.queued.add(other);
-            handling.payloads.clear();
-            server.serveOne();
-            final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
-            check(!calls.contains("read") && !calls.contains("write") && other.closed && other.shutdown,
-                    "a peer with CID " + cid + " is closed unread: " + calls);
-            check(handling.payloads.isEmpty(), "and not dispatched");
-        }
-        same(Arrays.asList("refused a connection from CID 0"), log.subList(refusalsLogged, log.size()),
-                "the first refusal is logged with its CID");
-
-        // No address: the accept left the address alone, or filled the CID that no peer has. Closed unread and
-        // unwritten, never served, and said so (once) in a line with no CID or port in it.
-        final int unaddressedLogged = log.size();
-        for (Integer cid : new Integer[] {null, OsConstants.VMADDR_CID_ANY}) {
-            final int callsBefore = world.calls.size();
-            final World.Sock other = new World.Sock();
-            other.cid = cid;
-            other.incoming = request;
-            other.ends = false; // a request that was admitted would be dispatched
-            world.queued.add(other);
-            handling.payloads.clear();
-            server.serveOne();
-            final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
-            check(!calls.contains("read") && !calls.contains("write") && other.closed && other.shutdown,
-                    "a peer whose address is " + cid + " is closed unread: " + calls);
-            check(handling.payloads.isEmpty(), "and not dispatched");
-        }
-        same(Arrays.asList("refused a connection with no peer address: IOException"),
-                log.subList(unaddressedLogged, log.size()), "the first of them is logged, with no CID or port");
-
-        // A connection whose address the library cannot convert is closed by it, never reaches the server,
-        // and the next one is served.
-        final World.Sock unconvertible = new World.Sock();
-        unconvertible.libraryRefuses = true;
-        unconvertible.incoming = request;
-        final World.Sock next = new World.Sock();
-        next.cid = OsConstants.VMADDR_CID_HOST;
-        next.incoming = request;
-        next.ends = false;
-        world.queued.add(unconvertible);
-        world.queued.add(next);
-        handling.payloads.clear();
-        server.serveOne();
-        check(unconvertible.closed && !unconvertible.shutdown && unconvertible.written.size() == 0,
-                "an address the library cannot convert is closed unread");
-        same(1, handling.payloads.size(), "and the next connection, the host's, is served");
-
-        // The host and then a connection whose address accept leaves alone: each accept gets an address of its own,
-        // so the host's CID is not carried over to it.
-        final int callsBeforeUntouched = world.calls.size();
-        final World.Sock untouched = new World.Sock();
-        untouched.incoming = request;
-        untouched.ends = false; // a request that was admitted would be dispatched
-        world.queued.add(untouched);
-        handling.payloads.clear();
-        server.serveOne();
-        final List<String> untouchedCalls = new ArrayList<>(world.calls.subList(callsBeforeUntouched, world.calls.size()));
-        check(!untouchedCalls.contains("read") && !untouchedCalls.contains("write") && untouched.closed
-                && untouched.shutdown, "an untouched address after the host is closed unread: " + untouchedCalls);
-        check(handling.payloads.isEmpty(), "and not dispatched, as if it were the host's");
-
-        // A deadline that has nearly passed, and a peer that says nothing: dropped.
-        final World.Sock quiet = new World.Sock();
-        quiet.cid = OsConstants.VMADDR_CID_HOST;
-        quiet.ends = false;
-        world.queued.add(quiet);
-        final Server hurried = new Server(listener, handling, log::add, () -> System.nanoTime() - 4_999_000_000L, 1);
-        handling.payloads.clear();
-        hurried.serveOne();
-        check(handling.payloads.isEmpty() && quiet.written.size() == 0 && quiet.closed, "a silent peer is dropped at the deadline");
-
-        // The bind fails twice: tried again after a second each time, and complained about once.
-        final World again = new World();
-        Os.backend = again;
-        again.bindFailures.add(new ErrnoException("bind", OsConstants.EADDRINUSE));
-        again.bindFailures.add(new ErrnoException("bind", OsConstants.EADDRINUSE));
-        final Pauses waits = new Pauses();
-        final List<String> logAgain = new ArrayList<>();
-        final VsockListener patient = new VsockListener(logAgain::add, waits);
-        final World.Sock one = new World.Sock();
-        one.cid = OsConstants.VMADDR_CID_HOST;
-        again.queued.add(one);
-        final Server.Conn conn = patient.accept();
-        check(conn != null, "the listener was set up after two failures");
-        same(Arrays.asList(1000L, 1000L), waits.pauses, "a second between tries");
-        same(3, again.sockets, "a new socket for each try");
-        same(1L, logAgain.stream().filter(l -> l.startsWith("host channel: cannot listen")).count(),
-                "the failure is logged once");
-        conn.close();
-
-        // An accept that is interrupted goes on; one that fails otherwise closes the listener and listens again.
-        again.acceptFailures.add(new ErrnoException("accept", OsConstants.EINTR));
-        again.acceptFailures.add(new ErrnoException("accept", OsConstants.ECONNABORTED));
-        final World.Sock two = new World.Sock();
-        two.cid = OsConstants.VMADDR_CID_HOST;
-        again.queued.add(two);
-        final int socketsBefore = again.sockets;
-        check(patient.accept() != null, "accept goes on after EINTR and ECONNABORTED");
-        same(socketsBefore, again.sockets, "without listening again");
-        again.acceptFailures.add(new ErrnoException("accept", 24));
-        final World.Sock three = new World.Sock();
-        three.cid = OsConstants.VMADDR_CID_HOST;
-        again.queued.add(three);
-        check(patient.accept() != null, "accept goes on after another failure");
-        same(socketsBefore + 1, again.sockets, "with a new listener");
-        check(again.calls.contains("close listener"), "the old listener was closed");
-        Os.backend = null;
+        return host;
     }
 
     /**
-     * The hidden overload of accept is reached by reflection. Its failures come out as they went in, and when it
-     * cannot be found every connection is refused with nothing read, however the host asks.
+     * The listener over the descriptor it is given (the holder's, passed to the service): it never closes the
+     * descriptor (it cannot make, bind or listen on one), it reads the peer's CID from the accept, it ends its
+     * session by returning null once nothing has come for the idle window, and it goes on after an accept that
+     * fails for one of three reasons only.
      */
-    private static void hiddenAccept() throws Exception {
+    private static void givenDescriptor() throws Exception {
         final byte[] request = frame("frame-request-first-number");
-        final World world = new World();
-        Os.backend = world;
-        final Handling handling = new Handling();
-        final List<String> log = new ArrayList<>();
-        final Pauses pauses = new Pauses();
-        final Server server = new Server(new VsockListener(log::add, pauses, "acceptThatIsNotThere"), handling,
-                log::add, System::nanoTime, 1);
-        same(Arrays.asList("host channel: cannot read a peer's CID: NoSuchMethodException"), log,
-                "a hidden method that cannot be found is logged once, when it is looked for");
-        for (int i = 0; i < 3; ++i) {
-            final int callsBefore = world.calls.size();
-            final World.Sock host = new World.Sock();
-            host.cid = OsConstants.VMADDR_CID_HOST;
-            host.incoming = request;
-            host.ends = false; // a request that was admitted would be dispatched
-            world.queued.add(host);
-            server.serveOne();
-            final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
-            check(!calls.contains("read") && !calls.contains("write") && host.closed && host.shutdown,
-                    "with no hidden accept, the host's connection " + i + " is refused unread: " + calls);
-        }
-        check(handling.payloads.isEmpty(), "and nothing is dispatched");
-        check(world.acceptAddresses.size() == 3 && world.acceptAddresses.stream().allMatch(a -> a == null),
-                "the public accept, which fills no address, took them: " + world.acceptAddresses);
-        same(Arrays.asList("host channel: cannot read a peer's CID: NoSuchMethodException",
-                "listening on vsock port 5560", "refused a connection with no peer address: IOException"), log,
-                "each is refused for having no peer address, the line is rate limited");
+        final byte[] answer = frame("frame-answer-handed-over-1");
+        final long window = 30_000;
 
-        // The failures of the hidden accept come out as they went in, not wrapped.
-        final World failing = new World();
-        Os.backend = failing;
-        final List<String> failingLog = new ArrayList<>();
-        final VsockListener listener = new VsockListener(failingLog::add, new Pauses());
-        check(failingLog.isEmpty(), "the real name is found, and nothing is logged: " + failingLog);
-        failing.acceptOther = new IllegalStateException("scripted");
-        failing.queued.add(new World.Sock());
-        try {
-            listener.accept();
-            check(false, "a RuntimeException of the accept comes out");
-        } catch (IllegalStateException e) {
-            same("scripted", e.getMessage(), "a RuntimeException of the accept comes out as it was thrown");
+        // The host's request is served, over short writes, and the session ends at idle.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final Handling handling = new Handling();
+            handling.answers = p -> Golden.bytes(golden.fields("frame-answer-handed-over-1")[0]);
+            final List<String> log = new ArrayList<>();
+            final VsockListener listener = new VsockListener(world.listener, window, log::add, world::clock);
+            final Server server = new Server(listener, handling, log::add, System::nanoTime, 1);
+            final World.Sock host = hostSock(request);
+            world.queued.add(host);
+            check(server.serveOne(), "the host's connection is served");
+            same(1, handling.payloads.size(), "given descriptor: the host's request is dispatched");
+            check(Arrays.equals(answer, host.written.toByteArray()), "given descriptor: the golden answer, over short writes");
+            check(host.shutdown && host.closed && host.nonblocking && host.closeOnExec,
+                    "given descriptor: shut down, closed, non-blocking and close-on-exec");
+            check(world.acceptAddresses.size() == 1 && world.acceptAddresses.get(0) instanceof VmSocketAddress,
+                    "given descriptor: accept is given a VmSocketAddress to fill: " + world.acceptAddresses);
+            check(world.calls.indexOf("accept") >= 0 && world.calls.indexOf("read") > world.calls.indexOf("accept"),
+                    "given descriptor: the peer is known from the accept, before the first read: " + world.calls);
+            check(log.stream().noneMatch(line -> line.startsWith("refused") || line.contains("listening")),
+                    "given descriptor: nothing refused, and no listening line: " + log);
+            // Nothing else comes: the session ends by itself after the window, from the call that found nothing.
+            final long before = world.now;
+            check(!server.serveOne(), "at idle the server's turn ends with no connection served");
+            same(window * 1_000_000L, world.now - before, "the idle wait is the window, to the millisecond");
+            check(world.waits.stream().allMatch(w -> w >= 1 && w <= 1000), "no single wait is longer than a second: " + world.waits);
+            same(1L, log.stream().filter(line -> line.startsWith("host channel: idle")).count(), "idle is said once: " + log);
+            // It never closed the descriptor it was given (it cannot make, bind or listen on one: the platform's
+            // socket, bind and listen are not in the stub, so a call to them does not compile).
+            check(world.calls.stream().noneMatch(c -> c.equals("close listener")),
+                    "the listener is not closed by the listener class: " + world.calls);
+            Os.backend = null;
         }
-        failing.acceptOther = new SocketException("scripted");
-        final World.Sock after = new World.Sock();
-        after.cid = OsConstants.VMADDR_CID_HOST;
-        failing.queued.add(after);
-        final int socketsBefore = failing.sockets;
-        check(listener.accept() != null, "after a SocketException the listener listens again and accepts");
-        same(socketsBefore + 1, failing.sockets, "with a new listener");
-        check(failingLog.contains("host channel: accept failed: SocketException"), "and said so: " + failingLog);
-        Os.backend = null;
+
+        // Another CID and a connection with no peer address are refused unread, as before, and the window goes on.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final Handling handling = new Handling();
+            final List<String> log = new ArrayList<>();
+            final Server server = new Server(new VsockListener(world.listener, window, log::add, world::clock), handling,
+                    log::add, System::nanoTime, 1);
+            for (Integer cid : new Integer[] {0, 1, 3, 4, Integer.MIN_VALUE, null, OsConstants.VMADDR_CID_ANY}) {
+                final int callsBefore = world.calls.size();
+                final World.Sock other = hostSock(request);
+                other.cid = cid;
+                world.queued.add(other);
+                check(server.serveOne(), "a connection of CID " + cid + " is taken");
+                final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
+                check(!calls.contains("read") && !calls.contains("write") && other.closed && other.shutdown,
+                        "given descriptor: CID " + cid + " is closed unread: " + calls);
+            }
+            check(handling.payloads.isEmpty(), "and nothing was dispatched");
+            // The first refusal is logged with its CID, the first addressless connection in a line with no CID or
+            // port in it, and the rest are rate limited.
+            same(Arrays.asList("refused a connection from CID 0", "refused a connection with no peer address: IOException"),
+                    log, "the refusals are logged once each");
+            // A connection whose address the library cannot convert is closed by it and never reaches the server;
+            // the next one, the host's, is served, and each accept gets an address of its own.
+            final World.Sock unconvertible = new World.Sock();
+            unconvertible.libraryRefuses = true;
+            unconvertible.incoming = request;
+            world.queued.add(unconvertible);
+            world.queued.add(hostSock(request));
+            check(server.serveOne(), "the host's connection is taken after one the library closed");
+            check(unconvertible.closed && !unconvertible.shutdown && unconvertible.written.size() == 0,
+                    "an address the library cannot convert is closed unread");
+            same(1, handling.payloads.size(), "and the host's request is served");
+            final int callsBeforeUntouched = world.calls.size();
+            final World.Sock untouched = new World.Sock();
+            untouched.incoming = request;
+            untouched.ends = false; // a request that was admitted would be dispatched
+            world.queued.add(untouched);
+            handling.payloads.clear();
+            check(server.serveOne(), "an untouched address after the host is taken");
+            final List<String> untouchedCalls = new ArrayList<>(world.calls.subList(callsBeforeUntouched, world.calls.size()));
+            check(!untouchedCalls.contains("read") && !untouchedCalls.contains("write") && untouched.closed,
+                    "an untouched address after the host is closed unread: " + untouchedCalls);
+            check(handling.payloads.isEmpty(), "and not dispatched, as if it were the host's");
+            // A silent peer is dropped at the step's deadline.
+            final World.Sock quiet = new World.Sock();
+            quiet.cid = OsConstants.VMADDR_CID_HOST;
+            quiet.ends = false;
+            world.queued.add(quiet);
+            final Server hurried = new Server(new VsockListener(world.listener, window, log::add, world::clock), handling,
+                    log::add, () -> System.nanoTime() - 4_999_000_000L, 1);
+            check(hurried.serveOne(), "the silent peer is taken");
+            check(handling.payloads.isEmpty() && quiet.written.size() == 0 && quiet.closed, "a silent peer is dropped at the deadline");
+            Os.backend = null;
+        }
+
+        // The window starts when the accept is called, and so again after every connection that took time.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final Handling handling = new Handling();
+            handling.answers = p -> {
+                world.now += 20_000_000_000L; // a request that takes 20 s to hand over
+                return new byte[] {'o', 'k'};
+            };
+            final long start = world.now;
+            final List<String> log = new ArrayList<>();
+            final Server server = new Server(new VsockListener(world.listener, window, log::add, world::clock), handling,
+                    log::add, System::nanoTime, 1);
+            // A connection that arrives 29 s into the first window is still taken; the window then starts again.
+            world.onListenerPoll = () -> {
+                if (world.now - start >= 29_000_000_000L && world.queued.isEmpty() && handling.payloads.isEmpty()) {
+                    world.queued.add(hostSock(request));
+                }
+            };
+            final Thread thread = new Thread(server);
+            thread.start();
+            thread.join(30_000);
+            check(!thread.isAlive(), "the server ends by itself, with no interrupt, once the listener reports idle");
+            same(1, handling.payloads.size(), "the request at 29 s is dispatched");
+            same(start + 29_000_000_000L + 20_000_000_000L + window * 1_000_000L, world.now,
+                    "29 s of window, the 20 s request, then a whole new window");
+            Os.backend = null;
+        }
+
+        // Connections that are queued are served in the order the kernel queued them, all before the session ends.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final Handling handling = new Handling();
+            final Server server = new Server(new VsockListener(world.listener, window, x -> {}, world::clock), handling,
+                    x -> {}, System::nanoTime, 1);
+            final byte[] second = request.clone();
+            second[HostFrame.HEADER_BYTES + 2] = 'r';
+            final byte[] third = request.clone();
+            third[HostFrame.HEADER_BYTES + 2] = 't';
+            world.queued.add(hostSock(request));
+            world.queued.add(hostSock(second));
+            world.queued.add(hostSock(third));
+            final Thread thread = new Thread(server);
+            thread.start();
+            thread.join(30_000);
+            check(!thread.isAlive(), "the server ends after the last queued connection and the window");
+            same(3, handling.payloads.size(), "all three are served before it ends");
+            check(handling.payloads.size() == 3 && handling.payloads.get(0)[2] == 'f' && handling.payloads.get(1)[2] == 'r'
+                    && handling.payloads.get(2)[2] == 't', "in queue order");
+            same(3L, world.calls.stream().filter(c -> c.equals("accept")).count(), "one accept for each of the three");
+            Os.backend = null;
+        }
+
+        // An accept that is interrupted, would block or was aborted goes on; any other failure ends the session at
+        // once, says so, and leaves the descriptor to its owner.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final List<String> log = new ArrayList<>();
+            final VsockListener listener = new VsockListener(world.listener, window, log::add, world::clock);
+            world.acceptFailures.add(new ErrnoException("accept", OsConstants.EINTR));
+            world.acceptFailures.add(new ErrnoException("accept", OsConstants.EAGAIN));
+            world.acceptFailures.add(new ErrnoException("accept", OsConstants.ECONNABORTED));
+            world.queued.add(hostSock(request));
+            check(listener.accept() != null, "accept goes on after EINTR, EAGAIN and ECONNABORTED");
+            same(0, world.waits.size(), "and without a wait");
+            world.acceptFailures.add(new ErrnoException("accept", 24));
+            final long before = world.now;
+            check(listener.accept() == null, "any other errno ends the session");
+            same(before, world.now, "at once, not at the end of the window");
+            check(log.contains("host channel: accept failed, errno 24"), "and says so: " + log);
+            world.acceptOther = new SocketException("scripted");
+            world.queued.add(hostSock(request));
+            check(listener.accept() == null, "a SocketException ends it");
+            check(log.contains("host channel: accept failed: SocketException"), "and says so: " + log);
+            world.acceptOther = new IllegalStateException("scripted");
+            world.queued.add(hostSock(request));
+            check(listener.accept() == null, "an unexpected exception ends it too");
+            check(log.contains("host channel: accept failed: IllegalStateException"), "and says so: " + log);
+            check(world.calls.stream().noneMatch(c -> c.equals("close listener")),
+                    "the descriptor is not closed: " + world.calls);
+            Os.backend = null;
+        }
+
+        // The hidden accept that cannot be found: every connection is refused unread, as in the other mode.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final Handling handling = new Handling();
+            final List<String> log = new ArrayList<>();
+            final Server server = new Server(new VsockListener(world.listener, window, log::add, world::clock,
+                    "acceptThatIsNotThere"), handling, log::add, System::nanoTime, 1);
+            same(Arrays.asList("host channel: cannot read a peer's CID: NoSuchMethodException"), log, "said once, when looked for");
+            final World.Sock host = hostSock(request);
+            world.queued.add(host);
+            check(server.serveOne(), "the connection is taken");
+            check(world.calls.stream().noneMatch(c -> c.equals("read") || c.equals("write")) && host.closed,
+                    "and refused unread: " + world.calls);
+            check(handling.payloads.isEmpty(), "and not dispatched");
+            check(world.acceptAddresses.size() == 1 && world.acceptAddresses.get(0) == null,
+                    "the public accept, which fills no address, took it: " + world.acceptAddresses);
+            same(Arrays.asList("host channel: cannot read a peer's CID: NoSuchMethodException",
+                    "refused a connection with no peer address: IOException"), log,
+                    "it is refused for having no peer address, the line is rate limited");
+            Os.backend = null;
+        }
+
+        // The hidden accept that is there is found by its name, and its failures come out as they went in.
+        {
+            final World world = new World();
+            Os.backend = world;
+            final List<String> log = new ArrayList<>();
+            final VsockListener listener = new VsockListener(world.listener, window, log::add, world::clock);
+            check(log.isEmpty(), "the real name is found, and nothing is logged: " + log);
+            world.acceptOther = new IllegalStateException("scripted");
+            world.queued.add(new World.Sock());
+            check(listener.accept() == null, "a RuntimeException of the accept ends the session");
+            check(log.contains("host channel: accept failed: IllegalStateException"), "and is logged by its class only: " + log);
+            Os.backend = null;
+        }
+
+        // A listener that has nothing more to give ends the server's loop, and the server asks it no more.
+        {
+            final Handling handling = new Handling();
+            final Queue queue = new Queue(new ArrayList<>());
+            queue.endsWhenEmpty = true;
+            final Script a = new Script(queue.events).sends(request);
+            a.ends = false;
+            queue.conns.add(a);
+            final Server server = server(queue, handling, new ArrayList<>());
+            final Thread thread = new Thread(server);
+            thread.start();
+            thread.join(30_000);
+            check(!thread.isAlive(), "run() returns when accept gives null");
+            same(1, handling.payloads.size(), "after serving what was queued");
+            same(2, queue.accepts.get(), "and never asks again");
+            check(a.closed, "the connection was closed");
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -853,8 +877,7 @@ public final class ChannelTest {
         handlerResults();
         order();
         emptyResult();
-        glue();
-        hiddenAccept();
+        givenDescriptor();
         System.exit(Checks.finish());
     }
 }
