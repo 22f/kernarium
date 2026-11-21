@@ -132,6 +132,25 @@ void exchangeWith(Guest& guest, std::uint16_t hostPort, std::uint32_t guestPort)
     require(guest.expectNotCredit().header.op == protocol::opShutdown);
 }
 
+/* A client whose connection the listener's host has completed: one byte sent
+ * over it is acknowledged, which only a connection in the accept queue does,
+ * or the forwarder has already ended the stream. */
+int connectCompleted(std::uint16_t port)
+{
+    const int client = connectLoopback(port);
+    const char byte = 'x';
+    (void)::send(client, &byte, 1, 0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (;;) {
+        int unacknowledged = 1;
+        socklen_t length = sizeof(unacknowledged);
+        if (::getsockopt(client, SOL_SOCKET, SO_NWRITE, &unacknowledged, &length) != 0 ||
+            unacknowledged == 0 || readable(client, 0))
+            return client;
+        require(std::chrono::steady_clock::now() < deadline, "the connection was never completed");
+    }
+}
+
 void forwardsAConnectionToTheGuestPort()
 {
     uml::testing::Watchdog watchdog("forwarder", std::chrono::seconds(60));
@@ -236,6 +255,30 @@ void closesAConnectionThatArrivesWhileNoGuestIsAttached()
     exchangeWith(second, port, 5555);
 }
 
+void aConnectionFromTheGapNeverReachesTheNextGuest()
+{
+    uml::testing::Watchdog watchdog("forwarder gap client", std::chrono::seconds(60));
+    Guest guest;
+    /* Detached from the start. */
+    Forwarder forwarder(nullptr, {forward(0, 5555)});
+    const auto port = forwarder.port(0);
+    /* A client that connected before a guest was attached belongs to the gap,
+     * however late the forwarder gets to it: it is closed, and the guest
+     * attached next never hears of it. The next guest is attached before the
+     * client is waited for, so that the forwarder may not have looked at the
+     * connection yet. */
+    for (int round = 0; round < 300; ++round) {
+        const int gap = connectCompleted(port);
+        forwarder.attach(borrowed(guest));
+        require(endsWithin(gap, 5000));
+        ::close(gap);
+        require(guest.quiet());
+        forwarder.detach();
+    }
+    forwarder.attach(borrowed(guest));
+    exchangeWith(guest, port, 5555);
+}
+
 void detachEndsAnOpeningTheGuestNeverAnswers()
 {
     uml::testing::Watchdog watchdog("forwarder detach", std::chrono::seconds(60));
@@ -284,6 +327,8 @@ int main()
          servesASecondGuestOnTheSamePortAfterDetach},
         {"closes-a-connection-that-arrives-while-no-guest-is-attached",
          closesAConnectionThatArrivesWhileNoGuestIsAttached},
+        {"a-connection-from-the-gap-never-reaches-the-next-guest",
+         aConnectionFromTheGapNeverReachesTheNextGuest},
         {"detach-ends-an-opening-the-guest-never-answers",
          detachEndsAnOpeningTheGuestNeverAnswers},
         {"refuses-a-port-in-use", refusesAPortInUse},

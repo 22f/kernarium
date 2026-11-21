@@ -62,7 +62,8 @@ public:
     [[nodiscard]] std::uint16_t port(std::size_t index) const;
 
     /* Reaches the guest behind `endpoint` from now on, after detaching the
-     * guest it reached before. */
+     * guest it reached before. A connection that had reached a listener
+     * before the call is closed, not offered to the new guest. */
     void attach(std::shared_ptr<Endpoint> endpoint);
 
     /* Reaches no guest. A connection that arrives while none is attached is
@@ -82,8 +83,9 @@ private:
     void replace(std::shared_ptr<Endpoint> endpoint) noexcept;
     static void end(std::list<std::unique_ptr<Worker>>& workers) noexcept;
 
-    /* Guards `endpoint_` and the membership of `workers_`. It is never held
-     * while a worker's own mutex is. */
+    /* Guards `endpoint_` and the membership of `workers_`, and is held while
+     * a connection is taken from a listener and given its endpoint. It is never
+     * held while a worker's own mutex is. */
     std::mutex mutex_;
     std::shared_ptr<Endpoint> endpoint_;
     std::list<std::unique_ptr<Worker>> workers_;

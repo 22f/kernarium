@@ -35,6 +35,20 @@ bool parseNumber(std::string_view text, std::uint64_t maximum, std::uint64_t& va
     return true;
 }
 
+/* The next connection queued on `listener`, or an invalid descriptor when none
+ * is. The listener does not block. */
+uml::gpu::UniqueDescriptor acceptQueued(int listener)
+{
+    for (;;) {
+        uml::gpu::UniqueDescriptor accepted {::accept(listener, nullptr, nullptr)};
+        if (accepted.get() >= 0)
+            return accepted;
+        /* A connection that was reset in the queue is not the end of it. */
+        if (errno != EINTR && errno != ECONNABORTED)
+            return accepted;
+    }
+}
+
 } // namespace
 
 std::optional<ForwardSpecification> parseForward(
@@ -180,6 +194,15 @@ void Forwarder::replace(std::shared_ptr<Endpoint> endpoint) noexcept
     std::list<std::unique_ptr<Worker>> workers;
     {
         std::lock_guard lock(mutex_);
+        /* A connection already queued on a listener arrived before this
+         * replacement, so it belongs to the guest replaced or to the gap
+         * between guests, and the next guest is not offered it. The accept
+         * thread takes a connection and chooses its endpoint under this lock,
+         * so none is in hand between the two. */
+        for (const auto& listener : listeners_) {
+            while (acceptQueued(listener->descriptor.get()).get() >= 0) {
+            }
+        }
         previous = std::move(endpoint_);
         endpoint_ = std::move(endpoint);
         /* Every worker listed now was accepted for the endpoint just
@@ -228,16 +251,19 @@ void Forwarder::run()
         for (std::size_t index = 0; index < listeners_.size(); ++index) {
             if ((descriptors[index].revents & POLLIN) == 0)
                 continue;
+            /* A connection is taken from the listener, and the endpoint it
+             * is served through chosen, under the lock `replace` takes, so
+             * that a connection taken before a replacement is never handed to
+             * the endpoint it installs. The worker is listed with its
+             * endpoint, and its thread started, under the same lock, so that
+             * `replace` finds it and has a thread to join. */
+            std::lock_guard lock(mutex_);
             for (;;) {
-                uml::gpu::UniqueDescriptor accepted {
-                    ::accept(listeners_[index]->descriptor.get(), nullptr, nullptr)};
+                uml::gpu::UniqueDescriptor accepted =
+                    acceptQueued(listeners_[index]->descriptor.get());
                 if (accepted.get() < 0)
                     break;
                 const auto guestPort = listeners_[index]->specification.guestPort;
-                /* The worker is listed with its endpoint, and its thread
-                 * started, under the lock `replace` takes, so that `replace`
-                 * finds it and has a thread to join. */
-                std::lock_guard lock(mutex_);
                 /* No guest is attached: the connection is closed, quietly. */
                 if (!endpoint_)
                     continue;
