@@ -372,7 +372,14 @@ enum class CameraSource : std::uint8_t {
 };
 
 /* The cameras the synthetic camera presents (--camera-profile=). */
-enum class CameraProfile : std::uint8_t { phone, tablet, laptop };
+enum class CameraProfile : std::uint8_t {
+	phone,
+	tablet,
+	laptop,
+	/* The phone whose front camera is mounted at 90 and turned half
+	 * around by the host, as an iPhone's is. */
+	phone_turned_front
+};
 
 struct PreparedArguments {
 	HostGpuOptions gpu;
@@ -657,9 +664,13 @@ PreparedArguments prepare_host_arguments(
 				prepared.camera_profile = CameraProfile::tablet;
 			else if (value == "laptop")
 				prepared.camera_profile = CameraProfile::laptop;
+			else if (value == "phone-turned-front")
+				prepared.camera_profile =
+					CameraProfile::phone_turned_front;
 			else
 				throw std::invalid_argument(
-					"--camera-profile must be phone, tablet or laptop");
+					"--camera-profile must be phone, tablet, "
+					"laptop or phone-turned-front");
 		} else if (valued("--camera-layout=")) {
 			if (value != "auto")
 				throw std::invalid_argument(
@@ -1807,6 +1818,9 @@ private:
 					break;
 				case CameraProfile::laptop:
 					profile = uml::camera::SyntheticProfile::laptop;
+					break;
+				case CameraProfile::phone_turned_front:
+					profile = uml::camera::SyntheticProfile::phoneTurnedFront;
 					break;
 				}
 				source = uml::camera::makeSyntheticCameraSource(profile);

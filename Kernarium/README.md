@@ -2,7 +2,8 @@
 
 Kernarium is the iOS application that runs one Linux or Android guest on the
 Darwin runtime. It targets the iOS device, whose slice also runs on an Apple
-silicon Mac in Designed for iPad mode, and the iOS Simulator, where the guest
+silicon Mac in Designed for iPad mode (macOS 27.0 and later:
+`LSMinimumSystemVersion`), and the iOS Simulator, where the guest
 renders on the CPU for UI tests
 ([`graphics.md`](../docs/graphics.md#ios-simulator-software-renderer)). Build,
 launch, and test commands are in
@@ -374,11 +375,14 @@ decides what the lifecycle edges do and acts only through
   Picture in Picture window. The runtime mirrors the display to a sink the
   application sets (`kernarium_runtime_loader_set_frame_sink`,
   [`graphics.md`](../docs/graphics.md)), which feeds an
-  `AVSampleBufferDisplayLayer`. It needs the `audio` background mode in
+  `AVSampleBufferDisplayLayer`: through the receiver of a render synchronizer
+  on the host clock from iOS 27, and by enqueueing on the layer's renderer,
+  each frame marked to show at once, before it. It needs the `audio` background mode in
   `Info.plist` and a playback audio session that mixes with other audio.
 - `keepRunning` keeps a guest working without a window for a time its owner
   chose, through one `BGContinuedProcessingTask` (`BackgroundJob`) that the
-  user starts with a button tap. iOS grants that task no GPU, so the guest's GPU
+  user starts with a button tap (submitted through `submitTaskRequest` from
+  iOS 27 and `submit(_:)` before). iOS grants that task no GPU, so the guest's GPU
   requests stay held for the whole stay.
 - A guest kept running has its vCPU threads at background priority
   (`set_background_throttle`) and trims its page cache periodically

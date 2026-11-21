@@ -132,3 +132,16 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_localization.py
     LABELS andarium
     TIMEOUT 180)
+
+# Shortcuts offers "Open Android App", and its automatic shortcut, from iOS 27
+# only: before it the apps are no entities, so the action has nothing to ask
+# for. The declarations are @available(iOS 27.0, *) in the source, and the
+# fixtures hold the extracted metadata's shape: an iOS 27.0 introduction beside
+# the wildcard passes, the wildcard alone (offered on iOS 26) does not.
+uml_add_tooling_test(
+    NAME andarium-open-intent-availability
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_open_intent_availability.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 60)

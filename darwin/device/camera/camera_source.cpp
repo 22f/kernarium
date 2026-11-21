@@ -27,6 +27,10 @@ CameraSourceHandle makeSyntheticCameraSource(SyntheticProfile profile)
     case SyntheticProfile::laptop:
         options.profile = uml::platform::SyntheticCameraProfile::laptop;
         break;
+    case SyntheticProfile::phoneTurnedFront:
+        options.profile = uml::platform::SyntheticCameraProfile::phone;
+        options.frontPresentedAt90 = true;
+        break;
     }
     if (const char* control = std::getenv(syntheticControlVariable); control != nullptr) options.controlPath = control;
     return uml::platform::makeSyntheticCamera(options);

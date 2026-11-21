@@ -33,10 +33,18 @@ final class AddToHomeUITests: XCTestCase {
         app.staticTexts[label].firstMatch
     }
 
+    /// Add to Home Screen is offered from iOS 27, where Shortcuts has a tile for each app. A test of
+    /// the row, the chooser or the guide runs there; before it nothing offers them
+    /// (`testBefore27NothingOffersAddToHomeScreen`).
+    private func requireShortcutTiles() throws {
+        if #unavailable(iOS 27.0) { throw XCTSkip("Add to Home Screen is offered from iOS 27") }
+    }
+
     // MARK: The row
 
     @MainActor
-    func testTheRowIsInTheAppsSectionOnlyWhileAndroidRunsWithAList() {
+    func testTheRowIsInTheAppsSectionOnlyWhileAndroidRunsWithAList() throws {
+        try requireShortcutTiles()
         let offered = launch("add-home-row")
         let row = element(offered, "settings-add-to-home-screen")
         XCTAssertTrue(row.waitForExistence(timeout: 20), "the row is not in Settings while Android runs")
@@ -50,8 +58,25 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertFalse(element(without, "settings-add-to-home-screen").waitForExistence(timeout: 3))
     }
 
+    /// Before iOS 27 Shortcuts has no tile for an app of Andarium's, so Settings has no row and nothing
+    /// opens the chooser or the guide, even where the launch asks for them.
     @MainActor
-    func testTheRowOpensTheChooser() {
+    func testBefore27NothingOffersAddToHomeScreen() throws {
+        if #available(iOS 27.0, *) { throw XCTSkip("Add to Home Screen is offered from iOS 27") }
+        let offered = launch("add-home-row")
+        XCTAssertTrue(offered.navigationBars["Settings"].waitForExistence(timeout: 20))
+        XCTAssertFalse(element(offered, "settings-add-to-home-screen").waitForExistence(timeout: 3))
+        offered.terminate()
+
+        let page = launch("add-home-page")
+        XCTAssertTrue(page.navigationBars["Settings"].waitForExistence(timeout: 20))
+        XCTAssertFalse(page.navigationBars["Add to Home Screen"].waitForExistence(timeout: 3))
+        XCTAssertFalse(page.buttons[cometLabel].exists)
+    }
+
+    @MainActor
+    func testTheRowOpensTheChooser() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-row")
         let row = element(app, "settings-add-to-home-screen")
         XCTAssertTrue(row.waitForExistence(timeout: 20))
@@ -63,14 +88,20 @@ final class AddToHomeUITests: XCTestCase {
     // MARK: The chooser
 
     @MainActor
-    func testTheChooserListsInstalledAppsThenBuiltInOnesWithTheLabelsVoiceOverReads() {
+    func testTheChooserListsInstalledAppsThenBuiltInOnesWithTheLabelsVoiceOverReads() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-page")
         XCTAssertTrue(app.navigationBars["Add to Home Screen"].waitForExistence(timeout: 20))
         let comet = app.buttons[cometLabel]
         XCTAssertTrue(comet.waitForExistence(timeout: 10), "no row for Comet Hop")
         // Every row reads as the command it leads to, and in the order it is shown.
         let rows = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Add \u{201C}'"))
-        XCTAssertGreaterThanOrEqual(rows.count, 8)
+        // The rows on screen: iOS 26's rows are taller, so an iPad shows seven of them where iOS 27 shows eight.
+        if #available(iOS 27.0, *) {
+            XCTAssertGreaterThanOrEqual(rows.count, 8)
+        } else {
+            XCTAssertGreaterThanOrEqual(rows.count, 7)
+        }
         let first = rows.element(boundBy: 0)
         XCTAssertEqual(first.label, cometLabel)
         let frames = (0..<min(rows.count, 8)).map { rows.element(boundBy: $0).frame.minY }
@@ -84,7 +115,8 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testSearchNarrowsTheListAndSaysSoWhenNothingMatches() {
+    func testSearchNarrowsTheListAndSaysSoWhenNothingMatches() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-page")
         let search = app.searchFields["Search Android apps"]
         XCTAssertTrue(search.waitForExistence(timeout: 20), "the chooser has no search field")
@@ -98,7 +130,8 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheSearchSwitchIsAtTheFootAndOnByDefault() {
+    func testTheSearchSwitchIsAtTheFootAndOnByDefault() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-page")
         let toggle = element(app, "android-apps-search-switch")
         var swipes = 0
@@ -113,7 +146,8 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheSearchSectionIsInViewOfAShortList() {
+    func testTheSearchSectionIsInViewOfAShortList() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-page-search")
         let toggle = element(app, "android-apps-search-switch")
         XCTAssertTrue(toggle.waitForExistence(timeout: 20))
@@ -122,7 +156,8 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testTurnedOffTheSwitchShowsOffAndTurnsOnAgain() {
+    func testTurnedOffTheSwitchShowsOffAndTurnsOnAgain() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-page-search-off")
         let toggle = element(app, "android-apps-search-switch")
         var swipes = 0
@@ -137,7 +172,8 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testEachStateOfTheList() {
+    func testEachStateOfTheList() throws {
+        try requireShortcutTiles()
         // A list that is being read from Android, with the remembered one shown meanwhile.
         var app = launch("add-home-page-refreshing")
         XCTAssertTrue(element(app, "android-apps-refreshing").waitForExistence(timeout: 20))
@@ -178,7 +214,8 @@ final class AddToHomeUITests: XCTestCase {
     // MARK: The guide
 
     @MainActor
-    func testTheGuideCarriesTheStepsAndApplesButton() {
+    func testTheGuideCarriesTheStepsAndApplesButton() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-guide")
         let guide = element(app, "add-to-home-screen-guide")
         XCTAssertTrue(guide.waitForExistence(timeout: 20), "the guide is not up")
@@ -199,7 +236,8 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testAnAppOfTheChooserLeadsToItsGuide() {
+    func testAnAppOfTheChooserLeadsToItsGuide() throws {
+        try requireShortcutTiles()
         let app = launch("add-home-page")
         let comet = app.buttons[cometLabel]
         XCTAssertTrue(comet.waitForExistence(timeout: 20))
@@ -298,6 +336,8 @@ final class AddToHomeUITests: XCTestCase {
             ("add-home-banner-slow", "app-open-banner"),
         ]
         for (screen, ready) in screens {
+            // The row, the chooser and the guide are offered from iOS 27 (`testBefore27NothingOffersAddToHomeScreen`).
+            if #unavailable(iOS 27.0), ["add-home-row", "add-home-page", "add-home-guide"].contains(where: screen.hasPrefix) { continue }
             let app = XCUIApplication()
             app.launchArguments = previewTestLanguage + ["-screen", screen]
             app.launch()

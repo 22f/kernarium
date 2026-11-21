@@ -56,6 +56,11 @@ struct SyntheticCameraOptions {
     std::uint32_t latencyMilliseconds {};
     // The system has granted access. A session of a host that has not is null.
     bool authorized {true};
+    // Every front camera that states 270 is a platform camera mounted at 90 that the host turns half around, as an
+    // iPhone's is: it states 270 and a presentationTurn of 180 (CameraInfo), its frames are the mounting's (the chart
+    // unturned: the device turns the video) and its JPEG stills are turned like the platform's (made upright for the
+    // stated orientation). A laptop's camera, which states none, is not changed.
+    bool frontPresentedAt90 {};
     // A named pipe the camera reads commands from, for a test that cannot reach the camera object (a guest that runs in
     // another process): the camera makes it if the path does not exist, and reads one command a line from it for as long as
     // it lives (parseSyntheticControlLine). Empty: none.

@@ -51,6 +51,8 @@ final class AndroidAppsScreenTests {
         model.scriptedAndroidApps = scripted
         AndroidAppsHub.shared.configure(
             directory: FileManager.default.temporaryDirectory.appendingPathComponent("andarium-apps-screen-\(UUID().uuidString)"))
+        // The host the screens are about is an iPhone of iOS 27, whatever system the tests run on.
+        model.playedPadAppHost = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
         AndroidAppsHub.shared.attach(model)
         model.androidApps.store = AndroidAppsHub.shared.store
         model.androidApps.adoptCache()
