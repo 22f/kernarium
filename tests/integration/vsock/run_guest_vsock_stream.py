@@ -20,7 +20,7 @@ and checks every body by SHA-256 on both ends:
 * a guest suspend in the middle of a stream each way, which the connections
   must survive; and
 * a guest restart, which every open stream must read as its end, and after
-  which a new boot serves again.
+  which the same forwarded host port serves the new boot.
 
 The contract is the device's README, darwin/device/vsock/README.md.
 """
@@ -732,8 +732,8 @@ def run_restart(guest: Guest, port: int) -> None:
     guest.restart_to_shell(BOOT_SECONDS)
     expect_end(stream, RESTART_EOF_SECONDS, "restart", True)
     stream.close()
-    # The new boot has its own device, forwarder and server, and the forwarder
-    # listens on the same host port again.
+    # The new boot has its own device and server. The forwarder is the
+    # launch's, so the host port the first boot printed reaches the new boot.
     start_server(guest)
     wait_for_server(guest, port)
     outcome = Background(upload, port, "after-restart", 4 << 20).join(
@@ -752,12 +752,6 @@ def main() -> int:
     private = pathlib.Path(tempfile.mkdtemp(prefix="uml-vsock-"))
     os.environ["TMPDIR"] = str(private)
     tempfile.tempdir = str(private)
-    # The server's forward has a port of its own choosing, so that the next
-    # boot's forwarder can be found again; the refused port's is chosen by the
-    # launcher, which prints it.
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        server_port = probe.getsockname()[1]
     try:
         with Guest(
             arguments.emulator.resolve(),
@@ -766,7 +760,7 @@ def main() -> int:
             "tmpfs",
             (
                 f"ncpus={VCPUS}",
-                f"--vsock-forward=127.0.0.1:{server_port}-{SERVER_PORT}",
+                f"--vsock-forward=127.0.0.1:0-{SERVER_PORT}",
                 f"--vsock-forward=127.0.0.1:0-{REFUSED_PORT}",
             ),
             overlay_shell=True,
@@ -776,11 +770,7 @@ def main() -> int:
             console = ManagementConsole(guest, private)
             request = len(guest.output())
             ports = forward_ports(guest)
-            if ports[SERVER_PORT] != server_port:
-                raise RuntimeError(
-                    f"the launcher reported port {ports[SERVER_PORT]} for the "
-                    f"forward asked to listen on {server_port}")
-            port = server_port
+            port = ports[SERVER_PORT]
             start_server(guest)
             wait_for_server(guest, port)
 
