@@ -159,6 +159,9 @@ struct InfoSheet: View {
                         .accessibilityIdentifier("info-whats-new")
                     }
                 }
+                if let notice = model.appUpdate {
+                    UpdateInfoSection(notice: notice) { StackMark(lit: true, width: 62) }
+                }
                 Section("System info") {
                     LabeledContent("Build", value: model.system.buildLabel)
                     LabeledContent("Android version", value: model.system.version)

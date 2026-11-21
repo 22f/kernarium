@@ -54,6 +54,9 @@ struct HomeView: View {
                     HomeInfoButton()
                 }
             }
+            // Looks for a newer version of Andarium a few seconds after Home
+            // shows; a start cancels it, and it never stands before Start.
+            .task { await model.readAppUpdateWhenHomeShows() }
         }
         .sheet(item: $model.sheet) { kind in
             // On a Mac, SwiftUI reads a sheet's presentation preferences
@@ -70,6 +73,10 @@ struct HomeView: View {
                 case .whatsNew:
                     WhatsNewSheet(releases: model.whatsNew.pending)
                         .modifier(ZoomFrom(id: Self.ribbonID, namespace: whatsNewZoom, enabled: !reduceMotion))
+                case .appUpdate:
+                    if let notice = model.appUpdate {
+                        UpdateDetailSheet(notice: notice) { StackMark(lit: true, width: 62) }
+                    }
                 }
             }
             .environment(model)
@@ -221,6 +228,8 @@ struct HomeView: View {
     @ViewBuilder
     private var notices: some View {
         @Bindable var model = model
+        // A newer version of Andarium comes first among the notices.
+        AppUpdateCard()
         // An app an icon, Shortcuts, Search or Siri asked to open waits for the
         // answer the notices below ask: the card says which, above them.
         if let pending = model.androidApps.open.pending, case let .waiting(hold, _) = pending.stage, hold != .snapshot {
@@ -587,7 +596,7 @@ struct UnfinishedUpdateCard: View {
                     .frame(width: 28)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Andarium’s update didn’t finish").font(.subheadline.weight(.semibold))
+                    Text("System image update didn’t finish").font(.subheadline.weight(.semibold))
                     Text(text)
                         .font(.footnote)
                         .foregroundStyle(.secondary)

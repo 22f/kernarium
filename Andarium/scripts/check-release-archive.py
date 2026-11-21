@@ -15,6 +15,17 @@ archive, and no other build is checked. The application must:
     Config/Developer.local.xcconfig.example names, in any letter case, are
     refused: a copy of the example that nobody edited would otherwise ship a
     link to it;
+  - read the version file of its updates (the update notice) only at the
+    maker's own address: the build writes the host, the path and the link
+    hosts to Info.plist under UpdateSourceHost, UpdateSourcePath and
+    UpdateLinkHosts where the ignored local configuration names a host. No key,
+    or an empty host, is no notice. An address the notice cannot read (a host
+    or path that is not well formed), the reserved example domains that
+    GuestHost/Config/Update.local.xcconfig.example names, in any letter case
+    (also as a link host), an original identifier that is not the bundle's own
+    (UpdateAppIdentifier) and a bundle that cannot ask the system for AltStore
+    and SideStore (LSApplicationQueriesSchemes) are refused: a copy of the
+    example that nobody edited would otherwise ship a read of it;
   - keep nothing of the machine that built it in the host code of its
     executable and of each embedded framework: no path under a home
     directory, on a mounted volume or in a temporary build directory, whatever
@@ -57,6 +68,19 @@ FOLLOW_X_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
 # What Config/Developer.local.xcconfig.example names, and the handle the tests
 # and the screen captures state: no archive links to it.
 FOLLOW_X_EXAMPLE = "example_handle"
+
+
+# The Info.plist keys the build writes the update notice's address to
+# (GuestHost/Config/Update.xcconfig, GuestHost/Core's UpdateConfiguration).
+UPDATE_HOST_KEY = "UpdateSourceHost"
+UPDATE_PATH_KEY = "UpdateSourcePath"
+UPDATE_LINK_HOSTS_KEY = "UpdateLinkHosts"
+UPDATE_IDENTIFIER_KEY = "UpdateAppIdentifier"
+UPDATE_SCHEMES_KEY = "LSApplicationQueriesSchemes"
+# The sideloading apps the notice asks the system about.
+UPDATE_SCHEMES = ("altstore", "sidestore")
+# What Update.local.xcconfig.example names: the domains RFC 2606 reserves.
+UPDATE_EXAMPLE_DOMAINS = ("example.com", "example.org", "example.net")
 
 
 # What a path names about the machine that built the code: the account whose
@@ -159,6 +183,66 @@ def follow_x_problems(info: dict) -> list[str]:
             "Developer.local.xcconfig.example; name the developer's own, or none"
         ]
     return []
+
+
+def is_host_name(name: str) -> bool:
+    """A host name as UpdateHostRule reads one: lowercase letters, digits, hyphens and dots."""
+    if not 1 <= len(name) <= 253:
+        return False
+    return all(
+        1 <= len(label) <= 63 and not label.startswith("-") and not label.endswith("-")
+        and re.fullmatch(r"[0-9a-z-]+", label) is not None
+        for label in name.split("."))
+
+
+def is_example_domain(name: str) -> bool:
+    name = name.lower()
+    return any(name == domain or name.endswith("." + domain) for domain in UPDATE_EXAMPLE_DOMAINS)
+
+
+def update_problems(info: dict) -> list[str]:
+    """What is wrong with the update notice's address; nothing for no notice."""
+    host = info.get(UPDATE_HOST_KEY)
+    if host is None or host == "":
+        return []
+    problems = []
+    if not isinstance(host, str) or "." not in host or not is_host_name(host):
+        problems.append(
+            f"Info.plist: {UPDATE_HOST_KEY} is {repr(host)[:40]}, not a host name the update notice reads "
+            "(lowercase letters, digits and hyphens in dot-separated labels, no port)")
+    elif is_example_domain(host):
+        problems.append(
+            f"Info.plist: {UPDATE_HOST_KEY} is the example address of "
+            "Update.local.xcconfig.example; name the maker's own host, or none")
+    path = info.get(UPDATE_PATH_KEY)
+    if (not isinstance(path, str) or not path.startswith("/") or len(path) > 512
+            or any(ord(c) <= 0x20 or ord(c) >= 0x7F or c in "?#" for c in path)):
+        problems.append(
+            f"Info.plist: {UPDATE_PATH_KEY} is {repr(path)[:40]}, not a path the update notice reads "
+            "(it starts with / and holds no space, query or fragment)")
+    hosts = info.get(UPDATE_LINK_HOSTS_KEY, "")
+    if not isinstance(hosts, str):
+        problems.append(f"Info.plist: {UPDATE_LINK_HOSTS_KEY} is {repr(hosts)[:40]}, not a list of host names")
+    else:
+        for entry in hosts.split():
+            name = entry.lower().removeprefix("*.")
+            if not is_host_name(name):
+                problems.append(f"Info.plist: {UPDATE_LINK_HOSTS_KEY} names {entry[:40]!r}, no host name or *. pattern")
+            elif is_example_domain(name):
+                problems.append(
+                    f"Info.plist: {UPDATE_LINK_HOSTS_KEY} names the example domain {entry[:40]!r} of "
+                    "Update.local.xcconfig.example")
+    identifier = info.get(UPDATE_IDENTIFIER_KEY)
+    if not isinstance(identifier, str) or identifier != info.get("CFBundleIdentifier"):
+        problems.append(
+            f"Info.plist: {UPDATE_IDENTIFIER_KEY} is {repr(identifier)[:60]}, not the bundle's own identifier "
+            "(the build copies PRODUCT_BUNDLE_IDENTIFIER)")
+    schemes = info.get(UPDATE_SCHEMES_KEY)
+    if not isinstance(schemes, list) or not all(scheme in schemes for scheme in UPDATE_SCHEMES):
+        problems.append(
+            f"Info.plist: {UPDATE_SCHEMES_KEY} must list {' and '.join(UPDATE_SCHEMES)}, "
+            "or the notice never learns which sideloading app is installed")
+    return problems
 
 
 def thin_offset(data: bytes) -> int | None:
@@ -372,7 +456,7 @@ def main() -> int:
         emit(f"{app}: has no readable Info.plist", error=True)
         return 1
 
-    problems = [f"{app.name}: {problem}" for problem in follow_x_problems(info)]
+    problems = [f"{app.name}: {problem}" for problem in follow_x_problems(info) + update_problems(info)]
     for binary in executables(app):
         name = binary.relative_to(app)
         # The application's own executable is stripped when Xcode archives it.

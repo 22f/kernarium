@@ -88,6 +88,7 @@ class Tree:
                 "zh-Hant": phrases("在${applicationName}中打開${target}", "在${applicationName}中打開Android應用程式"),
             }}}),
             "AndariumCore": catalog({"Paused": entry(ja="一時停止", zh_Hans="已暂停", zh_Hant="已暫停")}),
+            "GuestHostCore": catalog({"Later": entry(ja="後で", zh_Hans="稍后", zh_Hant="稍後")}),
             "InfoPlist": catalog({"NSMicrophoneUsageDescription": {"localizations": {
                 "en": unit(PERMISSION), **{lang: unit(f"{lang}: 麦克风") for lang in LANGS}}}}),
             "WhatsNew": catalog({

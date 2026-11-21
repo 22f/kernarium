@@ -14,6 +14,8 @@ text is the key. The strings live in:
   Andarium/Localization/AppShortcuts.xcstrings  the phrases Siri and Search understand for Add to Home Screen (table "AppShortcuts")
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
+  GuestHost/Core/Sources/GuestHostCore/Resources/Localizable.xcstrings
+                                                the words both applications say the same way (the update notice)
 
     localization.py check [--root DIR]
     localization.py sync --stringsdata DIR [--stringsdata DIR ...] [--check] [--root DIR]
@@ -78,6 +80,7 @@ PLURAL_CATEGORIES = {
 }
 
 CORE_CATALOG = "Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings"
+GUEST_HOST_CATALOG = "GuestHost/Core/Sources/GuestHostCore/Resources/Localizable.xcstrings"
 CATALOGS = {
     "Localizable": "Andarium/Localization/Localizable.xcstrings",
     "InfoPlist": "Andarium/Localization/InfoPlist.xcstrings",
@@ -86,6 +89,7 @@ CATALOGS = {
     "FollowX": "Andarium/Localization/FollowX.xcstrings",
     "AppShortcuts": "Andarium/Localization/AppShortcuts.xcstrings",
     "AndariumCore": CORE_CATALOG,
+    "GuestHostCore": GUEST_HOST_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
 # The release notes the What's New table holds.
@@ -107,6 +111,7 @@ SYNC_SOURCES = {
     "FollowX": ("Andarium/Andarium/",),
     "AppShortcuts": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
+    "GuestHostCore": ("GuestHost/Core/Sources/GuestHostCore/",),
 }
 
 # Names the interface never carries. A guest's apps are the guest's own; the

@@ -13,7 +13,7 @@ enum StatisticsViewer: Hashable {
 }
 
 enum SheetKind: String, Identifiable, Hashable, CaseIterable {
-    case create, resize, info, system, resolution, whatsNew, snapshots
+    case create, resize, info, system, resolution, whatsNew, snapshots, appUpdate
 
     var id: String { rawValue }
 }
@@ -261,6 +261,10 @@ final class AppModel {
     /// The release notes: Info's history and the ribbon above Start after an
     /// update.
     var whatsNew = WhatsNewModel()
+    /// The notice that a newer version of Andarium exists, in a build that
+    /// has an address for its updates and a launch that is the person's own;
+    /// nil elsewhere, where Home and Info show nothing of it.
+    var appUpdate: UpdateNotice?
     /// The launch decided whether the statistics show (automation, see
     /// `StatsPreference.launch`): the value belongs to that run and is not kept.
     var statsDecidedByLaunch = false
@@ -2406,6 +2410,23 @@ final class AppModel {
     /// The Simulator preview plays the notice: it has no runtime to start a cap.
     func previewThermalNotice() {
         thermalNotice.show()
+    }
+
+    // MARK: App update notice
+
+    /// Whether the update notice may read its file now: Home is showing, the
+    /// application is the active one and no start is pending (an app that
+    /// Shortcuts or an icon asked to open waits for one).
+    var appUpdateReadAllowed: Bool {
+        phase == .home && applicationActive && androidApps.open.pending == nil
+    }
+
+    /// Home's task: reads the version file when one is due, a few seconds
+    /// after Home shows. A start that begins meanwhile cancels the task, and
+    /// nothing of it ever stands before Start.
+    func readAppUpdateWhenHomeShows() async {
+        guard let appUpdate else { return }
+        await appUpdate.readWhenHomeShows(moment: { self.appUpdateReadAllowed })
     }
 
     // MARK: Network notice

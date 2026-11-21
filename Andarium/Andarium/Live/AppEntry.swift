@@ -235,6 +235,7 @@ struct AppEntry {
         }
         announceWhatsNew(
             on: model, hasGuest: guest != nil, vCPUs: guest?.cores ?? host.processorCount)
+        model.appUpdate = makeAppUpdate(on: model)
         model.alert = problem.map { AppAlert(title: String(localized: "Andarium is incomplete"), message: $0) }
         return model
     }
