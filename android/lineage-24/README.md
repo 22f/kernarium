@@ -1479,6 +1479,10 @@ for a release the tracked tree builds, an APK that is not the pinned one. The
 accepted descriptor needs no field of its own: the pin is a release input, so
 `LINEAGE24_ACCEPTED_INPUT_TREES` records it. `tools/verify-magisk-boot.py
 --release DIR` runs the same check on a release directory.
+`Andarium/scripts/stage-system-image.py` runs it on the release it stages and
+stages the files with the rest, and `scripts/check-embedded-artifacts.py` ties
+the staged and packaged `root/` and `root` record to the installed accepted
+release's.
 
 ### Superseded releases
 

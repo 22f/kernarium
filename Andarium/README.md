@@ -166,7 +166,10 @@ that measures it names an artifact, `-DUML_AOT_ARTIFACT=DIR`, when it
 configures the runtime). The staging script checks
 the accepted release against its manifest and layout and stages the system
 disk, partition layout, kernel command line and manifest into
-`.build/andarium-system`, which the application bundles as it stands.
+`.build/andarium-system`, which the application bundles as it stands. A release
+that carries Magisk root files (a `root/` directory and the manifest's `root`
+record) has them verified by the release's own `verify-magisk-boot.py` and
+staged with the rest; a `root/` with no record is refused.
 A developer build can stage an unsigned proof image instead
 (`stage-system-image.py --release DIR --unsigned-proof`), whose manifest stays
 a proof's, completed from the tracked image line and the accepted Android
@@ -233,7 +236,9 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   the commit's inputs, and the staged and packaged system and runtime with the
   descriptors, and fails naming the changed paths and commits. The staged and
   packaged system disk must be the one of the accepted release installed below
-  `.build/android/releases`, not only the one their own layout names. It also
+  `.build/android/releases`, not only the one their own layout names, and the
+  Magisk root files and `root` record they carry are the installed release's
+  (none when it has none). It also
   refuses a packaged kernel whose Linux banner names a build user or host other
   than the neutral `kernarium@kernarium`. With `--aot` it also checks the AOT
   artifact: an archive embeds `UmlArm64Aot.framework` (made by the packaging

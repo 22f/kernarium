@@ -28,6 +28,9 @@ import tempfile
 import unittest
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPOSITORY / "tests/tooling/android"))
+import magisk_fixture  # noqa: E402
+
 SCRIPT = REPOSITORY / "Andarium/scripts/stage-system-image.py"
 PACKAGER = REPOSITORY / "Kernarium/scripts/package-ios-frameworks.sh"
 DISK_FIXTURE = REPOSITORY / "tests/support/android/android_release_fixture.py"
@@ -165,7 +168,8 @@ def make_checkout(
 ) -> Checkout:
     for relative in (
         "Andarium/scripts/stage-system-image.py", "kernel/common/artifacts/contract_checks.py",
-        "android/lineage-24/tools/ubd-disk.py",
+        "android/lineage-24/tools/ubd-disk.py", "android/lineage-24/tools/verify-magisk-boot.py",
+        "android/lineage-24/tools/magisk_image.py", "android/lineage-24/tools/android_image.py",
     ):
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPOSITORY / relative, root / relative)
@@ -574,6 +578,174 @@ class UnsignedProofTests(unittest.TestCase):
         self.assertEqual(result.stdout, f"staged {FAMILY} {RELEASE_ID}: {self.output}\n")
         self.assertEqual((self.output / "release-manifest.json").read_bytes(), (release / "release-manifest.json").read_bytes())
         self.assertNotIn("proof_staging", (self.output / "release-manifest.json").read_text())
+
+
+ROOT_DIRECTORY = "root"
+
+
+def rooted_release(root: pathlib.Path, *, proof: bool = False, edit=None) -> pathlib.Path:
+    """A release (or an unsigned proof) with Magisk root files, on a real small disk.
+
+    The disk is what the tracked disk policy assembles with the synthetic stock
+    init_boot of the Magisk fixtures in its init_boot partition; root/ holds the
+    synthetic patch of it and the synthetic APK, and the manifest's root record is
+    written here by hand. `edit(directory, manifest)` changes the release before
+    the manifest is written."""
+    magisk_fixture.configure(REPOSITORY)
+    work = root / "rooted-work"
+    (work / "synthetic").mkdir(parents=True)
+    synthetic = magisk_fixture.Fixture(work / "synthetic")
+    shutil.copytree(proof_template().parent / "images", work / "images")
+    (work / "images/init_boot.img").write_bytes(synthetic.stock_image)
+    release = root / (PROOF_DIRECTORY if proof else DIRECTORY)
+    subprocess.run(
+        [sys.executable, "-B", str(REPOSITORY / "android/lineage-24/tools/ubd-disk.py"), "assemble",
+         "--policy", str(REPOSITORY / "android/lineage-24/support/image/disk-policy.json"),
+         "--images-dir", str(work / "images"), "--output-dir", str(release / "guest")],
+        check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    (release / "boot").mkdir()
+    (release / "boot/kernel-command-line.txt").write_text("init=/init console=ttyS0\n")
+    (release / ROOT_DIRECTORY).mkdir()
+    patched = synthetic.patched_reference()
+    apk = synthetic.apk(script=magisk_fixture.patch_script()).read_bytes()
+    (release / "root/init_boot-magisk.img").write_bytes(patched)
+    (release / f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk").write_bytes(apk)
+    record = {
+        "magisk": {"name": "Magisk", "version": magisk_fixture.TEST_VERSION,
+                   "version_code": magisk_fixture.TEST_VERSION_CODE},
+        "apk": {"path": f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk",
+                "sha256": hashlib.sha256(apk).hexdigest(), "size": len(apk)},
+        "init_boot": {"path": "root/init_boot-magisk.img", "sha256": hashlib.sha256(patched).hexdigest(),
+                      "size": len(patched), "stock_sha256": hashlib.sha256(synthetic.stock_image).hexdigest(),
+                      "stock_sha1": hashlib.sha1(synthetic.stock_image).hexdigest()},
+    }
+    layout = json.loads((release / "guest/partition-layout.json").read_text())
+    if proof:
+        manifest = proof_manifest(layout["system_disk"]["sha256"])
+    else:
+        sizes = {name: (release / name).stat().st_size for name in (
+            "boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img")}
+        manifest = {
+            "acceptance": "accepted", "android": {"major": 17},
+            "kernel": {"page_size": 4096, "release": "6.18.54-gabc"}, "product_family": FAMILY,
+            "release_id": RELEASE_ID, "schema_version": 8,
+            "inventory": [
+                {"path": "boot/kernel-command-line.txt", "role": "kernel-command-line",
+                 "size": sizes["boot/kernel-command-line.txt"]},
+                {"path": "guest/partition-layout.json", "role": "partition-layout",
+                 "size": sizes["guest/partition-layout.json"]},
+                {"path": "guest/system.img", "role": "system-disk", "size": sizes["guest/system.img"]},
+            ],
+        }
+    manifest["root"] = record
+    if edit is not None:
+        edit(release, manifest)
+    (release / "release-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return release
+
+
+class RootFilesTests(unittest.TestCase):
+    """A release's Magisk root files are staged beside its disk, checked first."""
+
+    def setUp(self):
+        self._scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self._scratch.cleanup)
+        self.root = pathlib.Path(self._scratch.name)
+        self.output = self.root / "out/andarium-system"
+        self.checkout = make_checkout(self.root / "checkout")
+        self.files = [
+            "boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img",
+            "release-manifest.json", "root/init_boot-magisk.img",
+            f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk",
+        ]
+
+    def stage(self, release: pathlib.Path, *extra: str, proof: bool = False) -> subprocess.CompletedProcess:
+        return run_script(
+            self.checkout.script, "--release", str(release), "--output", str(self.output),
+            *(["--unsigned-proof"] if proof else []), *extra)
+
+    def test_the_root_files_are_staged_beside_the_disk_as_copies(self):
+        release = rooted_release(self.root / "releases")
+        result = self.stage(release)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(self.output), sorted(self.files))
+        for relative in self.files:
+            self.assertEqual((self.output / relative).read_bytes(), (release / relative).read_bytes(), relative)
+        self.assertEqual(result.stdout, f"staged {FAMILY} {RELEASE_ID} with Magisk root files: {self.output}\n")
+
+    def test_a_proof_with_root_files_stages_them_and_keeps_saying_it_is_a_proof(self):
+        proof = rooted_release(self.root / "proofs", proof=True)
+        result = self.stage(proof, proof=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(self.output), sorted(self.files))
+        staged = json.loads((self.output / "release-manifest.json").read_text())
+        original = json.loads((proof / "release-manifest.json").read_text())
+        self.assertEqual(staged["acceptance"], "unsigned-proof")
+        self.assertEqual(staged["root"], original["root"])
+        self.assertIn("with Magisk root files", result.stdout)
+        self.assertIn("root files: checked against the proof's own init_boot and the APK", result.stdout)
+
+    def test_a_release_without_root_files_stages_none(self):
+        release = make_release(self.root / "releases")
+        self.assertEqual(self.stage(release).returncode, 0)
+        self.assertFalse((self.output / "root").exists())
+
+    def test_each_defect_of_the_root_files_is_refused_and_stages_nothing(self):
+        def replace(relative, change):
+            def edit(directory, manifest):
+                path = directory / relative
+                path.write_bytes(change(path.read_bytes()))
+            return edit
+
+        def flip(data):
+            return bytes([data[0] ^ 1]) + data[1:]
+
+        def stale_stock(directory, manifest):
+            manifest["root"]["init_boot"]["stock_sha256"] = "0" * 64
+
+        def stock_as_patched(directory, manifest):
+            stock = magisk_fixture.Fixture(pathlib.Path(tempfile.mkdtemp(dir=self.root))).stock_image
+            (directory / "root/init_boot-magisk.img").write_bytes(stock)
+            manifest["root"]["init_boot"]["sha256"] = hashlib.sha256(stock).hexdigest()
+            manifest["root"]["init_boot"]["size"] = len(stock)
+
+        def other_magiskinit(directory, manifest):
+            other = self.root / "other.apk"
+            magisk_fixture.make_apk_bytes(other, magisk_fixture.apk_members(magisk_fixture.patch_script()) | {
+                "lib/arm64-v8a/libmagiskinit.so": b"another build"})
+            payload = other.read_bytes()
+            (directory / f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk").write_bytes(payload)
+            manifest["root"]["apk"]["sha256"] = hashlib.sha256(payload).hexdigest()
+            manifest["root"]["apk"]["size"] = len(payload)
+
+        def no_record(directory, manifest):
+            del manifest["root"]
+
+        def unlink(relative):
+            return lambda directory, manifest: (directory / relative).unlink()
+
+        cases = {
+            "a missing patched image": (unlink("root/init_boot-magisk.img"), "root/ is partial"),
+            "a missing APK": (unlink(f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk"), "root/ is partial"),
+            "a patched image that is not the recorded one": (
+                replace("root/init_boot-magisk.img", flip), "recorded size or SHA-256"),
+            "an APK that is not the recorded one": (
+                replace(f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk", flip), "recorded size or SHA-256"),
+            "stock digests that are not the disk's": (stale_stock, "stock digests are not those"),
+            "a patched image that is the stock image": (stock_as_patched, "lz4 legacy"),
+            "an APK with another magiskinit": (other_magiskinit, "not the APK's arm64 magiskinit"),
+            "a root/ with no record": (no_record, "does not declare a root record"),
+        }
+        for proof in (False, True):
+            for name, (edit, message) in cases.items():
+                with self.subTest(name, proof=proof):
+                    directory = self.root / f"case-{int(proof)}-{abs(hash(name))}"
+                    directory.mkdir()
+                    release = rooted_release(directory, proof=proof, edit=edit)
+                    result = self.stage(release, proof=proof)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse(self.output.exists())
 
 
 class PackageOptionTests(unittest.TestCase):

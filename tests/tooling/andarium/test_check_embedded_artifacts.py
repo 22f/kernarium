@@ -67,6 +67,24 @@ INPUTS = (
 )
 
 
+ROOT_APK = b"official apk"
+ROOT_PATCHED = b"patched init_boot"
+
+
+def root_record(apk: bytes = ROOT_APK, patched: bytes = ROOT_PATCHED, version: str = "v31.1") -> dict:
+    """The root record of a manifest, and the two files it names, as install-release.py leaves them."""
+    import hashlib
+
+    return {
+        "magisk": {"name": "Magisk", "version": version, "version_code": 31100},
+        "apk": {"path": f"root/Magisk-{version}.apk", "sha256": hashlib.sha256(apk).hexdigest(), "size": len(apk)},
+        "init_boot": {
+            "path": "root/init_boot-magisk.img", "sha256": hashlib.sha256(patched).hexdigest(),
+            "size": len(patched), "stock_sha256": "e" * 64, "stock_sha1": "f" * 40,
+        },
+    }
+
+
 def git(repo: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *arguments],
@@ -186,11 +204,11 @@ class Fixture:
         commit(self.repo, "accept the artifacts")
         self.install(release_id)
 
-    def install(self, release_id: str = RELEASE_ID, disk: bytes = DISK) -> Path:
+    def install(self, release_id: str = RELEASE_ID, disk: bytes = DISK, root: dict | None = None) -> Path:
         """The accepted release as install-release.py leaves it below .build/android/releases."""
         installed = self.repo / ".build/android/releases" / f"lineage24-mainline6.18-4k-{release_id}"
         shutil.rmtree(installed, ignore_errors=True)
-        write(installed, "release-manifest.json", json.dumps(self.manifest(release_id)))
+        write(installed, "release-manifest.json", json.dumps(self.manifest(release_id, root=root)))
         write(installed, "guest/partition-layout.json", json.dumps(self.layout(disk)))
         return installed
 
@@ -206,12 +224,15 @@ class Fixture:
             },
         }
 
-    def manifest(self, release_id: str = RELEASE_ID, trees=None) -> dict:
+    def manifest(self, release_id: str = RELEASE_ID, trees=None, root: dict | None = None) -> dict:
         trees = self.trees if trees is None else trees
-        return {
+        manifest = {
             "acceptance": "accepted", "release_id": release_id,
             "outer": {"revision": "c" * 40, "dirty": False, "input_trees": trees},
         }
+        if root is not None:
+            manifest["root"] = root
+        return manifest
 
     def proof_manifest(self, release_id: str = "unsigned-proof-ff1") -> dict:
         """What Andarium/scripts/stage-system-image.py --unsigned-proof stages."""
@@ -221,7 +242,12 @@ class Fixture:
             "outer": {"revision": "c" * 40, "dirty": False},
         }
 
-    def stage(self, release_id: str = RELEASE_ID, trees=None, disk: bytes = DISK) -> Path:
+    def stage(
+        self, release_id: str = RELEASE_ID, trees=None, disk: bytes = DISK, root: dict | None = None,
+        root_files: dict[str, bytes] | None = None,
+    ) -> Path:
+        """The staged system. `root` is the manifest's root record, whose two files are written
+        (the default contents, or `root_files` by path) unless root_files is given as {}."""
         staged = self.repo / ".build/andarium-system"
         shutil.rmtree(staged, ignore_errors=True)
         (staged / "guest").mkdir(parents=True)
@@ -229,7 +255,14 @@ class Fixture:
         (staged / "guest/system.img").write_bytes(disk)
         write(staged, "guest/partition-layout.json", json.dumps(self.layout(disk)))
         write(staged, "boot/kernel-command-line.txt", "init=/init\n")
-        write(staged, "release-manifest.json", json.dumps(self.manifest(release_id, trees)))
+        write(staged, "release-manifest.json", json.dumps(self.manifest(release_id, trees, root)))
+        if root is not None:
+            files = root_files if root_files is not None else {
+                root["apk"]["path"]: ROOT_APK, root["init_boot"]["path"]: ROOT_PATCHED}
+            for relative, payload in files.items():
+                path = staged / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
         return staged
 
     def package(self, release: str = KERNEL_RELEASE, config: str = CONFIG, **builders: str) -> Path:
@@ -367,6 +400,85 @@ class CheckTests(unittest.TestCase):
         result = self.fixture.run(decision=RELEASE_ID)
         self.fails(result, "the packaged system", "an unsigned proof image")
         self.assertNotIn("the staged system", result.stderr)
+
+    def with_root(self, installed: dict | None = None, **staged) -> None:
+        """The accepted release carries root files (`installed`, the default record), and the
+        staged and the packaged system are the staged ones given."""
+        record = root_record() if installed is None else installed
+        self.fixture.install(root=record)
+        self.fixture.stage(**{"root": record, **staged})
+        self.fixture.app = self.fixture.package()
+
+    def test_the_root_files_of_the_accepted_release_pass(self) -> None:
+        self.with_root()
+        self.passes(self.fixture.run())
+        # A release without them, staged without them, passes as before.
+        self.fixture.install()
+        self.fixture.stage()
+        self.fixture.app = self.fixture.package()
+        self.passes(self.fixture.run())
+
+    def test_a_staged_system_without_the_root_files_of_the_accepted_release_fails(self) -> None:
+        self.with_root(root=None)
+        self.fails(self.fixture.run(app=False, decision=RELEASE_ID),
+                   "the staged system", "lacks the Magisk root files of the accepted release")
+        self.fails(self.fixture.run(decision=RELEASE_ID), "the packaged system",
+                   "lacks the Magisk root files of the accepted release")
+
+    def test_a_staged_system_with_root_files_the_accepted_release_lacks_fails(self) -> None:
+        self.fixture.install()
+        self.fixture.stage(root=root_record())
+        self.fixture.app = self.fixture.package()
+        self.fails(self.fixture.run(decision=RELEASE_ID),
+                   "carries Magisk root files the accepted release does not")
+
+    def test_a_root_record_that_differs_from_the_accepted_releases_fails(self) -> None:
+        for label, record in (
+            ("another APK", root_record(apk=b"another apk")),
+            ("another patched image", root_record(patched=b"another patched image")),
+            ("another version", root_record(version="v31.2")),
+        ):
+            with self.subTest(label):
+                self.with_root(root=record,
+                               root_files={record["apk"]["path"]: ROOT_APK, record["init_boot"]["path"]: ROOT_PATCHED})
+                self.fails(self.fixture.run(decision=RELEASE_ID),
+                           "records root files that differ from the Magisk root files of the accepted release")
+
+    def test_a_root_file_that_is_not_the_recorded_one_fails_staged_and_packaged(self) -> None:
+        record = root_record()
+        self.with_root()
+        (self.repo / ".build/andarium-system" / record["apk"]["path"]).write_bytes(b"changed")
+        self.fails(self.fixture.run(app=False, decision=RELEASE_ID),
+                   "the staged system", "has a root file that is not the accepted release's: root/Magisk-v31.1.apk")
+        self.with_root()
+        (self.fixture.app / "andarium-system" / record["init_boot"]["path"]).write_bytes(b"changed")
+        result = self.fixture.run(decision=RELEASE_ID)
+        self.fails(result, "the packaged system", "root file that is not the accepted release's: root/init_boot-magisk.img")
+        self.assertNotIn("the staged system", result.stderr)
+        self.with_root()
+        (self.repo / ".build/andarium-system" / record["apk"]["path"]).unlink()
+        self.fails(self.fixture.run(app=False, decision=RELEASE_ID), "root file that is not the accepted release's")
+
+    def test_a_root_file_no_record_declares_fails(self) -> None:
+        self.with_root()
+        (self.repo / ".build/andarium-system/root/extra.bin").write_bytes(b"x")
+        self.fails(self.fixture.run(app=False, decision=RELEASE_ID), "holds root files the accepted release does not")
+        # A root/ directory in a system whose release has no root files.
+        self.fixture.install()
+        self.fixture.stage()
+        (self.repo / ".build/andarium-system/root").mkdir()
+        (self.repo / ".build/andarium-system/root/init_boot-magisk.img").write_bytes(ROOT_PATCHED)
+        self.fails(self.fixture.run(app=False, decision=RELEASE_ID), "holds a root/ its manifest records no root files for")
+
+    def test_a_proof_is_reported_as_a_proof_and_not_for_its_root_files(self) -> None:
+        self.with_root()
+        staged = self.repo / ".build/andarium-system"
+        manifest = self.fixture.proof_manifest()
+        manifest["root"] = root_record(apk=b"another apk")
+        (staged / "release-manifest.json").write_text(json.dumps(manifest))
+        result = self.fixture.run(app=False, decision=RELEASE_ID)
+        self.fails(result, "an unsigned proof image")
+        self.assertNotIn("root files", result.stderr)
 
     def test_a_manifest_that_is_not_marked_accepted_fails(self) -> None:
         for acceptance in ("candidate", None):

@@ -18,6 +18,11 @@ Android release (--android-release):
     below .build/android/releases (install-release.py), whose own layout names
     the digest: a manifest that says accepted over another disk fails. The
     manifests and layouts are read refusing a repeated JSON key;
+  - the Magisk root files (a root/ directory and the manifest's root record)
+    are the accepted release's: a staged or packaged system with a record the
+    installed release lacks or differs from, without the record the installed
+    release has, or with a root/ file that is not the recorded one or that no
+    record declares, fails;
   - the Git object ID of every input path of the release
     (android/lineage-24/support/release/input-paths.tsv) equals the one the
     descriptor records. A changed input fails, naming the path and the commits
@@ -112,6 +117,7 @@ PACKAGED_SYSTEM = "andarium-system"
 MANIFEST = "release-manifest.json"
 LAYOUT = "guest/partition-layout.json"
 SYSTEM_DISK = "guest/system.img"
+ROOT_DIRECTORY = "root"
 ELF_SECTION = ("__TEXT", "__uml_elf")
 # The build user and host build-kernel.sh gives every kernel; any other pair in
 # a banner is the builder's own account and machine.
@@ -377,11 +383,12 @@ def check_packaged_disk(report, staged, packaged, release_id, expected):
         )
 
 
-def installed_disk_digest(repo, report, descriptor, release_id):
-    """The system disk digest of the accepted release as installed below the
-    work tree, which the accepted descriptor selects by its directory name, or
-    None after reporting why there is none. The staged and the packaged disk
-    are tied to it, not to a digest their own layout names."""
+def installed_release(repo, report, descriptor, release_id):
+    """The system disk digest and the Magisk root record (None for a release
+    without root files) of the accepted release as installed below the work
+    tree, which the accepted descriptor selects by its directory name, or None
+    after reporting why there is none. The staged and the packaged disk and root
+    files are tied to it, not to a digest their own layout or manifest names."""
     name = descriptor.get("LINEAGE24_ACCEPTED_DIRECTORY_NAME")
     if not name or "/" in name or name in (".", ".."):
         report.error("the accepted descriptor names no release directory", ANDROID_DESCRIPTOR)
@@ -411,7 +418,57 @@ def installed_disk_digest(repo, report, descriptor, release_id):
             f"{installed / LAYOUT}: system_disk.sha256 must be 64 lowercase hexadecimal digits",
         )
         return None
-    return digest
+    return digest, manifest.get("root")
+
+
+def check_root_files(report, system, manifest, expected, label):
+    """The Magisk root files of a staged or packaged system are the accepted
+    release's: the manifest's root record is the installed release's (`expected`,
+    None when it has none), every root file hashes to it, and root/ holds
+    nothing else."""
+    record = manifest.get("root")
+    held = system / ROOT_DIRECTORY
+    if expected is None:
+        if record is not None:
+            report.error(
+                f"{label} carries Magisk root files the accepted release does not",
+                f"{system / MANIFEST} has a root record; stage the accepted release with "
+                "Andarium/scripts/stage-system-image.py",
+            )
+        elif held.exists() or held.is_symlink():
+            report.error(
+                f"{label} holds a root/ its manifest records no root files for",
+                f"{held} is not part of the accepted release",
+            )
+        return
+    if record != expected:
+        report.error(
+            f"{label} {'lacks' if record is None else 'records root files that differ from'} "
+            "the Magisk root files of the accepted release",
+            f"{system / MANIFEST}: stage the accepted release with Andarium/scripts/stage-system-image.py",
+        )
+        return
+    try:
+        files = {item["path"]: item["sha256"] for item in (record["init_boot"], record["apk"])}
+    except (KeyError, TypeError) as error:
+        report.error(f"{label} has an unreadable root record", str(error))
+        return
+    for relative, digest in sorted(files.items()):
+        path = system / relative
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != digest:
+            report.error(
+                f"{label} has a root file that is not the accepted release's: {relative}",
+                f"{path} is missing or does not hash to the record's digest",
+            )
+    present = (
+        {str(path.relative_to(system)) for path in held.rglob("*") if path.is_file() or path.is_symlink()}
+        if held.is_dir() and not held.is_symlink() else set()
+    )
+    if present - set(files):
+        report.error(
+            f"{label} holds root files the accepted release does not",
+            *(f"{system / relative}" for relative in sorted(present - set(files))),
+        )
 
 
 def check_staged_disk(report, staged, label, expected):
@@ -455,6 +512,16 @@ def input_findings(recorded, paths, current):
     return findings
 
 
+def is_accepted(manifest, release_id):
+    """A manifest that says it is the accepted release: the other cases (a proof,
+    another release) are reported as what they are, not checked for their files."""
+    return (
+        manifest is not None
+        and manifest.get("acceptance") == "accepted"
+        and manifest.get("release_id") == release_id
+    )
+
+
 def check_android(repo, report, staged_root, app):
     try:
         descriptor = descriptor_of(repo, ANDROID_DESCRIPTOR)
@@ -465,12 +532,15 @@ def check_android(repo, report, staged_root, app):
         return
     label = f"the Android release {release_id}"
 
-    expected = installed_disk_digest(repo, report, descriptor, release_id)
+    installed = installed_release(repo, report, descriptor, release_id)
+    expected = installed[0] if installed is not None else None
     staged = staged_root
     staged_manifest = check_staged_system(
         report, release_id, descriptor, staged, f"the staged system ({label})")
     if staged_manifest is not None and expected is not None:
         check_staged_disk(report, staged, f"the staged system ({label})", expected)
+    if installed is not None and is_accepted(staged_manifest, release_id):
+        check_root_files(report, staged, staged_manifest, installed[1], f"the staged system ({label})")
     if app is not None:
         packaged = app / PACKAGED_SYSTEM
         packaged_manifest = check_staged_system(
@@ -481,6 +551,9 @@ def check_android(repo, report, staged_root, app):
             and packaged_manifest.get("release_id") == release_id
         ):
             check_packaged_disk(report, staged, packaged, release_id, expected)
+        if installed is not None and is_accepted(packaged_manifest, release_id):
+            check_root_files(
+                report, packaged, packaged_manifest, installed[1], f"the packaged system ({label})")
 
     recorded_text = descriptor.get(INPUT_TREES_KEY)
     if recorded_text is None:

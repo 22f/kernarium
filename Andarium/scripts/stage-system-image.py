@@ -5,7 +5,10 @@
 The application bundles the staged directory as it stands, laid out as the
 installed release: the read-only system disk `guest/system.img`, its
 `guest/partition-layout.json`, `boot/kernel-command-line.txt` and
-`release-manifest.json`. The runtime boots from that directory and creates the
+`release-manifest.json`, and, when the release carries them, the Magisk root
+files under `root/` (a patched copy of its `init_boot` and the official APK),
+which are checked against the manifest's root record, the release's own
+`init_boot` and the APK. The runtime boots from that directory and creates the
 writable data disk beside the guest's own files. The staged files are copies of
 an accepted release, which is checked against its own manifest and layout; this
 script neither builds nor signs anything.
@@ -44,6 +47,7 @@ KERNEL_DESCRIPTOR_RELATIVE = "kernel/mainline-6.18/artifacts/accepted-android-4k
 IMAGE_METADATA = ROOT / IMAGE_METADATA_RELATIVE
 KERNEL_DESCRIPTOR = ROOT / KERNEL_DESCRIPTOR_RELATIVE
 DISK_TOOL = ROOT / "android/lineage-24/tools/ubd-disk.py"
+ROOT_VERIFIER = ROOT / "android/lineage-24/tools/verify-magisk-boot.py"
 _ARTIFACTS = str(ROOT / "kernel/common/artifacts")
 if _ARTIFACTS not in sys.path:
     sys.path.insert(0, _ARTIFACTS)
@@ -55,6 +59,8 @@ PARTITION_LAYOUT = "guest/partition-layout.json"
 SYSTEM_DISK = "guest/system.img"
 SYSTEM_DISK_ROLE = "system-disk"
 FILES = (MANIFEST, COMMAND_LINE, PARTITION_LAYOUT, SYSTEM_DISK)
+ROOT_DIRECTORY = "root"
+ROOT_RECORD = "root"
 LAYOUT_SCHEMA = 2
 GUEST_PAGE_SIZE = 4096
 UNSIGNED_PROOF = "unsigned-proof"
@@ -153,6 +159,32 @@ def check_layout(release: Path, read=read_json) -> dict:
     if sha256_of(release / SYSTEM_DISK) != system.get("sha256"):
         raise StageError("the system disk does not match the sha256 in the partition layout")
     return layout
+
+
+def check_root(release: Path, manifest: dict) -> list[str]:
+    """Checks the release's Magisk root files; returns their paths, none for a
+    release without them.
+
+    A manifest with a root record has its files checked by
+    android/lineage-24/tools/verify-magisk-boot.py (the record, both files, and
+    the patched image against the release's own init_boot and the APK), the same
+    check the installer runs; the pinned Magisk release is the producer's rule,
+    not asked here. A root/ directory without a record is refused.
+    """
+    record = manifest.get(ROOT_RECORD)
+    if record is None:
+        if (release / ROOT_DIRECTORY).exists() or (release / ROOT_DIRECTORY).is_symlink():
+            raise StageError("the release has a root/ its manifest does not declare a root record for")
+        return []
+    verified = subprocess.run(
+        [sys.executable, "-B", str(ROOT_VERIFIER), "--release", str(release)],
+        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+    )
+    if verified.returncode != 0:
+        detail = (verified.stderr.strip() or verified.stdout.strip()).splitlines()
+        raise StageError(f"the release's root files do not verify: {detail[-1] if detail else 'no reason given'}")
+    # The verifier has fixed the shape of the record, so these are its two safe paths.
+    return [record["init_boot"]["path"], record["apk"]["path"]]
 
 
 def tracked_line(acceptance: Path, image_metadata: Path, kernel_descriptor: Path) -> dict:
@@ -356,12 +388,13 @@ def copy(source: Path, destination: Path) -> None:
         shutil.copyfile(source, destination)
 
 
-def stage(release: Path, output: Path, manifest: bytes | None = None) -> None:
-    """Stages the release's files; `manifest` stands for the manifest's bytes."""
+def stage(release: Path, output: Path, manifest: bytes | None = None, extra: list[str] = ()) -> None:
+    """Stages the release's files and the `extra` ones (its root files);
+    `manifest` stands for the manifest's bytes."""
     output.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
-        for relative in FILES:
+        for relative in (*FILES, *extra):
             (scratch / relative).parent.mkdir(parents=True, exist_ok=True)
             if relative == MANIFEST and manifest is not None:
                 (scratch / relative).write_bytes(manifest)
@@ -398,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     notes: list[str] = []
+    root_files: list[str] = []
     try:
         accepted = None
         release = arguments.release
@@ -428,15 +462,19 @@ def main(argv: list[str] | None = None) -> int:
                 "pass --unsigned-proof (a Release archive refuses it)")
         else:
             check_release(release, manifest, accepted)
-        stage(release, arguments.output, staged_manifest)
+        root_files = check_root(release, manifest)
+        if notes and root_files:
+            notes.append("root files: checked against the proof's own init_boot and the APK, as a release's are")
+        stage(release, arguments.output, staged_manifest, root_files)
     except StageError as error:
         fail(str(error))
+    with_root = " with Magisk root files" if root_files else ""
     if notes:
-        print(f"staged UNSIGNED PROOF {manifest['product_family']} {manifest['release_id']}: {arguments.output}")
+        print(f"staged UNSIGNED PROOF {manifest['product_family']} {manifest['release_id']}{with_root}: {arguments.output}")
         for note in notes:
             print(f"  {note}")
     else:
-        print(f"staged {manifest['product_family']} {manifest['release_id']}: {arguments.output}")
+        print(f"staged {manifest['product_family']} {manifest['release_id']}{with_root}: {arguments.output}")
     return 0
 
 
