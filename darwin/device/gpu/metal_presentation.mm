@@ -727,7 +727,9 @@ struct MetalPresentationState final :
                 }
                 [encoder endEncoding];
                 [buffer presentDrawable:drawable];
-#if TARGET_OS_IOS
+                /* The device's Metal headers declare the drawable's presentation
+                 * handler; the Simulator's do not. */
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
                 if (frameStatisticsInterval() > 0.0) {
                     auto shown = shared_from_this();
                     [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
@@ -757,7 +759,7 @@ struct MetalPresentationState final :
         return DrawResult::done;
     }
 
-#if TARGET_OS_IOS
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
     /* The drawable's own presentation time says when iOS showed a frame, where
      * presentedFrames counts the end of the GPU work. The gaps between shown
      * frames fall in five bins: under 10 ms, 10-14, 14-20, 20-50, 50 or more.
@@ -886,7 +888,7 @@ struct MetalPresentationState final :
             static_cast<unsigned long long>(total.presentedFrames),
             static_cast<unsigned long long>(total.droppedFrames),
             static_cast<unsigned long long>(total.cpuFallbackFrames));
-#if TARGET_OS_IOS
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
         reportOnscreen(seconds);
 #endif
     }
