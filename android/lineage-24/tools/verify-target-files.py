@@ -5565,6 +5565,8 @@ SMS_WAKE_COMMAND = "exec cmd activity start-service --user 0 -n android.kernariu
 # The property the holder sets to start the waker, and the type that keeps every other domain from setting it.
 SMS_WAKE_PROPERTY = "ctl.start$kernarium_sms_wake"
 SMS_WAKE_PROPERTY_TYPE = "ctl_kernarium_sms_wake_prop"
+# The type that labels the other control keys of both services, which only init may set.
+SMS_LOCKED_PROPERTY_TYPE = "ctl_kernarium_sms_locked_prop"
 # The control messages init accepts for a service (its control message table; the interface_ forms look a service up
 # by an interface name, which neither service declares). init authorises a request through the property key
 # ctl.<message>$<service>; for start, stop and restart it checks the legacy key ctl.<service> first and acts when
@@ -5978,22 +5980,28 @@ def check_sms_control_properties(contexts: list[str], policies: tuple[bytes, ...
 
     # The holder's start of the waker is denied on the legacy key, which init checks first, and allowed on the
     # qualified one. The denial is the meant one and is silenced, or every wake logs an avc denial: the platform
-    # silences only its own services' control types.
+    # silences only its own services' control types. The one rule that does it names the holder and the locked type
+    # exactly, and no other property_service dontaudit of the product's policies reaches the holder (a rule over an
+    # attribute would hide every denied property write of it); the platform's own, the first policy's, are its
+    # control types for every domain.
     legacy = property_label(f"ctl.{SMS_WAKE}", contexts) or "default_prop"
-    for policy in policies:
+    silenced = False
+    for index, policy in enumerate(policies):
         for source, target, object_class, permissions in cil_rules(policy, CIL_DONTAUDIT_RULE):
-            if (
-                object_class == b"property_service"
-                and b"set" in permissions
-                and SMS_LISTENER in sets.members(cil_type_name(source))
-                and legacy in sets.members(cil_type_name(target))
-            ):
-                return
-    fail(
-        f"policy does not silence the denial of {SMS_LISTENER} setting the legacy key ctl.{SMS_WAKE}, labelled "
-        f"{legacy}, which init checks before the qualified key that allows the start "
-        "(overlay/sepolicy/system_ext/private/kernarium_sms_listener.te)"
-    )
+            if index == 0 or object_class != b"property_service" or SMS_LISTENER not in sets.members(cil_type_name(source)):
+                continue
+            if (source.decode(), target.decode(), set(permissions)) != (SMS_LISTENER, SMS_LOCKED_PROPERTY_TYPE, {b"set"}):
+                fail(f"policy silences a property_service denial of {SMS_LISTENER} beyond its start of the waker: "
+                     f"(dontaudit {source.decode()} {target.decode()} (property_service ({b' '.join(permissions).decode()}))) "
+                     f"may be only (dontaudit {SMS_LISTENER} {SMS_LOCKED_PROPERTY_TYPE} (property_service (set)))")
+            silenced = True
+    if not silenced or legacy != SMS_LOCKED_PROPERTY_TYPE:
+        fail(
+            f"policy does not silence the denial of {SMS_LISTENER} setting the legacy key ctl.{SMS_WAKE}, labelled "
+            f"{legacy}, which init checks before the qualified key that allows the start: it needs "
+            f"(dontaudit {SMS_LISTENER} {SMS_LOCKED_PROPERTY_TYPE} (property_service (set))) "
+            "(overlay/sepolicy/system_ext/private/kernarium_sms_listener.te)"
+        )
 
 
 class SmsRule(NamedTuple):

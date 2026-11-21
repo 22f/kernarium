@@ -561,8 +561,16 @@ def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str =
     # init checks the legacy key ctl.kernarium_sms_wake first, and the holder is denied it: the policy silences the denial.
     if variant == "holder-dontaudit-for-another":
         ext += "(dontaudit system_app ctl_kernarium_sms_locked_prop (property_service (set)))\n"
+    elif variant == "holder-dontaudit-over-an-attribute":
+        ext += "(dontaudit kernarium_sms_listener property_type (property_service (set)))\n"
     elif variant != "no-holder-dontaudit":
         ext += "(dontaudit kernarium_sms_listener ctl_kernarium_sms_locked_prop (property_service (set)))\n"
+    if variant == "holder-dontaudit-of-another-type":
+        ext += "(dontaudit kernarium_sms_listener ctl_kernarium_sms_wake_prop (property_service (set)))\n"
+    elif variant == "holder-dontaudit-for-every-domain":
+        ext += "(dontaudit domain system_prop (property_service (set)))\n"
+    elif variant == "holder-dontaudit-over-an-attribute-too":
+        ext += "(dontaudit kernarium_sms_listener property_type (property_service (set)))\n"
     if variant != "no-vsock-attribute":
         ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms))\n"
     if variant != "holder-without-the-vsock-attribute":
@@ -6851,6 +6859,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "labelled ctl_kernarium_sms_locked_prop"),
             ("sms-holder-denial-silenced-for-another", {"sms_policy_variant": "holder-dontaudit-for-another"},
              "does not silence the denial of kernarium_sms_listener setting the legacy key ctl.kernarium_sms_wake"),
+            # The one rule names the holder and the locked type exactly, and the holder has no other property_service
+            # dontaudit in the product's policies.
+            ("sms-holder-denial-silenced-over-an-attribute", {"sms_policy_variant": "holder-dontaudit-over-an-attribute"},
+             "silences a property_service denial of kernarium_sms_listener beyond its start of the waker: "
+             "\\(dontaudit kernarium_sms_listener property_type "),
+            ("sms-holder-denial-silenced-over-an-attribute-too",
+             {"sms_policy_variant": "holder-dontaudit-over-an-attribute-too"},
+             "silences a property_service denial of kernarium_sms_listener beyond its start of the waker"),
+            ("sms-holder-dontaudit-of-another-type", {"sms_policy_variant": "holder-dontaudit-of-another-type"},
+             "silences a property_service denial of kernarium_sms_listener beyond its start of the waker: "
+             "\\(dontaudit kernarium_sms_listener ctl_kernarium_sms_wake_prop "),
+            ("sms-dontaudit-for-every-domain", {"sms_policy_variant": "holder-dontaudit-for-every-domain"},
+             "silences a property_service denial of kernarium_sms_listener beyond its start of the waker: "
+             "\\(dontaudit domain system_prop "),
             ("sms-wake-property-generic", {"sms_policy_variant": "wake-property-generic"},
              "label ctl.start\\$kernarium_sms_wake ctl_start_prop, not ctl_kernarium_sms_wake_prop"),
             ("sms-wake-property-by-another", {"sms_policy_variant": "wake-property-by-another"},
