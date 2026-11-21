@@ -530,7 +530,13 @@ domain. It serves the connections from the host's CID 2 alone, ends 30 s after
 the last message, and with it its process: nothing of it is resident in between.
 The waker starts it, and the system uid can, as the service is not exported; it
 serves the connections from CID 2 alone, so neither an adb shell, adb over the
-network included, nor an application can deliver a message. `HostFrame.java` and
+network included, nor an application can deliver a message. The end of the service
+alone loses nothing, as the holder keeps the listening socket. If the holder ends while a
+connection waits that nothing has accepted (or while a session runs, and that session ends with
+one waiting), the kernel closes the connection: a request the host had already written gets no
+answer, a connection that arrives while no holder listens is refused and asked for again within
+the host's deadline, and the host's retry for the lost request is answered as uncertain and never
+handed over. That message is lost and never delivered twice. `HostFrame.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
 frame. A message is a sender (a number or a short name), a text of limited
 length and an identifier the host chooses for it. `Message.java` and
