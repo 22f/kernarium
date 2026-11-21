@@ -622,14 +622,14 @@ def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str =
         "ctl.sigstop_on$  u:object_r:ctl_sigstop_prop:s0\n"
         "ctl.sigstop_off$  u:object_r:ctl_sigstop_prop:s0\n"
         "ctl.start$  u:object_r:ctl_start_prop:s0\n"
-        # A type field that reads exact is not the match operation (the third field): the entry is a prefix, and
-        # labels every longer name, which the product's keys include.
-        "ctl.stop$  u:object_r:ctl_stop_prop:s0 string exact\n"
+        # A word that reads exact among the values of the type is not the match operation (the third field): the entry
+        # is a prefix, and labels every longer name, which the product's keys include.
+        "ctl.stop$  u:object_r:ctl_stop_prop:s0 prefix enum on exact off\n"
         "ctl.restart$  u:object_r:ctl_restart_prop:s0\n"
     )
     if variant != "wake-property-generic":
         property_context += ("ctl.start$kernarium_sms_wake  u:object_r:ctl_kernarium_sms_wake_prop:s0"
-                             + {"wake-property-not-exact": "", "wake-property-exact-in-a-later-field": " string exact"
+                             + {"wake-property-not-exact": "", "wake-property-exact-in-a-later-field": " prefix enum on exact off"
                                 }.get(variant or "", " exact") + "\n")
     locked, generic = "u:object_r:ctl_kernarium_sms_locked_prop:s0", "u:object_r:ctl_default_prop:s0"
     for service in ("kernarium_sms_listener", "kernarium_sms_wake"):
@@ -637,13 +637,13 @@ def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str =
             as_generic = variant == "control-legacy-generic" or (
                 variant == "control-legacy-waker-generic" and service == "kernarium_sms_wake")
             property_context += (f"ctl.{service}  {generic if as_generic else locked}"
-                                 + {"control-legacy-not-exact": "", "control-legacy-exact-in-a-later-field": " string exact"
+                                 + {"control-legacy-not-exact": "", "control-legacy-exact-in-a-later-field": " prefix enum on exact off"
                                     }.get(variant or "", " exact") + "\n")
         if variant != "control-oneshot-unlabelled":
             for state in ("on", "off"):
                 property_context += (f"ctl.oneshot_{state}${service}  "
                                      f"{generic if variant == 'control-oneshot-generic' else locked}"
-                                     f"{' string exact' if variant == 'control-oneshot-exact-in-a-later-field' else ' exact'}\n")
+                                     f"{' prefix enum on exact off' if variant == 'control-oneshot-exact-in-a-later-field' else ' exact'}\n")
     labels = {
         "holder-unlabelled": "kernarium_sms_listener_exec", "waker-unlabelled": "kernarium_sms_wake_exec",
         "socket-unlabelled": "kernarium_sms_socket",
