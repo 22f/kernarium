@@ -20,7 +20,7 @@ struct HomePerformanceTests {
     private let host = HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
     )
-    private let footnote = "Smoother motion on this display, and more battery use."
+    private let footnote = "Smoother motion, more battery use."
 
     /// A model with the two rows' conditions stated: a screen that shows 120
     /// frames a second or 60, and a build that has the JIT row or not.

@@ -9530,25 +9530,25 @@
         }
       }
     },
-    "Smoother motion on this display, and more battery use." : {
-      "comment" : "The footnote of the 120 Hz row in Home's Performance section: what it does and what it costs. Home shows only while Android is stopped, so the row says nothing of a restart.",
+    "Smoother motion, more battery use." : {
+      "comment" : "The footnote of the 120 Hz row in Home's Performance section: what it does and what it costs, in one short line. Home shows only while Android is stopped, so the row says nothing of a restart.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このディスプレイでの動きがより滑らかになりますが、バッテリーの消費が増えます。"
+            "value" : "より滑らかな表示。バッテリー消費は増えます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此显示屏上的动态画面更流畅，但会更耗电。"
+            "value" : "画面更流畅，更耗电。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此顯示器上的動態更流暢，但會更耗電。"
+            "value" : "畫面更流暢，更耗電。"
           }
         }
       }

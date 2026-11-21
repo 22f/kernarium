@@ -313,7 +313,7 @@ struct HighRefreshRow: View {
     var body: some View {
         OptionRow(
             title: String(localized: "120 Hz"), symbol: "speedometer",
-            detail: String(localized: "Smoother motion on this display, and more battery use.")
+            detail: String(localized: "Smoother motion, more battery use.")
         ) {
             Toggle("120 Hz", isOn: Binding(
                 get: { model.highRefreshOn },
