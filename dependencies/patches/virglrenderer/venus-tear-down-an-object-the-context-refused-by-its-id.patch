@@ -26,7 +26,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  2 files changed, 16 insertions(+)
 
 diff --git a/src/venus/vkr_common.h b/src/venus/vkr_common.h
-index bb541e91ffc3104f1ccafe32051506f917329f63..bb69fc1d6f5ead71478487db99f490b8922660d4 100644
+index fd23df9d0eba15d3ab57ffd3ab77f4b3191da1d3..0b5fa20ae8b093f9db542134be5a346fdb7954ca 100644
 --- a/src/venus/vkr_common.h
 +++ b/src/venus/vkr_common.h
 @@ -125,6 +125,9 @@ enum vkr_debug_flags {
