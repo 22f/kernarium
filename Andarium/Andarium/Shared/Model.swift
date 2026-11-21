@@ -543,6 +543,11 @@ final class AppModel {
     /// step belongs to the boot it began in and changes nothing of Home or
     /// the boot screen once this number has moved (`runRootAppStep`).
     private(set) var bootRun = 0
+    /// Counts the changes of the Root switch and of what pauses it: a result
+    /// of a Magisk app step belongs to the period of the switch it began in,
+    /// as well as to its boot (`runRootAppStep`).
+    @ObservationIgnored
+    var rootPeriod = 0
     /// A fallback decided at launch, before a driver could save the guest.
     @ObservationIgnored
     var rootStateUnsaved = false

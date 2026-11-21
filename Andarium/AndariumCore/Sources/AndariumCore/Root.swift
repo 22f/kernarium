@@ -185,10 +185,10 @@ public struct RootState: Equatable, Codable, Sendable {
     /// the state as it is now. Only the app's own bookkeeping changes: the
     /// switch, the pause and what Home owes are the person's and this
     /// start's to change, and a step that ran while root was turned off
-    /// meanwhile starts no period.
+    /// meanwhile starts no period and records nothing at all.
     public mutating func adoptApp(from learned: RootState) {
-        appEverHandled = appEverHandled || learned.appEverHandled
         guard on else { return }
+        appEverHandled = appEverHandled || learned.appEverHandled
         if let code = learned.appVersionCode { appVersionCode = max(appVersionCode ?? 0, code) }
         if let install = learned.appInstall { appInstall = install }
     }

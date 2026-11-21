@@ -667,9 +667,10 @@ address space holds, so this is a fallback.
   one and sent from that descriptor, `RootRelease.openApk`): the screen adds
   a fifth step, Magisk app, after Startup only for a start that installs, and
   the check, the install and the opening of the app are bound together to
-  45 s, and the step belongs to its boot: after a Stop, a restart or a later
-  start it adds only the app's own bookkeeping to the state, never an alert or
-  a step. A package of that name at the
+  45 s, and the step belongs to its boot and to the period of the switch it began in:
+  after a Stop, a restart, a later start or a change of the switch its result
+  adds nothing to the state and raises no alert or step (an app that is in
+  the guest and not recorded is installed over at the next start). A package of that name at the
   carried version that the application did not put in is installed over like
   an older one, since only its signature says whose it is and the package
   manager checks it and refuses another signer; a newer one is left alone,

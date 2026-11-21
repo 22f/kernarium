@@ -52,6 +52,26 @@ final class RootStartTests {
         }
     }
 
+    /// A guest shell with no Magisk app whose command to open it waits until
+    /// the test lets it go: the app has been installed, and the step is
+    /// still inside its bound.
+    private final class OpenGatedShell: GuestShell, @unchecked Sendable {
+        private let lock = NSLock()
+        private var opening = false
+        private var open = false
+        func run(_ command: String, limit: Duration) async throws -> GuestShellOutput {
+            if command.hasPrefix("am start") {
+                lock.withLock { opening = true }
+                while !lock.withLock({ open }) { try? await Task.sleep(for: .milliseconds(5)) }
+            }
+            return GuestShellOutput(text: "", exitCode: 0)
+        }
+        func release() { lock.withLock { open = true } }
+        func waitUntilOpening() async {
+            while !lock.withLock({ opening }) { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+    }
+
     private func model(
         rootOn: Bool, available: Bool = true, shell: (any GuestShell)? = nil, carries: Bool = true
     ) -> (AppModel, StubDriver) {
@@ -171,6 +191,40 @@ final class RootStartTests {
         #expect(model.guest?.root.on == false)
         #expect(model.alert == nil && !model.rootAppInstalling)
         #expect(driver.rootInstalls == 0)
+    }
+
+    @Test func anInstallThatSucceededBeforeAStopDuringTheOpenWritesNothingAfterOffAndOn() async {
+        let shell = OpenGatedShell()
+        let (model, driver) = model(rootOn: true, shell: shell)
+        model.start(.normal)
+        let task = Task { await model.runRootAppStep(kind: .normal) {} }
+        await shell.waitUntilOpening()
+        // The app is in; the person stops the start, turns root off and on again.
+        model.runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 10)
+        model.setRoot(false)
+        model.confirmRoot()
+        shell.release()
+        await task.value
+        #expect(driver.rootInstalls == 1)
+        // The old result neither records a version nor that the app was ever put in: the next install is not suppressed.
+        #expect(model.guest?.root.appVersionCode == nil)
+        #expect(model.guest?.root.appEverHandled == false)
+        #expect(model.guest?.root.appInstall == nil)
+        #expect(model.guest?.root.on == true)
+    }
+
+    @Test func aResultThatFindsTheSwitchChangedInTheSameBootWritesNothing() async {
+        let shell = OpenGatedShell()
+        let (model, _) = model(rootOn: true, shell: shell)
+        model.start(.normal)
+        let task = Task { await model.runRootAppStep(kind: .normal) {} }
+        await shell.waitUntilOpening()
+        // The same boot, the same run: only the period of the switch moved.
+        model.setRoot(false)
+        model.confirmRoot()
+        shell.release()
+        await task.value
+        #expect(model.guest?.root.appVersionCode == nil && model.guest?.root.appEverHandled == false)
     }
 
     @Test func aStepThatEndsAfterItsBootWasStoppedRaisesNoAlertAndNoStepInALaterBoot() async {

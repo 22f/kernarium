@@ -25,6 +25,7 @@ extension AppModel {
         } else {
             guard rootOn || rootAttention != nil else { return }
             guest?.root.setOn(false)
+            rootPeriod &+= 1
             persistNow()
         }
     }
@@ -34,6 +35,7 @@ extension AppModel {
         rootWarningShowing = false
         guard guest != nil, rootAvailable else { return }
         guest?.root.setOn(true)
+        rootPeriod &+= 1
         persistNow()
     }
 
@@ -53,6 +55,7 @@ extension AppModel {
         var state = guest?.root ?? RootState()
         if RootFallbackRule.failed(&state) {
             guest?.root = state
+            rootPeriod &+= 1
             if driver == nil || !persistNow() { rootStateUnsaved = true }
         } else {
             guest?.root.startRooted = false
@@ -105,6 +108,7 @@ extension AppModel {
     func tryRootAgain() {
         guard guest != nil else { return }
         guest?.root.tryAgain()
+        rootPeriod &+= 1
         persistNow()
     }
 
@@ -150,13 +154,16 @@ extension AppModel {
             await runRootOffStep(driver: driver, shell: shell)
             return
         }
-        // The step belongs to this boot: a Stop, a restart or a later start
-        // moves `bootRun`, and nothing it finds after that reaches the screen.
+        // The step belongs to this boot and to the period of the switch it
+        // began in: a Stop, a restart or a later start moves `bootRun`, a change
+        // of the switch moves `rootPeriod`, and nothing it finds after either
+        // reaches the screen or the state.
         let run = bootRun
+        let period = rootPeriod
         let outcome = await RootAppStep.run(
             shell: shell, release: release, state: state,
             installing: { @MainActor [weak self] in
-                guard let self, self.bootRun == run else { return }
+                guard let self, self.bootRun == run, self.rootPeriod == period else { return }
                 self.rootAppInstalling = true
                 installing()
             },
@@ -164,17 +171,17 @@ extension AppModel {
                 guard let self else { throw CancellationError() }
                 try await self.installRootApp()
             })
-        let current = bootRun == run && !Task.isCancelled
+        // A result that finds either moved changes nothing: a package that is
+        // in the guest and not recorded is installed over at the next start.
+        guard bootRun == run, rootPeriod == period, !Task.isCancelled else { return }
         switch outcome {
         case .notNeeded:
             break
         case let .installed(learned):
-            // The app is in the guest whichever boot this was; only its own
-            // bookkeeping is added to the state as it is now.
+            // Only the app's own bookkeeping is added to the state as it is now.
             guest?.root.adoptApp(from: learned)
             persistNow()
         case let .failed(learned):
-            guard current else { break }
             guest?.root.adoptApp(from: learned)
             persistNow()
             rootAppInstalling = false

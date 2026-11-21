@@ -252,7 +252,9 @@ struct RootStateTests {
         // Root was turned off while the step ran: no period begins, and the switch stays off.
         var off = RootState()
         off.adoptApp(from: learned)
-        #expect(!off.on && off.appVersionCode == nil && off.appInstall == nil && off.appEverHandled)
+        #expect(!off.on && off.appVersionCode == nil && off.appInstall == nil)
+        // Not even that the application ever put the app in: after off and on, that would suppress the install.
+        #expect(!off.appEverHandled)
         // A newer code already recorded is not lowered.
         var newer = RootState()
         newer.on = true
