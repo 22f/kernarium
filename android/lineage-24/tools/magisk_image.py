@@ -32,6 +32,7 @@ import stat
 import struct
 import sys
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -673,7 +674,8 @@ def apk_member(archive: zipfile.ZipFile, name: str, error: Error) -> bytes:
         raise error(f"the Magisk APK member has an unsafe size: {name}")
     try:
         return archive.read(info)
-    except (OSError, zipfile.BadZipFile, RuntimeError, ValueError) as failure:
+    except (OSError, EOFError, NotImplementedError, RuntimeError, ValueError, zipfile.BadZipFile,
+            zlib.error, lzma.LZMAError) as failure:
         raise error(f"cannot read {name} of the Magisk APK: {failure}") from failure
 
 

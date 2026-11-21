@@ -52,6 +52,8 @@ import magisk_image  # noqa: E402
 
 RUNS = 2
 STEP_TIMEOUT_SECONDS = 300
+# How much of a failing step's own output the refusal repeats.
+TAIL_LINES = 40
 TOOL_PATH = "/usr/bin:/bin"
 PATCHED_NAME = Path(magisk_image.PATCHED_PATH).name
 NEW_IMAGE = "new-boot.img"
@@ -96,7 +98,7 @@ def run_step(arguments: list[str], work: Path, env: dict[str, str], label: str) 
         process.communicate()
         raise error(f"{label} did not finish in {STEP_TIMEOUT_SECONDS} s") from None
     if process.returncode != 0:
-        tail = "\n".join(output.splitlines()[-12:])
+        tail = "\n".join(output.splitlines()[-TAIL_LINES:])
         raise error(f"{label} failed ({process.returncode}):\n{tail}")
     return output
 
@@ -164,6 +166,10 @@ def write_new(path: Path, data: bytes) -> None:
 
 
 def patch(arguments: argparse.Namespace) -> None:
+    if os.geteuid() == 0:
+        # Magisk's script unmounts and moves system directories when it aborts
+        # outside a booted system.
+        raise error("the patcher must not run as root: run it as the build user")
     pin = magisk_image.read_pin(arguments.pin, error)
     apk = arguments.magisk_apk
     if not apk.is_absolute():

@@ -16,8 +16,10 @@ import argparse
 import errno
 import hashlib
 import importlib.util
+import io
 import json
 import lzma
+import os
 import pathlib
 import re
 import shutil
@@ -91,6 +93,9 @@ class PinTests(unittest.TestCase):
         # bytes; the verifier's own command line does not.
         self.assertEqual(kinds["android/lineage-24/tools/magisk-boot.py"], "input")
         self.assertEqual(kinds["android/lineage-24/tools/magisk_image.py"], "input")
+        # The producer reads the partition it patches through the shared image reader, so
+        # that reader decides which bytes Magisk patches.
+        self.assertEqual(kinds["android/lineage-24/tools/android_image.py"], "input")
         self.assertEqual(kinds["android/lineage-24/tools/verify-magisk-boot.py"], "excluded")
 
     def test_the_tracked_pin_reads(self) -> None:
@@ -208,6 +213,24 @@ class FormatTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "(?i)memory"):
             magisk_image.xz_decode(huge, SystemExit)
         self.assertEqual(magisk_image.xz_decode(packed, SystemExit), b"hello" * 10)
+
+    def test_a_corrupt_member_of_the_package_is_a_named_refusal(self) -> None:
+        for label, cut in (("corrupt deflate data", False), ("a truncated deflate stream", True)):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(magisk_image.MAGISKINIT_MEMBER, bytes(range(256)) * 4000)
+            data = bytearray(buffer.getvalue())
+            info = zipfile.ZipFile(io.BytesIO(bytes(data))).getinfo(magisk_image.MAGISKINIT_MEMBER)
+            start = info.header_offset + 30 + len(info.filename.encode())
+            if cut:
+                for index in range(start + 40, start + info.compress_size):
+                    data[index] = 0
+            else:
+                for index in range(start + 2, start + 60):
+                    data[index] ^= 0x5A
+            with self.subTest(label), zipfile.ZipFile(io.BytesIO(bytes(data))) as archive, \
+                    self.assertRaisesRegex(SystemExit, "cannot read lib/arm64-v8a/libmagiskinit.so"):
+                magisk_image.apk_member(archive, magisk_image.MAGISKINIT_MEMBER, SystemExit)
 
     def test_a_partition_larger_than_a_boot_image_can_be_is_refused_before_it_is_read(self) -> None:
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -667,6 +690,23 @@ class PatcherTests(unittest.TestCase):
         self.assertEqual(
             sorted(path.name for path in self.output.iterdir()),
             [f"Magisk-{TEST_VERSION}.apk", "init_boot-magisk.img"])
+
+    def test_the_patcher_does_not_run_as_root(self) -> None:
+        # Magisk's script unmounts and moves system directories when it aborts outside
+        # a booted system, which is harmless for a build user and not for uid 0.
+        apk = self.fixture.apk(script=patch_script())
+        with mock.patch.object(os, "geteuid", lambda: 0), \
+                self.assertRaisesRegex(SystemExit, "must not run as root"):
+            self.patch_in_process(self.load_tool(), apk, self.fixture.pin(apk))
+        self.assertFalse(self.output.exists())
+
+    def test_the_tail_of_a_failing_step_shows_the_scripts_own_words(self) -> None:
+        script = patch_script(exit_status=3).replace(
+            b"./magiskboot unpack", b"for n in $(seq 1 30); do echo \"progress $n\"; done\n./magiskboot unpack")
+        result = self.patch(self.fixture.apk(script=script))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("progress 1\n", result.stderr)
+        self.assertIn("progress 30", result.stderr)
 
     def test_an_output_directory_that_is_a_link_is_refused(self) -> None:
         apk = self.fixture.apk(script=patch_script())

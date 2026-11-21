@@ -1442,53 +1442,35 @@ the maintainer's responsibility.
 
 ### Root files
 
-A release can carry the Magisk root files of its own `init_boot`; the
-[`metadata/magisk.env`](metadata/magisk.env) pin names the Magisk release they
-are made from by name, version and SHA-256 of its official APK. The pin is a
+A release can carry the Magisk root files of its own `init_boot` under `root/`:
+`init_boot-magisk.img`, that image as Magisk's patcher makes it, and the
+unmodified official `Magisk-<version>.apk`. The [`metadata/magisk.env`](metadata/magisk.env)
+pin names the Magisk release by name, version and the SHA-256 of its APK; it is a
 release input, the APK is given to the producer as a local file, and no Magisk
 file is in the repository.
 
-`build/assemble-image.sh --magisk-apk APK` makes them on the builder, after the
-disk is assembled: `tools/magisk-boot.py` refuses an APK that is not the pin,
-reads the disk's own `init_boot` partition, and runs Magisk's `boot_patch.sh`
-from the APK twice with fixed inputs (the verified boot and encryption of the
-stock ramdisk are kept, the pre-init partition is the data disk's `userdata`),
-Magisk's x86-64 `magiskboot` patching and only its arm64 `magiskinit`, `magisk`
-and `init-ld` going into the ramdisk. The two results must be identical.
-`tools/verify-magisk-boot.py` (`tools/magisk_image.py`) then checks the result
-as the stock image plus exactly what Magisk adds, with the standard library
-alone: the same boot header; an lz4-legacy ramdisk whose entries are the stock
-ones except `/init`, which is the APK's `magiskinit`; `.backup/init.xz` as the
-stock `/init`; `overlay.d/sbin/{magisk,init-ld}.xz` as the APK's arm64 binaries;
-and `.backup/.magisk` as the fixed flags, the pre-init partition and the SHA-1
-of the stock image. `root/init_boot-magisk.img` and the unmodified
-`root/Magisk-<version>.apk` land in the output directory. `tools/magisk-boot.py
-record --root-dir DIR --disk system.img --layout partition-layout.json` prints
-the manifest's `root` record of such a directory for a producer that writes its
-own manifest.
+`build/assemble-image.sh --magisk-apk APK` makes the files on the builder after
+the disk is assembled (`tools/magisk-boot.py`), and `tools/publish-release.py`
+takes `--magisk-apk APK` or `--without-root`, never neither. A schema 8 manifest
+records them as its optional `root` object, which its
+[schema](support/release/release-manifest.schema.json) defines, and lists both
+files in its inventory. A release without root files is valid, as is every
+release of schema 6 and 7, which cannot carry them.
 
-A schema 8 manifest records them as a `root` object (`magisk`: the name, version
-name and version code; `apk`: the path, size and SHA-256; `boot_image`: the
-patched image's path, size and SHA-256 and the SHA-256 and SHA-1 of the stock
-`init_boot` it was made from) and lists both files in its inventory. A release without root files is valid, as is
-every release of schema 6 and 7, which cannot carry them.
-`tools/publish-release.py` takes exactly one of `--magisk-apk APK`, which it
-passes to `assemble-image.sh`, and `--without-root`, so a release cannot lose its
-root files by omission. `install-release.py` verifies and installs the files with
-the rest, and the verification refuses by name: a `root/` that is partial or
-holds files the record does not declare, a file that is not the recorded one, a
-patched image that is not its own disk's `init_boot` plus what Magisk adds.
+`tools/verify-magisk-boot.py` is the one verifier. The producer, the installer
+and `Andarium/scripts/stage-system-image.py` run it, and it refuses by name a
+`root/` that is partial, holds anything beside the two files or is reached through
+a link, a file that is not the recorded one, and a patched image that is not its
+own disk's `init_boot` plus exactly what Magisk adds.
+
 A schema 8 accepted descriptor binds the root record
 (`LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256`: a digest of it, or `none` for a release
 without root files), so a release with root files and one without never share a
 descriptor. `install-release.py --print-acceptance` also checks the candidate's
 Magisk release against the tracked pin; an accepted release installed later is
-history and is checked against its descriptor alone. `tools/verify-magisk-boot.py
---release DIR` runs the same check on a release directory.
-`Andarium/scripts/stage-system-image.py` runs it on the release it stages and
-stages the files with the rest, and `scripts/check-embedded-artifacts.py` ties
-the staged and packaged `root/` and `root` record to the installed accepted
-release's.
+history and is checked against its descriptor alone.
+`scripts/check-embedded-artifacts.py` ties the staged and the packaged root files
+to the installed accepted release's.
 
 ### Superseded releases
 

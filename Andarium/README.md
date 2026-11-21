@@ -168,8 +168,9 @@ the accepted release against its manifest and layout and stages the system
 disk, partition layout, kernel command line and manifest into
 `.build/andarium-system`, which the application bundles as it stands. A release
 that carries Magisk root files (a `root/` directory and the manifest's `root`
-record) has them verified by the release's own `verify-magisk-boot.py` and
-staged with the rest; a `root/` with no record is refused.
+record) has them verified by this checkout's `verify-magisk-boot.py`, first at
+the source and again on the staged copy, and staged with the rest; a `root/`
+with no record is refused.
 A developer build can stage an unsigned proof image instead
 (`stage-system-image.py --release DIR --unsigned-proof`), whose manifest stays
 a proof's, completed from the tracked image line and the accepted Android
