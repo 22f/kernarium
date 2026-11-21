@@ -6071,10 +6071,11 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
         if attribute not in attributes:
             fail(f"{SMS_DOMAIN} is not in {attribute}")
-    # The platform's file contexts give a user's directories (/data/user_de/<id>, from the second boot on, and
-    # /data/data) that user's categories; the multi-level constraint on searching a directory that is not application
-    # data lets a subject through only when its level dominates, or it is mlstrustedsubject. The service has no
-    # categories and every system application is trusted: without it the service cannot reach its record at all.
+    # The platform gives a user's directories that user's categories at run time, in the preparation of the user's
+    # storage (/data/user_de/<id> from the second boot of a data image on, /data/data from the first), not through its
+    # file contexts. The multi-level constraint on searching a directory that is not application data lets a subject
+    # through only when its level dominates, or it is mlstrustedsubject. The service has no categories and every
+    # system application is trusted: without it the service cannot reach its record at all.
     if "mlstrustedsubject" not in attributes:
         fail(f"{SMS_DOMAIN} is not in mlstrustedsubject: the directories of the user it runs for carry categories "
              "that its level lacks, so it could not search the path of its record")

@@ -14,8 +14,13 @@ app_domain(kernarium_sms)
 # The platform labels a user's directories with that user's categories (/data/user_de/<id> from a device's second
 # boot on, /data/data from its first), which this domain's level lacks. The multi-level constraint on searching a
 # directory that is not application data lets only a trusted subject through, as it does every system application;
-# without this the path of the record cannot be searched after the first boot. It widens nothing else: the type
-# enforcement below is what the verifier pins.
+# without this the path of the record cannot be searched after the first boot. What the attribute lifts is that
+# constraint in every class, for this domain, wherever a type enforcement rule already grants the access: the level
+# checks on process transitions and signals, on socket creation and on unix connections, and on directory and file
+# operations, creation and relabel included. The grants it then meets are the ones below and the ordinary ones the
+# platform gives every application domain, which the verifier does not pin. The platform keeps a trusted subject
+# out of other applications' private data (its sandbox rule excludes it and its neverallows forbid the access), and
+# the system uid's own permissions apply: the posture of system_app.
 typeattribute kernarium_sms mlstrustedsubject;
 
 # Its own data: the record of the messages it has handed over, which no other system application's
