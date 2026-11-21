@@ -666,7 +666,10 @@ address space holds, so this is a fallback.
   reached under `root/` with no link in its path, opened once without following
   one and sent from that descriptor, `RootRelease.openApk`): the screen adds
   a fifth step, Magisk app, after Startup only for a start that installs, and
-  the check and install are bound together to 45 s. A failure is an alert and
+  the check and install are bound together to 45 s. A package of that name the
+  application did not put in for this release is installed over like an older
+  one, since only its signature says whose it is and the package manager
+  checks it and refuses another signer; it is never uninstalled. A failure is an alert and
   the boot goes on with root on. A start with root that ends before Android
   boots (a guest panic or exit the previous session's record shows, a restart
   loop, or a Stop by the person) is the fallback's: starts boot without root
@@ -677,7 +680,7 @@ address space holds, so this is a fallback.
   remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
   snapshot's disk may not have it; the switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release
-  carries). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
+  carries, and why the last install of the Magisk app was made). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
   when an absent Magisk app is installed again (`RootInstallRule`), what becomes
   of the app when root is off (`RootOffRule`), and what a failed start with root
   does to the switch (`RootFallbackRule`).

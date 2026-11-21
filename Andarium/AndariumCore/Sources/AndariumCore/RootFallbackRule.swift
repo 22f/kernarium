@@ -52,6 +52,7 @@ public enum RootFallbackRule {
         case .turnOff:
             state.on = false
             state.appVersionCode = nil
+            state.appInstall = nil
             state.attention = .turnedOffAfterFailure
         case .none:
             return false

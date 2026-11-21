@@ -257,8 +257,14 @@ struct RootRulesTests {
         #expect(RootInstallRule.decide(presence: .absent, carriedVersionCode: 31_100, state: state(period: 31_100)) == .none)
         // An older app is updated whatever the period says.
         #expect(RootInstallRule.decide(presence: .installed(versionCode: 27_000), carriedVersionCode: 31_100, state: state(period: 27_000)) == .install)
-        #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_100, state: state()) == .none)
-        #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state()) == .none)
+        // An app the state says the application put in for this release is left alone.
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_100, state: state(period: 31_100)) == .none)
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state(period: 31_100)) == .none)
+        // One of that name the state does not say it put in is installed over, whatever its version code says.
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_100, state: state()) == .install)
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state()) == .install)
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_200, state: state(period: 31_100)) == .install)
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_200), carriedVersionCode: 31_200, state: state(period: 31_100)) == .install)
     }
 
     @Test func theOtherChoicesOfTheDecisionAreOneConstantAway() {
@@ -276,7 +282,7 @@ struct RootRulesTests {
         }
     }
 
-    @Test func theRuleRemembersWhatItPutInOrSaw() {
+    @Test func theRuleRemembersWhatItPutIn() {
         let first = RootInstallRule.recorded(state(), versionCode: 31_100)
         #expect(first.appVersionCode == 31_100 && first.appEverHandled)
         // A lower code seen later does not lower the memory.
@@ -414,6 +420,26 @@ actor RootCounter {
         #expect(text.contains("booted the Magisk ramdisk: yes"))
         #expect(text.contains("Magisk v31.1 (31100)"))
         #expect(text.contains("version code the application recorded: 31100"))
+    }
+
+    @Test func theLastInstallAndItsReasonAreInTheReport() {
+        var state = RootState()
+        state.on = true
+        for (reason, words) in [
+            (RootState.AppInstall.Reason.absent, "not in the virtual machine"),
+            (.older, "older than the release's"),
+            (.notRecorded, "not recorded as put in by the application for this release"),
+        ] {
+            state.appInstall = .init(reason: reason, installed: reason != .older)
+            let text = RootReport.text(state: state, release: release)
+            #expect(text.contains("last Magisk app install: \(reason == .older ? "did not finish" : "done"), the app "))
+            #expect(text.contains(words), "\(reason)")
+        }
+        // The note is kept with the guest, and the period's end forgets it.
+        let decoded = try? JSONDecoder().decode(RootState.self, from: JSONEncoder().encode(state))
+        #expect(decoded?.appInstall == state.appInstall)
+        state.setOn(false)
+        #expect(state.appInstall == nil)
     }
 
     @Test func aPausedGuestSaysWhy() {

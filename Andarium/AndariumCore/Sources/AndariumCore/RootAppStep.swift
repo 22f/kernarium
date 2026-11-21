@@ -14,12 +14,18 @@ public enum RootAppStep {
     static let commandLimit = Duration.seconds(10)
 
     public enum Outcome: Equatable, Sendable {
-        /// Nothing was installed; the state is what the guest's answer adds
-        /// to the application's memory.
-        case notNeeded(RootState)
+        /// Nothing was installed.
+        case notNeeded
+        /// The app was put in; the state records it.
         case installed(RootState)
-        /// The check or the install failed, or the bound passed.
-        case failed
+        /// The check or the install failed, or the bound passed; the state
+        /// carries the install that was tried and why, when one was.
+        case failed(RootState)
+
+        public var isFailure: Bool {
+            if case .failed = self { return true }
+            return false
+        }
     }
 
     /// Runs the step. `installing` is told once, when an install is about to
@@ -31,30 +37,44 @@ public enum RootAppStep {
         install: @escaping @Sendable () async throws -> Void,
         limit: Duration = RootAppStep.limit
     ) async -> Outcome {
+        let attempt = Attempt(state)
         let outcome = await bounded(limit) { () -> Outcome in
             let presence = await MagiskApp.presence(shell: shell, limit: commandLimit)
-            if Task.isCancelled { return .failed }
+            if Task.isCancelled { return .failed(state) }
             let action = RootInstallRule.decide(
                 presence: presence, carriedVersionCode: release.versionCode, state: state)
-            guard action == .install else {
-                if case .installed(let code) = presence {
-                    return .notNeeded(RootInstallRule.recorded(state, versionCode: code))
-                }
-                return .notNeeded(state)
-            }
+            guard action == .install else { return .notNeeded }
+            let reason = RootInstallRule.reason(presence: presence, carriedVersionCode: release.versionCode)
+            var tried = state
+            tried.appInstall = .init(reason: reason, installed: false)
+            attempt.set(tried)
             await installing()
             do {
                 try await install()
             } catch {
-                return .failed
+                return .failed(tried)
             }
-            return .installed(RootInstallRule.recorded(state, versionCode: release.versionCode))
+            var done = RootInstallRule.recorded(state, versionCode: release.versionCode)
+            done.appInstall = .init(reason: reason, installed: true)
+            return .installed(done)
         }
-        guard let outcome else { return .failed }
+        guard let outcome else { return .failed(attempt.state) }
         if case .installed = outcome, RootInstallRule.opensAppAfterInstall {
             await MagiskApp.open(shell: shell, limit: commandLimit)
         }
         return outcome
+    }
+
+    /// The state with the install the step has begun, for a bound that passes
+    /// before the work says.
+    private final class Attempt: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: RootState
+
+        init(_ state: RootState) { value = state }
+
+        var state: RootState { lock.withLock { value } }
+        func set(_ state: RootState) { lock.withLock { value = state } }
     }
 
     /// `work`'s value, or nil when `limit` passes first. The caller is released

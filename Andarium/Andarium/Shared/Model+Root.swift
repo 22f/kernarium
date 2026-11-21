@@ -145,12 +145,14 @@ extension AppModel {
                 try await self.installRootApp()
             })
         switch outcome {
-        case let .notNeeded(next), let .installed(next):
-            if next != state {
-                guest?.root = next
-                persistNow()
-            }
-        case .failed:
+        case .notNeeded:
+            break
+        case let .installed(next):
+            guest?.root = next
+            persistNow()
+        case let .failed(next):
+            guest?.root.appInstall = next.appInstall
+            persistNow()
             alert = AppAlert(title: RootWords.appFailedTitle, message: RootWords.appFailedMessage)
         }
     }

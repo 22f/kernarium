@@ -28,6 +28,15 @@ public enum RootReport {
         lines.append("the release carries root: \(release.map { "Magisk \($0.versionName) (\($0.versionCode))" } ?? "no")")
         lines.append(
             "Magisk app version code the application recorded: \(state.appVersionCode.map(String.init) ?? "none")")
+        if let install = state.appInstall {
+            let why: String
+            switch install.reason {
+            case .absent: why = "the app was not in the virtual machine"
+            case .older: why = "the app there was older than the release's"
+            case .notRecorded: why = "the app there was not recorded as put in by the application for this release"
+            }
+            lines.append("last Magisk app install: \(install.installed ? "done" : "did not finish"), \(why)")
+        }
         return lines.joined(separator: "\n") + "\n"
     }
 }

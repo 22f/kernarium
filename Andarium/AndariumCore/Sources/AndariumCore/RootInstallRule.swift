@@ -32,13 +32,17 @@ public enum RootInstallRule {
 
     /// What a start with root does about the app, given what the guest says of
     /// it and the version the release carries. An app older than the carried
-    /// one is always updated (`-r` keeps its data); an absent one by `policy`.
+    /// one is always updated (`-r` keeps its data), and so is one the state
+    /// does not say the application put in for this release: whose app a
+    /// package of that name is shows only in its signature, which the package
+    /// manager checks and names when it refuses the install. An absent one is
+    /// put in by `policy`.
     public static func decide(
         presence: MagiskApp.Presence, carriedVersionCode: Int, state: RootState, policy: Policy = RootInstallRule.policy
     ) -> Action {
         switch presence {
         case .installed(let code):
-            return code < carriedVersionCode ? .install : .none
+            return code < carriedVersionCode || !isOurs(state, carriedVersionCode: carriedVersionCode) ? .install : .none
         case .absent, .unknown:
             switch policy {
             case .oncePerOnPeriod: return state.appVersionCode == nil ? .install : .none
@@ -48,7 +52,22 @@ public enum RootInstallRule {
         }
     }
 
-    /// What the state remembers after the app is there at `versionCode`.
+    /// The state says the application put the app in, at the carried version
+    /// or later, in this period of root being on.
+    static func isOurs(_ state: RootState, carriedVersionCode: Int) -> Bool {
+        (state.appVersionCode ?? 0) >= carriedVersionCode
+    }
+
+    /// Why an install that `decide` chose is made, for the bug report.
+    public static func reason(
+        presence: MagiskApp.Presence, carriedVersionCode: Int
+    ) -> RootState.AppInstall.Reason {
+        guard case .installed(let code) = presence else { return .absent }
+        return code < carriedVersionCode ? .older : .notRecorded
+    }
+
+    /// What the state remembers after the application put the app in at
+    /// `versionCode`. An app the application only saw is not recorded.
     public static func recorded(_ state: RootState, versionCode: Int) -> RootState {
         var state = state
         state.appVersionCode = max(state.appVersionCode ?? 0, versionCode)

@@ -36,17 +36,46 @@ struct RootAppStepTests {
         #expect(shell.commands == [MagiskApp.probeCommand, MagiskApp.openCommand])
     }
 
-    @Test func aCurrentAppIsLeftAloneAndRemembered() async {
+    @Test func anAppTheApplicationPutInForThisReleaseIsLeftAlone() async {
+        var state = rooted
+        state.appVersionCode = 31_100
         let shell = shell("package:com.topjohnwu.magisk versionCode:31100\n")
         let showed = RootCounter()
         let outcome = await RootAppStep.run(
-            shell: shell, release: release, state: rooted,
+            shell: shell, release: release, state: state,
             installing: { await showed.bump() }, install: { Issue.record("installed a current app") })
-        guard case .notNeeded(let state) = outcome else { Issue.record("\(outcome)"); return }
-        #expect(state.appVersionCode == 31_100 && state.appEverHandled)
+        #expect(outcome == .notNeeded)
         let shown = await showed.value
         #expect(shown == 0, "no step is shown for a boot that installs nothing")
         #expect(shell.commands == [MagiskApp.probeCommand])
+    }
+
+    @Test func aPackageTheStateDoesNotSayWePutInIsInstalledOverNotRecordedAsOurs() async {
+        // The same package name and version code as the release's: only its
+        // signature says whose it is, and the package manager checks that.
+        for line in ["package:com.topjohnwu.magisk versionCode:31100\n", "package:com.topjohnwu.magisk versionCode:99999\n"] {
+            let shell = shell(line)
+            let installed = RootCounter()
+            let outcome = await RootAppStep.run(
+                shell: shell, release: release, state: rooted,
+                installing: {}, install: { await installed.bump() })
+            guard case .installed(let state) = outcome else { Issue.record("\(line): \(outcome)"); continue }
+            let done = await installed.value
+            #expect(done == 1, Comment(rawValue: line))
+            #expect(state.appInstall == .init(reason: .notRecorded, installed: true), Comment(rawValue: line))
+            #expect(state.appVersionCode == 31_100)
+            #expect(!shell.commands.contains { $0.contains("uninstall") }, "the person's app is never removed")
+        }
+    }
+
+    @Test func aSignatureMismatchFailsTheInstallAndTheReasonIsKept() async {
+        struct Incompatible: Error {}
+        let outcome = await RootAppStep.run(
+            shell: shell("package:com.topjohnwu.magisk versionCode:31100\n"), release: release, state: rooted,
+            installing: {}, install: { throw Incompatible() })
+        guard case .failed(let state) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(state.appInstall == .init(reason: .notRecorded, installed: false))
+        #expect(state.appVersionCode == nil, "a failed install records no version")
     }
 
     @Test func anOlderAppIsUpdated() async {
@@ -55,6 +84,7 @@ struct RootAppStepTests {
             installing: {}, install: {})
         guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
         #expect(state.appVersionCode == 31_100)
+        #expect(state.appInstall == .init(reason: .older, installed: true))
     }
 
     @Test func anAppThePersonRemovedStaysRemovedWithinThePeriod() async {
@@ -64,7 +94,7 @@ struct RootAppStepTests {
         let outcome = await RootAppStep.run(
             shell: shell(""), release: release, state: state,
             installing: { await showed.bump() }, install: { Issue.record("installed again") })
-        #expect(outcome == .notNeeded(state))
+        #expect(outcome == .notNeeded)
         let shown = await showed.value
         #expect(shown == 0)
     }
@@ -74,7 +104,7 @@ struct RootAppStepTests {
         let shell = shell("")
         let outcome = await RootAppStep.run(
             shell: shell, release: release, state: rooted, installing: {}, install: { throw Refused() })
-        #expect(outcome == .failed)
+        #expect(outcome.isFailure)
         #expect(!shell.commands.contains(MagiskApp.openCommand), "nothing is opened after a failure")
     }
 
@@ -83,7 +113,7 @@ struct RootAppStepTests {
         let outcome = await RootAppStep.run(
             shell: shell(""), release: release, state: rooted, installing: {},
             install: { try await Task.sleep(for: .seconds(60)) }, limit: .milliseconds(200))
-        #expect(outcome == .failed)
+        #expect(outcome.isFailure)
         #expect(ContinuousClock.now - started < .seconds(10))
     }
 
@@ -97,7 +127,7 @@ struct RootAppStepTests {
                 while ContinuousClock.now < deadline { await Task.yield() }
             },
             limit: .milliseconds(200))
-        #expect(outcome == .failed)
+        #expect(outcome.isFailure)
         #expect(ContinuousClock.now - started < .seconds(2))
     }
 
@@ -110,7 +140,7 @@ struct RootAppStepTests {
         let shell = RootScriptedShell { _ in throw Unreachable() }
         let outcome = await RootAppStep.run(
             shell: shell, release: release, state: rooted, installing: {}, install: { throw Unreachable() })
-        #expect(outcome == .failed)
+        #expect(outcome.isFailure)
     }
 
     @Test func theBootScreenHasAFifthStepOnlyForTheInstall() {

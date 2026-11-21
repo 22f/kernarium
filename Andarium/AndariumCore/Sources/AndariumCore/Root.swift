@@ -119,12 +119,39 @@ public struct RootState: Equatable, Codable, Sendable {
     public var rooted = false
     /// What Home owes the person, if anything.
     public var attention: Attention?
-    /// The version code the Magisk app had when this period of root being on
-    /// installed it or saw it; nil before. Turning root off ends the period.
+    /// The version code the application itself put the Magisk app in at, in
+    /// this period of root being on; nil before. An app it only saw is not
+    /// recorded, since the application cannot tell whose it is. Turning root
+    /// off ends the period.
     public var appVersionCode: Int?
-    /// The application has put the Magisk app in this guest, or seen it there,
-    /// at some time. Turning root off does not clear it.
+    /// The application has put the Magisk app in this guest at some time.
+    /// Turning root off does not clear it.
     public var appEverHandled = false
+
+    /// The last install of the Magisk app the application ran, and why, for
+    /// the bug report.
+    public struct AppInstall: Equatable, Codable, Sendable {
+        public enum Reason: String, Codable, Sendable {
+            /// The guest said there was no app, or could not be asked.
+            case absent
+            /// The app there was older than the release's.
+            case older
+            /// An app of that package name was there and the state did not
+            /// say the application put it in for this release.
+            case notRecorded
+        }
+
+        public var reason: Reason
+        /// The install ended well; false for one that failed or ran out of time.
+        public var installed: Bool
+
+        public init(reason: Reason, installed: Bool) {
+            self.reason = reason
+            self.installed = installed
+        }
+    }
+
+    public var appInstall: AppInstall?
 
     public init() {}
 
@@ -136,7 +163,10 @@ public struct RootState: Equatable, Codable, Sendable {
     public mutating func setOn(_ on: Bool) {
         self.on = on
         attention = nil
-        if !on { appVersionCode = nil }
+        if !on {
+            appVersionCode = nil
+            appInstall = nil
+        }
     }
 
     /// The data disk was replaced by another (a snapshot restored), which may
@@ -146,6 +176,7 @@ public struct RootState: Equatable, Codable, Sendable {
     public mutating func dataDiskReplaced() {
         appVersionCode = nil
         appEverHandled = false
+        appInstall = nil
     }
 
     /// "Try with root again": the pause ends and the next start boots Magisk.
@@ -155,7 +186,7 @@ public struct RootState: Equatable, Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case on, rooted, attention, appVersionCode, appEverHandled
+        case on, rooted, attention, appVersionCode, appEverHandled, appInstall
     }
 
     public init(from decoder: Decoder) throws {
@@ -165,6 +196,7 @@ public struct RootState: Equatable, Codable, Sendable {
         attention = try? values.decodeIfPresent(Attention.self, forKey: .attention)
         appVersionCode = try values.decodeIfPresent(Int.self, forKey: .appVersionCode)
         appEverHandled = try values.decodeIfPresent(Bool.self, forKey: .appEverHandled) ?? false
+        appInstall = try? values.decodeIfPresent(AppInstall.self, forKey: .appInstall)
     }
 }
 
