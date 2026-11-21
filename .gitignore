@@ -52,6 +52,7 @@ CMakeUserPresets.json
 # artwork its row shows (a whole directory: no artwork is tracked). Each tracked
 # example documents its settings and file names.
 /GuestHost/Config/Signing.local.xcconfig
+/GuestHost/Config/Update.local.xcconfig
 /Andarium/Config/*.local.xcconfig
 /Andarium/Config/Local/
 

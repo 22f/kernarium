@@ -95,6 +95,75 @@ class FollowXHandle(Fixtures):
         self.refuses(app, "Info.plist")
 
 
+class UpdateAddress(Fixtures):
+    """The update notice reads the maker's own address, or the build has none."""
+
+    KEYS = {
+        "UpdateSourceHost": "updates.maker.test",
+        "UpdateSourcePath": "/apps/source.json",
+        "UpdateLinkHosts": "*.cdn.maker.test files.maker.test",
+        "UpdateAppIdentifier": "org.example.Fixture",
+        "LSApplicationQueriesSchemes": ["altstore", "sidestore"],
+    }
+
+    def update(self, **changes: object) -> Path:
+        return self.app(**{**self.KEYS, **changes})
+
+    def test_a_bundle_with_no_address_has_no_notice(self) -> None:
+        self.passes(self.app())
+        self.passes(self.app(UpdateSourceHost=""))
+
+    def test_a_complete_address_passes(self) -> None:
+        self.passes(self.update())
+        self.passes(self.update(UpdateLinkHosts=""))
+        self.passes(self.update(UpdateLinkHosts=None))
+        self.passes(self.update(UpdateLinkHosts="Files.Maker.Test"))
+        self.passes(self.update(LSApplicationQueriesSchemes=["sidestore", "altstore", "other"]))
+
+    def test_a_host_the_notice_does_not_read_is_refused(self) -> None:
+        for host in ("Maker.Test", "maker", "a b.test", "-a.test", "a-.test", "a..test", ".test", "maker.test.",
+                     "maker.test:8443", "https://maker.test", "maker.test/x", "user@maker.test", "mäker.test",
+                     "a" * 64 + ".test", "a." * 130 + "test", 7):
+            with self.subTest(host=host):
+                self.refuses(self.update(UpdateSourceHost=host), "UpdateSourceHost")
+
+    def test_the_example_address_is_refused(self) -> None:
+        # What Update.local.xcconfig.example names: copied unchanged, it would ship a read of it.
+        for host in ("example.com", "example.org", "example.net", "www.example.com", "a.b.example.org"):
+            with self.subTest(host=host):
+                self.refuses(self.update(UpdateSourceHost=host), "example")
+
+    def test_a_path_the_notice_does_not_read_is_refused(self) -> None:
+        for path in ("source.json", "", "/a b", "/a?b=1", "/a#b", "/" + "a" * 512, 7, "/a\n"):
+            with self.subTest(path=path):
+                self.refuses(self.update(UpdateSourcePath=path), "UpdateSourcePath")
+        self.refuses(self.update(UpdateSourcePath=None), "UpdateSourcePath")
+
+    def test_a_link_host_that_is_no_host_or_is_the_example_is_refused(self) -> None:
+        for hosts in ("*", "*.", "a_b.c", "*.example.com", "example.org", "files.maker.test *.example.net",
+                      "https://maker.test", "maker.test:443", 7):
+            with self.subTest(hosts=hosts):
+                self.refuses(self.update(UpdateLinkHosts=hosts), "UpdateLinkHosts")
+
+    def test_the_original_identifier_is_the_bundles_own(self) -> None:
+        # The build copies PRODUCT_BUNDLE_IDENTIFIER into the key; a tool re-signs the bundle, not the key.
+        for identifier in (None, "", "org.example.Other", "org example", 7):
+            with self.subTest(identifier=identifier):
+                self.refuses(self.update(UpdateAppIdentifier=identifier), "UpdateAppIdentifier")
+
+    def test_the_sideloading_apps_must_be_askable(self) -> None:
+        # Without the two query schemes the system never says a tool is installed, and the rows never show.
+        for schemes in (None, [], ["altstore"], ["sidestore"], ["other"], "altstore sidestore"):
+            with self.subTest(schemes=schemes):
+                self.refuses(self.update(LSApplicationQueriesSchemes=schemes), "LSApplicationQueriesSchemes")
+
+    def test_every_problem_is_named(self) -> None:
+        done = run(self.update(UpdateSourceHost="example.com", UpdateAppIdentifier="org.example.Other"))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("UpdateSourceHost", done.stderr)
+        self.assertIn("UpdateAppIdentifier", done.stderr)
+
+
 # Libraries of one thing each, linked for the iPhone SDK. A path in a string is
 # what a dependency compiles in from the prefix it was built under.
 CLEAN = "int fixture(int value) { return value + 1; }\n"

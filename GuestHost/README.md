@@ -66,6 +66,10 @@ Sources/GuestProcessorLimit.swift      the vCPU count the applications default t
 Config/Signing.xcconfig                the signing settings Kernarium's Xcode project
                                        uses as its base configuration and Andarium's
                                        `Config/Andarium.xcconfig` includes
+Config/Update.xcconfig                 where a sideloaded application looks for its
+                                       updates (the ignored `Update.local.xcconfig`,
+                                       from its `.example`), which the same
+                                       `Config/Andarium.xcconfig` includes
 ```
 
 ## Update notice
@@ -99,6 +103,12 @@ the views; a build with no address has no configuration and no notice.
   cookies, cache or conditional header, a fixed `User-Agent` and
   `Accept-Language`, `https` only (redirects included), a 1 MiB and 15 s limit,
   and never runs under Low Data Mode or after a cancelled task.
+- The address is the maker's, in the ignored `Config/Update.local.xcconfig`
+  (from `Update.local.xcconfig.example`: a host and a path, never a whole
+  address, and the hosts the file's links may name besides its own). Only a
+  Release build carries it; any other build, a fork's included, has no address,
+  no read and no notice. `Config/Update.xcconfig` is the shared mapping an
+  application's own xcconfig includes.
 
 ## Signing
 

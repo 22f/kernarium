@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Andarium's base settings: the shared signing settings, and what decides
-// whether Follow developer on X is compiled in.
+// Andarium's base settings: the shared signing settings, the address of its
+// updates, and what decides whether Follow developer on X is compiled in.
 //
 // Release reads the ignored Developer.local.xcconfig and carries Follow
-// developer on X when it names a handle.
+// developer on X when it names a handle, and reads the ignored
+// ../../GuestHost/Config/Update.local.xcconfig (Update.xcconfig) and carries the
+// update notice when it names a host.
 
 #include "../../GuestHost/Config/Signing.xcconfig"
+#include "../../GuestHost/Config/Update.xcconfig"
 
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FOLLOW_X_CONDITION)
 

@@ -40,6 +40,8 @@
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
         { "path": "Andarium.xcconfig" },
         { "path": "Developer.local.xcconfig.example" },
+        { "path": "../../GuestHost/Config/Update.xcconfig" },
+        { "path": "../../GuestHost/Config/Update.local.xcconfig.example" },
       ],
     }, {
       "kind": "group",
@@ -215,7 +217,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FOLLOW_X_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FOLLOW_X_PLIST_DEFINITION) $(UPDATE_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -358,7 +360,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FOLLOW_X_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FOLLOW_X_PLIST_DEFINITION) $(UPDATE_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -373,6 +375,7 @@
         "SWIFT_EMIT_LOC_STRINGS": "YES",
         "SWIFT_VERSION": "6.0",
         "TARGETED_DEVICE_FAMILY": "1,2",
+        "UPDATE_SOURCE_HOST": "",
       },
     }, {
       "name": "AndariumPreviewUITests",
