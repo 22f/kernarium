@@ -481,6 +481,52 @@ final class RootStartTests {
         #expect(text.contains("paused: a start with root ended before Android booted"))
     }
 
+    // MARK: The record of a run that ended
+
+    @Test func aFailedRootedRunsRecordMovesAsideOnceItsPauseIsSaved() throws {
+        let (model, driver) = model(rootOn: true)
+        model.start(.normal)
+        driver.sessionRecord = SessionRecord(text: record(end: "kernel-exit", status: 2, boot: "unobserved"))
+        model.runEnded(RunEnd(result: 2), uptimeSeconds: 3)
+        #expect(driver.savedGuest?.root.attention == .failedStart)
+        #expect(driver.retiredRunRecords == 1)
+        // The bug report still says what the failed boot used, though its record is aside.
+        let text = String(decoding: try #require(model.rootReportEntry()).data, as: UTF8.self)
+        #expect(text.contains("booted the Magisk ramdisk: yes"))
+    }
+
+    @Test func aRunsRecordStaysUntilThePauseDecidedFromItIsSaved() {
+        let (model, driver) = model(rootOn: true)
+        model.start(.normal)
+        driver.sessionRecord = SessionRecord(text: record(end: "kernel-exit", status: 2, boot: "unobserved"))
+        driver.saveError = InstanceError.refused("The disk is full.")
+        model.runEnded(RunEnd(result: 2), uptimeSeconds: 3)
+        #expect(model.guest?.root.attention == .failedStart)
+        #expect(driver.retiredRunRecords == 0)
+        // Once the pause can be saved, the next start saves it and the record moves aside.
+        driver.saveError = nil
+        model.start(.normal)
+        #expect(driver.savedGuest?.root.attention == .failedStart)
+        #expect(driver.retiredRunRecords == 1)
+    }
+
+    @Test func tryAgainFollowedByARelaunchDoesNotPauseRootFromTheSameRecordAgain() throws {
+        let directory = try diagnostics(record: record(end: "kernel-exit", status: 2, boot: "unobserved"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, driver) = model(rootOn: true)
+        driver.runRecord = RunRecord(in: directory)
+        model.start(.normal)
+        model.runEnded(RunEnd(result: 2), uptimeSeconds: 3)
+        #expect(model.guest?.root.attention == .failedStart)
+        model.tryRootAgain()
+        #expect(model.guest?.root.attention == nil)
+        // The app is relaunched before any start: the launch finds no record to decide from.
+        let (relaunched, relaunchedDriver) = self.model(rootOn: true)
+        relaunched.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
+        #expect(relaunched.guest?.root.attention == nil)
+        #expect(relaunchedDriver.savedGuest == nil)
+    }
+
     // MARK: The record of a run that is asked for
 
     /// The real runtime over empty storage, whose session record is the file

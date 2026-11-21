@@ -80,7 +80,20 @@ final class StubDriver: RuntimeDriver {
     var guestShell: (any GuestShell)?
     /// The runtime's record of the run that was begun, as the test plays it.
     var sessionRecord: SessionRecord?
-    func currentSessionRecord() -> SessionRecord? { sessionRecord }
+    /// The runtime's own record files, for a test that plays a relaunch
+    /// after a run; with none, `sessionRecord` is the record.
+    var runRecord: RunRecord?
+    func currentSessionRecord() -> SessionRecord? {
+        if let runRecord { return runRecord.read() }
+        return sessionRecord
+    }
+    /// How many times the model settled a run's record.
+    private(set) var retiredRunRecords = 0
+    func retireRunRecord() {
+        retiredRunRecords += 1
+        sessionRecord = nil
+        runRecord?.retire()
+    }
     /// The denials of the network the model told the driver, in order; nil is none.
     private(set) var networkNotices: [NetworkDenial?] = []
     func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }

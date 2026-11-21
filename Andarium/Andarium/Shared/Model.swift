@@ -556,7 +556,15 @@ final class AppModel {
     /// launch that ends first reads it again (`PreviousSession`).
     @ObservationIgnored
     var previousSessionHeld = false
-    /// The ramdisk the previous session's last boot used, as its record said.
+    /// The record of a run that ended is left at its place while the pause
+    /// decided from it is not saved, and moved aside once it is
+    /// (`keepRunRecordIfDecided`): a launch that comes after "Try with root
+    /// again" does not read it again.
+    @ObservationIgnored
+    var runRecordHeld = false
+    /// The ramdisk the last boot before the run under way used, as its record
+    /// said: the previous session's, or a run of this process whose record
+    /// was moved aside.
     @ObservationIgnored
     var previousBootRamdisk: SessionRecord.BootRamdisk?
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the

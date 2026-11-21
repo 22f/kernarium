@@ -275,6 +275,10 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// the record of an earlier run is moved aside as the run is asked for
     /// (`RunRecord`), so none is ever taken for it.
     func currentSessionRecord() -> SessionRecord?
+    /// Moves the record of the run that ended aside for the bug report, once
+    /// what was decided from it is saved (`RunRecord`): a launch that comes
+    /// before the next run begins reads no record of a run that was settled.
+    func retireRunRecord()
     /// The guest's shell, for the short questions about the Magisk app; nil
     /// when there is none to ask.
     var guestShell: (any GuestShell)? { get }
@@ -300,6 +304,7 @@ extension RuntimeDriver {
     func installRootApp() async throws { throw CancellationError() }
     var guestShell: (any GuestShell)? { nil }
     func currentSessionRecord() -> SessionRecord? { nil }
+    func retireRunRecord() {}
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

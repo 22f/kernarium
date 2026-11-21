@@ -67,6 +67,7 @@ extension AppModel {
     func saveRootStateIfPending() {
         if rootStateUnsaved, driver != nil, persistNow() { rootStateUnsaved = false }
         keepPreviousSessionIfDecided()
+        keepRunRecordIfDecided()
     }
 
     /// Moves the previous session's record aside for the bug report once what
@@ -75,6 +76,15 @@ extension AppModel {
         guard previousSessionHeld, !rootStateUnsaved, let diagnosticsDirectory else { return }
         PreviousSession.keep(in: diagnosticsDirectory)
         previousSessionHeld = false
+    }
+
+    /// Moves the record of the run that ended aside for the bug report once
+    /// the pause decided from it is saved, so that a relaunch does not read it
+    /// again and pause root once more after "Try with root again".
+    func keepRunRecordIfDecided() {
+        guard runRecordHeld, !rootStateUnsaved else { return }
+        driver?.retireRunRecord()
+        runRecordHeld = false
     }
 
     /// The boot the run that is under way, or the last one, used: the runtime's
@@ -89,7 +99,11 @@ extension AppModel {
         guard let record = currentRootRecord, record.ramdisk == .root else { return }
         let booted = bootTracker.isReady
         if RootFallbackRule.endedBeforeBoot(end, bootCompleted: booted) || RootFallbackRule.endedBeforeBoot(record) {
+            // The pause is decided from this run's record, which stays until it is saved.
+            runRecordHeld = true
+            previousBootRamdisk = record.ramdisk
             applyRootFallback()
+            keepRunRecordIfDecided()
         } else if end.stoppedByUser, !booted {
             var state = guest?.root ?? RootState()
             RootFallbackRule.stopped(&state)
