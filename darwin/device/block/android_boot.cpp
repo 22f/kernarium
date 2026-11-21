@@ -54,10 +54,14 @@ void validateSystemDisk(const Layout &layout, const std::filesystem::path &path)
 	verifyGpt(disk, layout.systemGpt(), "the Android system disk");
 }
 
-FileRange bootRamdisk(const File &disk, const SystemPartition &partition)
+/* The ramdisk of a kernel-less boot image v4 that fills `available` bytes from
+ * `offset` of `file`: a header page, then the ramdisk. The kernel and the
+ * command line of an image are never read; both belong to the host. */
+FileRange kernellessRamdisk(const File &file, std::uint64_t offset,
+			    std::uint64_t available, const char *what)
 {
 	std::array<std::byte, bootImageHeaderSize> header {};
-	disk.read(partition.offset, header);
+	file.read(offset, header);
 	if (std::memcmp(header.data(), "ANDROID!", 8) != 0 ||
 	    little32(header.data() + 8) != 0U ||
 	    little32(header.data() + 20) != bootImageHeaderSize ||
@@ -65,12 +69,65 @@ FileRange bootRamdisk(const File &disk, const SystemPartition &partition)
 	    little32(header.data() + 1580) != 0U ||
 	    !std::all_of(header.begin() + 24, header.begin() + 40,
 			 [](std::byte value) { return value == std::byte{}; }))
-		throw std::invalid_argument("Android boot partition is not kernelless v4");
+		throw std::invalid_argument(std::string{what} +
+					    " is not kernelless v4");
 	const auto ramdiskSize = little32(header.data() + 12);
-	if (ramdiskSize == 0 || partition.imageBytes <= bootImagePageSize ||
-	    ramdiskSize > partition.imageBytes - bootImagePageSize)
-		throw std::invalid_argument("Android boot partition ramdisk is invalid");
-	return FileRange{partition.offset + bootImagePageSize, ramdiskSize};
+	if (ramdiskSize == 0 || available <= bootImagePageSize ||
+	    ramdiskSize > available - bootImagePageSize)
+		throw std::invalid_argument(std::string{what} +
+					    " ramdisk is invalid");
+	return FileRange{offset + bootImagePageSize, ramdiskSize};
+}
+
+FileRange bootRamdisk(const File &disk, const SystemPartition &partition)
+{
+	return kernellessRamdisk(disk, partition.offset, partition.imageBytes,
+				 "Android boot partition");
+}
+
+/* The formats the guest kernel unpacks an initramfs from, by their first
+ * bytes: gzip, bzip2, xz, lzma, lzo, legacy lz4, zstd, and an uncompressed
+ * newc cpio archive. */
+bool knownRamdiskFormat(std::span<const std::byte> head)
+{
+	static constexpr std::array<std::string_view, 9> magics{
+		std::string_view{"\x1f\x8b", 2}, "BZh",
+		std::string_view{"\xfd" "7zXZ\x00", 6},
+		std::string_view{"\x5d\x00\x00", 3},
+		std::string_view{"\x89LZO", 4},
+		std::string_view{"\x02\x21\x4c\x18", 4},
+		std::string_view{"\x28\xb5\x2f\xfd", 4}, "070701", "070702"};
+	return std::any_of(magics.begin(), magics.end(), [head](std::string_view magic) {
+		return head.size() >= magic.size() &&
+		       std::memcmp(head.data(), magic.data(), magic.size()) == 0;
+	});
+}
+
+/* The most the root image may be: a ramdisk is unpacked into the guest's
+ * memory, so a file past this is not a ramdisk the host starts. */
+constexpr std::uint64_t maxRootImageBytes = 256ULL << 20;
+
+/* The ramdisk of the release's root image. The path is the release's own file
+ * under its root, never a caller's; it rides on the kernel command line as
+ * `initrd=`. */
+FileRange rootBootRamdisk(const std::filesystem::path &image)
+{
+	validateUbdPath(image, "Android root boot image");
+	const File file(image);
+	if (file.size() > maxRootImageBytes)
+		throw std::invalid_argument(
+			"the Android root boot image is too large");
+	if (file.size() <= bootImagePageSize)
+		throw std::invalid_argument(
+			"the Android root boot image holds no ramdisk");
+	const auto range = kernellessRamdisk(file, 0, file.size(),
+					     "Android root boot image");
+	std::array<std::byte, 8> head {};
+	file.read(range.offset, head);
+	if (!knownRamdiskFormat(head))
+		throw std::invalid_argument(
+			"the Android root boot image holds no ramdisk the kernel unpacks");
+	return range;
 }
 
 std::array<std::byte, bootloaderMessageSize> readBootloaderMessage(
@@ -129,15 +186,27 @@ void Storage::validate() const
 	(void)validateDataDisk(layout_, dataDisk_);
 }
 
-BootSelection Storage::selectBoot(BootMode requestedMode) const
+bool Storage::carriesRoot() const noexcept
+{
+	struct stat details {};
+	return lstat((release_ / releaseRootBootImage).c_str(), &details) == 0 &&
+	       S_ISREG(details.st_mode);
+}
+
+BootSelection Storage::selectBoot(BootMode requestedMode, RootMode root) const
 {
 	if (requestedMode != BootMode::automatic &&
 	    requestedMode != BootMode::normal && requestedMode != BootMode::recovery)
 		throw std::invalid_argument("unknown Android boot mode");
+	if (root != RootMode::off && root != RootMode::on)
+		throw std::invalid_argument("unknown Android root mode");
 	validate();
 	const File system(systemDisk_);
-	const auto normal = bootRamdisk(system, layout_.systemPartition("init_boot"));
+	const auto stock = bootRamdisk(system, layout_.systemPartition("init_boot"));
 	const auto recovery = bootRamdisk(system, layout_.systemPartition("recovery"));
+	if (root == RootMode::on && !carriesRoot())
+		throw std::invalid_argument(
+			"this Android release carries no root boot image");
 	auto selected = requestedMode;
 	if (requestedMode == BootMode::automatic) {
 		const auto command = commandOf(readBootloaderMessage(layout_, dataDisk_));
@@ -147,8 +216,14 @@ BootSelection Storage::selectBoot(BootMode requestedMode) const
 		selected = *command == recoveryCommand ? BootMode::recovery
 						       : BootMode::normal;
 	}
-	return BootSelection{selected,
-			     selected == BootMode::recovery ? recovery : normal};
+	/* Only the normal boot's ramdisk is replaced: recovery stays the
+	 * release's own, and the root image is not read for it. */
+	if (selected == BootMode::recovery)
+		return BootSelection{selected, recovery, {}};
+	if (root == RootMode::off)
+		return BootSelection{selected, stock, {}};
+	const auto image = release_ / releaseRootBootImage;
+	return BootSelection{selected, rootBootRamdisk(image), image};
 }
 
 bool Storage::consumeBootloaderCommand() const
@@ -177,10 +252,10 @@ bool Storage::consumeBootloaderCommand() const
 	return true;
 }
 
-RestartBoot Storage::selectRestartBoot() const
+RestartBoot Storage::selectRestartBoot(RootMode root) const
 {
 	const bool consumed = consumeBootloaderCommand();
-	return RestartBoot{selectBoot(BootMode::automatic), consumed};
+	return RestartBoot{selectBoot(BootMode::automatic, root), consumed};
 }
 
 std::vector<std::string> Storage::kernelArguments(const BootSelection &boot) const
@@ -188,7 +263,8 @@ std::vector<std::string> Storage::kernelArguments(const BootSelection &boot) con
 	return {
 		"ubd0r=" + systemDisk_.string(),
 		"ubd1=" + dataDisk_.string(),
-		"initrd=" + systemDisk_.string(),
+		"initrd=" + (boot.ramdiskFile.empty() ? systemDisk_ : boot.ramdiskFile)
+				    .string(),
 		"initrd_offset=" + std::to_string(boot.ramdisk.offset),
 		"initrd_size=" + std::to_string(boot.ramdisk.size),
 		"root=/dev/ram0",

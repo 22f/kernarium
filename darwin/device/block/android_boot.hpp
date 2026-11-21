@@ -28,9 +28,21 @@ struct FileRange {
 	std::uint64_t size;
 };
 
+/* Which normal-boot ramdisk the guest starts with: the release's own
+ * `init_boot`, or the copy of it that has Magisk patched in, which the release
+ * carries beside its system disk (`releaseRootBootImage`). Recovery always
+ * boots its own ramdisk. */
+enum class RootMode : std::uint32_t {
+	off = 0,
+	on = 1,
+};
+
 struct BootSelection {
 	BootMode mode;
 	FileRange ramdisk;
+	/* The boot image the ramdisk lies in, when it is not the system disk's
+	 * partition: the release's root image. Empty for the system disk. */
+	std::filesystem::path ramdiskFile;
 };
 
 struct RestartBoot {
@@ -45,6 +57,11 @@ struct RestartBoot {
 inline constexpr std::string_view releaseSystemDisk{"guest/system.img"};
 inline constexpr std::string_view releaseLayout{"guest/partition-layout.json"};
 inline constexpr std::string_view releaseCommandLine{"boot/kernel-command-line.txt"};
+/* The release's own `init_boot` with Magisk patched in (a kernel-less boot
+ * image v4 like the partition), present only in a release that carries root.
+ * It is the one file the host takes a ramdisk from besides the system disk;
+ * no path of the caller's ever names one. */
+inline constexpr std::string_view releaseRootBootImage{"root/init_boot-magisk.img"};
 
 /* The only block devices an Android guest has: the release's system disk as
  * `ubd0r` and the instance's own data disk as `ubd1`, whose platform devices
@@ -81,10 +98,25 @@ public:
 	/* Checks both disks and that they are different files. */
 	void validate() const;
 
+	/* Whether the release carries the root ramdisk (releaseRootBootImage). It
+	 * says nothing of the image's content: selectBoot validates that. */
+	bool carriesRoot() const noexcept;
+
 	/* The ramdisk of the boot the guest should make. In automatic mode the
 	 * data disk's bootloader message decides between recovery and a normal
-	 * boot. */
-	BootSelection selectBoot(BootMode requestedMode) const;
+	 * boot.
+	 *
+	 * RootMode::on takes the normal boot's ramdisk from the release's root
+	 * image in place of the system disk's `init_boot`, on this boot and, by
+	 * the same argument to selectRestartBoot, on every restart. Only the
+	 * ramdisk is read: the image's kernel and command line are never used, and
+	 * recovery keeps the release's own ramdisk whatever the mode. The image
+	 * must be a regular file of at most 256 MiB, with the header of the
+	 * release's own `init_boot` form and a ramdisk in a format the kernel
+	 * unpacks; a release without one, and anything malformed, throw
+	 * std::invalid_argument. */
+	BootSelection selectBoot(BootMode requestedMode,
+				 RootMode root = RootMode::off) const;
 
 	/* There is no bootloader to take the one-shot request that `reboot
 	 * bootloader` leaves in the misc partition's bootloader message (its
@@ -102,7 +134,7 @@ public:
 	 * first boot was given, so that `reboot recovery` boots recovery and
 	 * anything else boots normally. Recovery clears its own "boot-recovery"
 	 * request when it is done. */
-	RestartBoot selectRestartBoot() const;
+	RestartBoot selectRestartBoot(RootMode root = RootMode::off) const;
 
 	/* The kernel arguments that attach the two disks and give the guest
 	 * `boot`'s ramdisk. */

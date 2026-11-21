@@ -108,3 +108,12 @@ partition picks the boot in automatic mode: `boot-recovery` selects recovery.
 There is no bootloader, so a restart clears the one-shot `bootonce-bootloader`
 request that `reboot bootloader` leaves, and every restart selects its ramdisk
 in automatic mode whatever the first boot was given.
+
+A release that carries root has `root/init_boot-magisk.img` beside its system
+disk: its own `init_boot` with Magisk patched in. A launch that asks for root
+(`RootMode::on`) takes the normal boot's ramdisk, on every boot and restart,
+from that file and nowhere else; no caller names a path. The file must be a
+regular file of at most 256 MiB with the same kernel-less v4 header as the
+partition and a ramdisk in a format the kernel unpacks, and its kernel and
+command line are never read. Recovery keeps the release's own ramdisk, and a
+release without the file refuses the request.
