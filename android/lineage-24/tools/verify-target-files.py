@@ -5938,6 +5938,25 @@ def check_sms_control_properties(contexts: list[str], policies: tuple[bytes, ...
                     fail(f"{sorted(extra)} may {message} {service} through {key}, labelled {label}: only "
                          f"{sorted(allowed)} may")
 
+    # The holder's start of the waker is denied on the legacy key, which init checks first, and allowed on the
+    # qualified one. The denial is the meant one and is silenced, or every wake logs an avc denial: the platform
+    # silences only its own services' control types.
+    legacy = property_label(f"ctl.{SMS_WAKE}", contexts) or "default_prop"
+    for policy in policies:
+        for source, target, object_class, permissions in cil_rules(policy, CIL_DONTAUDIT_RULE):
+            if (
+                object_class == b"property_service"
+                and b"set" in permissions
+                and SMS_LISTENER in sets.members(cil_type_name(source))
+                and legacy in sets.members(cil_type_name(target))
+            ):
+                return
+    fail(
+        f"policy does not silence the denial of {SMS_LISTENER} setting the legacy key ctl.{SMS_WAKE}, labelled "
+        f"{legacy}, which init checks before the qualified key that allows the start "
+        "(overlay/sepolicy/system_ext/private/kernarium_sms_listener.te)"
+    )
+
 
 class SmsRule(NamedTuple):
     """An allow rule as the text-message check reads it: the types its source and target stand for (a target of

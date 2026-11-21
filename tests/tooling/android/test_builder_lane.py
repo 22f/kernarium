@@ -548,6 +548,11 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "(allow installd app_data_file_type (dir (create getattr open read search write)))\n"
         "(allow installd app_data_file_type (file (create getattr open read write unlink)))\n"
     )
+    # init checks the legacy key ctl.kernarium_sms_wake first, and the holder is denied it: the policy silences the denial.
+    if variant == "holder-dontaudit-for-another":
+        ext += "(dontaudit system_app ctl_kernarium_sms_locked_prop (property_service (set)))\n"
+    elif variant != "no-holder-dontaudit":
+        ext += "(dontaudit kernarium_sms_listener ctl_kernarium_sms_locked_prop (property_service (set)))\n"
     if variant != "no-vsock-attribute":
         ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms))\n"
     if variant != "holder-without-the-vsock-attribute":
@@ -6756,6 +6761,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "\\['shell'\\] may use the descriptors of kernarium_sms_listener"),
             ("sms-handoff-service-cannot-use-the-fd", {"sms_policy_variant": "handoff-service-cannot-use-the-fd"},
              "kernarium_sms may not use the listening descriptor of kernarium_sms_listener"),
+            ("sms-holder-denial-not-silenced", {"sms_policy_variant": "no-holder-dontaudit"},
+             "does not silence the denial of kernarium_sms_listener setting the legacy key ctl.kernarium_sms_wake, "
+             "labelled ctl_kernarium_sms_locked_prop"),
+            ("sms-holder-denial-silenced-for-another", {"sms_policy_variant": "holder-dontaudit-for-another"},
+             "does not silence the denial of kernarium_sms_listener setting the legacy key ctl.kernarium_sms_wake"),
             ("sms-wake-property-generic", {"sms_policy_variant": "wake-property-generic"},
              "label ctl.start\\$kernarium_sms_wake ctl_start_prop, not ctl_kernarium_sms_wake_prop"),
             ("sms-wake-property-by-another", {"sms_policy_variant": "wake-property-by-another"},

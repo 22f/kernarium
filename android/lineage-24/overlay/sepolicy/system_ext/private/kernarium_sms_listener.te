@@ -43,3 +43,10 @@ set_prop(kernarium_sms_listener, ctl_kernarium_sms_wake_prop)
 # of both services with this type, which only init may set, so that the qualified key decides: the holder starts the
 # waker and nothing else controls either service.
 system_internal_prop(ctl_kernarium_sms_locked_prop)
+
+# init checks the legacy key first and audits its denial, because the platform silences only the legacy control types
+# of its own services: the holder's start of the waker through ctl.start$kernarium_sms_wake is denied on
+# ctl.kernarium_sms_wake (the locked type, which no one but init may set) and then allowed on the qualified key. Every
+# wake would otherwise log an avc denial that nothing needs to act on. The target-files verifier requires the rule, and
+# that init alone may set the locked type: the rule hides only a denial that is meant.
+dontaudit kernarium_sms_listener ctl_kernarium_sms_locked_prop:property_service set;
