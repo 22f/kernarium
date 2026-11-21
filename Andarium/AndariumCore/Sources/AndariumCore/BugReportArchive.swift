@@ -178,6 +178,9 @@ public enum BugReportArchive {
 public enum BugReportAttachments {
     public static let sessionRecord = "session.txt"
     public static let previousSessionRecord = "previous-session.txt"
+    /// The record of the last earlier run of this process, kept apart from
+    /// the previous process's (`RunRecord`).
+    public static let earlierRunRecord = "earlier-run.txt"
     public static let metricKitDirectory = "metrickit"
     public static let stallReport = "andarium/stalls.txt"
     public static let networkReport = "andarium/network.txt"
@@ -191,6 +194,7 @@ public enum BugReportAttachments {
         var entries: [BugReportArchive.Entry] = []
         let files: [(String, String)] = [
             (previousSessionRecord, "andarium/session-previous.txt"),
+            (earlierRunRecord, "andarium/session-earlier-run.txt"),
             (sessionRecord, "andarium/session-current.txt"),
         ]
         var records: [SessionRecord?] = []
@@ -199,13 +203,18 @@ public enum BugReportAttachments {
             records.append(record)
             if let entry { entries.append(entry) }
         }
-        if let report = stalls(previous: records[0], current: records[1]) {
+        // The reports in words describe the previous process and the latest run
+        // of this one: the earlier run's record stands for it while the run
+        // that follows has written none.
+        let previous = records[0]
+        let latest = records[2] ?? records[1]
+        if let report = stalls(previous: previous, current: latest) {
             entries.append(.init(name: stallReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }
-        if let report = network(previous: records[0], current: records[1]) {
+        if let report = network(previous: previous, current: latest) {
             entries.append(.init(name: networkReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }
-        if let report = cameraStills(previous: records[0], current: records[1]) {
+        if let report = cameraStills(previous: previous, current: latest) {
             entries.append(.init(name: cameraReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }
         entries.append(contentsOf: guest)
@@ -255,7 +264,7 @@ public enum BugReportAttachments {
             "sat in an uninterruptible wait in the system or in one host call (a device service's answer, a disk,",
             "guest RAM, or a call the runtime does not label) and ran under a fifth of the time meanwhile. The",
             "watch looks every 50 ms. Times are UTC.",
-            "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
+            "andarium/session-previous.txt, andarium/session-earlier-run.txt and andarium/session-current.txt hold the raw records.",
         ]
         for (title, record) in [("The previous session", previous), ("The current session", current)] {
             lines.append("")
@@ -284,7 +293,7 @@ public enum BugReportAttachments {
             "answer (under way, given up by the guest, or pushed out of the table of waiting attempts). A refusal by",
             "the system and a path with no route are not told apart. DNS over TCP to the name server or the gateway",
             "is answered by the user network itself and is not counted as a connection.",
-            "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
+            "andarium/session-previous.txt, andarium/session-earlier-run.txt and andarium/session-current.txt hold the raw records.",
         ]
         for (title, record) in [("The previous session", previous), ("The current session", current)] {
             lines.append("")
@@ -327,7 +336,7 @@ public enum BugReportAttachments {
             "Orientation compensation is the photo output turning its stills to an earlier model's sensor orientation. The system",
             "answers it only once the capture session's configuration is committed: an answer read before that is not final.",
             "Front devices: the front devices the platform listed, and how many of their formats it did not offer the guest.",
-            "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
+            "andarium/session-previous.txt, andarium/session-earlier-run.txt and andarium/session-current.txt hold the raw records.",
         ]
         for (title, record) in [("The previous session", previous), ("The current session", current)] {
             lines.append("")

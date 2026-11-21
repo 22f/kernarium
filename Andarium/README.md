@@ -953,7 +953,9 @@ address space holds, so this is a fallback.
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
   that was neither Android's own nor a stop, Home shows a notice with its cause
-  (`SessionRecord.notice`). The runtime writes the record without the serial
+  (`SessionRecord.notice`). A bug report carries the previous process's record
+  for the whole life of the process, and beside it the last earlier run of
+  this process (`RunRecord`), kept apart from it. The runtime writes the record without the serial
   number, the adb key and the time zone the launch stated and without any
   hardware address in its colon spelling, so neither the bug report nor the
   previous session's copy has them.

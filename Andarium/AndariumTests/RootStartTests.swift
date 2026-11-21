@@ -513,7 +513,7 @@ final class RootStartTests {
             runtime.begin(guest: Guest.fresh(on: host), mode: .normal, kind: .normal)
             // A start stopped during its preparation never began a record of its own.
             #expect(runtime.currentSessionRecord() == nil)
-            let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+            let kept = directory.appendingPathComponent(BugReportAttachments.earlierRunRecord)
             #expect(SessionRecord.read(at: kept)?.ramdisk == .root)
         }
     }

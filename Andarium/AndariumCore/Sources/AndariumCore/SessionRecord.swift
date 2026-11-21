@@ -410,9 +410,9 @@ public final class RunRecord: @unchecked Sendable {
         case nothing
         /// The record was moved aside for the bug report.
         case moved
-        /// The record could not be moved aside (its place in the bug report
-        /// could not be cleared) and was emptied where it was. The bug report
-        /// does not carry it.
+        /// The record could not be moved aside (the copy of the run before
+        /// could not be replaced) and was emptied where it was. The bug
+        /// report does not carry it.
         case emptied
         /// The record could be neither moved nor emptied; it is not read.
         case stays
@@ -426,13 +426,15 @@ public final class RunRecord: @unchecked Sendable {
         directory = diagnostics
     }
 
-    /// Takes the record at the run's place away: kept as `previous-session.txt`
-    /// for the bug report, so that the next run writes its own there.
+    /// Takes the record at the run's place away: kept as `earlier-run.txt`
+    /// for the bug report, so that the next run writes its own there. The
+    /// previous process's record, `previous-session.txt`, is not touched: a
+    /// bug report carries it for the whole life of the process.
     @discardableResult
     public func retire() -> Retirement {
         let manager = FileManager.default
         let current = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
-        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let kept = directory.appendingPathComponent(BugReportAttachments.earlierRunRecord)
         let outcome: Retirement
         if !manager.fileExists(atPath: current.path) {
             outcome = .nothing

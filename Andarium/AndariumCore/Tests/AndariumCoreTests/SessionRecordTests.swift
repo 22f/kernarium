@@ -647,7 +647,7 @@ struct RunRecordTests {
         let diagnostics = try directory()
         defer { try? FileManager.default.removeItem(at: diagnostics) }
         let file = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
-        let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let kept = diagnostics.appendingPathComponent(BugReportAttachments.earlierRunRecord)
         let run = RunRecord(in: diagnostics)
         // None yet.
         #expect(run.read() == nil)
@@ -668,6 +668,28 @@ struct RunRecordTests {
         run.retire()
         #expect(run.read() == nil)
         #expect(SessionRecord.read(at: kept)?.ramdisk == .stock)
+    }
+
+    @Test func thePreviousProcessesRecordIsNotTouchedByAnyRetirement() throws {
+        let diagnostics = try directory()
+        defer { try? FileManager.default.removeItem(at: diagnostics) }
+        let file = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let previous = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let earlier = diagnostics.appendingPathComponent(BugReportAttachments.earlierRunRecord)
+        let run = RunRecord(in: diagnostics)
+        // The launch kept the record of the process that ended badly.
+        let ended = state("recovery", ended: true, started: 50)
+        try ended.write(to: previous)
+        // Three runs of this process, each asked for after the one before ended.
+        for (ramdisk, started) in [("stock", 100), ("root", 200)] {
+            try state(ramdisk, ended: true, started: started).write(to: file)
+            #expect(run.retire() == .moved)
+            #expect(try Data(contentsOf: previous) == ended, "the previous process's record was replaced by a run's")
+        }
+        // The last earlier run is the one kept beside it.
+        #expect(SessionRecord.read(at: earlier)?.ramdisk == .root)
+        #expect(run.retire() == .nothing)
+        #expect(try Data(contentsOf: previous) == ended)
     }
 
     /// Takes the write access to what is in `directory` away, as a file that
@@ -710,7 +732,7 @@ struct RunRecordTests {
         let diagnostics = try directory()
         defer { try? FileManager.default.removeItem(at: diagnostics) }
         let file = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
-        let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let kept = diagnostics.appendingPathComponent(BugReportAttachments.earlierRunRecord)
         let run = RunRecord(in: diagnostics)
         try state("root", ended: true, started: 100).write(to: file)
         try withoutWriteAccess(to: diagnostics, file: file) {
