@@ -914,6 +914,24 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 	refuse();
 	fs::remove(image);
 	fs::rename(original, image);
+	/* `root/` itself is a real directory, never a link to one, whatever the
+	 * image inside is; and a file in its place is no directory. */
+	const auto elsewhere = release / "elsewhere";
+	fs::rename(release / "root", elsewhere);
+	fs::create_directory_symlink(elsewhere, release / "root");
+	require(!storage.carriesRoot());
+	refuse();
+	fs::remove(release / "root");
+	{
+		std::FILE *file = std::fopen((release / "root").c_str(), "wb");
+		require(file != nullptr);
+		require(std::fclose(file) == 0);
+	}
+	require(!storage.carriesRoot());
+	refuse();
+	fs::remove(release / "root");
+	fs::rename(elsewhere, release / "root");
+	require(storage.carriesRoot());
 
 	/* The header: magic, kernel size, header size, version, reserved words
 	 * and the signature size, as the release's own partitions are checked. */

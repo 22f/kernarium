@@ -236,6 +236,22 @@ File::File(const std::filesystem::path &path)
 					"cannot open " + path.string());
 }
 
+File::File(int directory, const char *name)
+{
+	descriptor_ = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (descriptor_ < 0)
+		throw std::system_error(errno, std::generic_category(),
+					std::string{"cannot open "} + name);
+	struct stat details {};
+	if (fstat(descriptor_, &details) != 0 || !S_ISREG(details.st_mode) ||
+	    details.st_size < 0) {
+		(void)close(descriptor_);
+		descriptor_ = -1;
+		throw std::invalid_argument(std::string{"unsafe regular file: "} + name);
+	}
+	size_ = static_cast<std::uint64_t>(details.st_size);
+}
+
 File::~File()
 {
 	if (descriptor_ >= 0)

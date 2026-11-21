@@ -109,13 +109,39 @@ bool knownRamdiskFormat(std::span<const std::byte> head)
  * memory, so a file past this is not a ramdisk the host starts. */
 constexpr std::uint64_t maxRootImageBytes = 256ULL << 20;
 
-/* The ramdisk of the release's root image. The path is the release's own file
- * under its root, never a caller's; it rides on the kernel command line as
- * `initrd=`. */
-FileRange rootBootRamdisk(const std::filesystem::path &image)
+/* The release's root image, opened without following a link at `root/` or at
+ * the image; nothing when the release carries none. A `root/` that is a link
+ * or no directory, and an image that is no regular file, are refused. */
+std::optional<File> openRootImage(const std::filesystem::path &release)
 {
-	validateUbdPath(image, "Android root boot image");
-	const File file(image);
+	const std::filesystem::path image{releaseRootBootImage};
+	const int directory = open((release / image.parent_path()).c_str(),
+				   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (directory < 0) {
+		if (errno == ENOENT)
+			return std::nullopt;
+		throw std::invalid_argument(
+			"the Android root boot image's directory is not a plain directory");
+	}
+	struct Closer {
+		int descriptor;
+		~Closer() { (void)close(descriptor); }
+	} const closer{directory};
+	try {
+		return std::optional<File>{std::in_place, directory,
+					   image.filename().c_str()};
+	} catch (const std::system_error &error) {
+		if (error.code().value() == ENOENT)
+			return std::nullopt;
+		throw;
+	}
+}
+
+/* The ramdisk of the release's root image, checked on the descriptor it was
+ * opened on. The path is the release's own file under its root, never a
+ * caller's. */
+FileRange rootBootRamdisk(const File &file)
+{
 	if (file.size() > maxRootImageBytes)
 		throw std::invalid_argument(
 			"the Android root boot image is too large");
@@ -190,9 +216,11 @@ void Storage::validate() const
 
 bool Storage::carriesRoot() const noexcept
 {
-	struct stat details {};
-	return lstat((release_ / releaseRootBootImage).c_str(), &details) == 0 &&
-	       S_ISREG(details.st_mode);
+	try {
+		return openRootImage(release_).has_value();
+	} catch (...) {
+		return false;
+	}
 }
 
 BootSelection Storage::selectBoot(BootMode requestedMode, RootMode root) const
@@ -206,7 +234,11 @@ BootSelection Storage::selectBoot(BootMode requestedMode, RootMode root) const
 	const File system(systemDisk_);
 	const auto stock = bootRamdisk(system, layout_.systemPartition("init_boot"));
 	const auto recovery = bootRamdisk(system, layout_.systemPartition("recovery"));
-	if (root == RootMode::on && !carriesRoot())
+	/* Opened once: what is validated below is this descriptor's file. */
+	const std::optional<File> rootImage = root == RootMode::on
+		? openRootImage(release_)
+		: std::optional<File>{};
+	if (root == RootMode::on && !rootImage)
 		throw std::invalid_argument(
 			"this Android release carries no root boot image");
 	auto selected = requestedMode;
@@ -225,7 +257,8 @@ BootSelection Storage::selectBoot(BootMode requestedMode, RootMode root) const
 	if (root == RootMode::off)
 		return BootSelection{selected, stock, {}};
 	const auto image = release_ / releaseRootBootImage;
-	return BootSelection{selected, rootBootRamdisk(image), image};
+	validateUbdPath(image, "Android root boot image");
+	return BootSelection{selected, rootBootRamdisk(*rootImage), image};
 }
 
 bool Storage::consumeBootloaderCommand() const
@@ -265,6 +298,9 @@ std::vector<std::string> Storage::kernelArguments(const BootSelection &boot) con
 	return {
 		"ubd0r=" + systemDisk_.string(),
 		"ubd1=" + dataDisk_.string(),
+		/* The kernel reopens this path when it loads the ramdisk. A file
+		 * replaced after the selection is not defended here, as for the
+		 * system disk's ramdisk: the release folder is trusted storage. */
 		"initrd=" + (boot.ramdiskFile.empty() ? systemDisk_ : boot.ramdiskFile)
 				    .string(),
 		"initrd_offset=" + std::to_string(boot.ramdisk.offset),
