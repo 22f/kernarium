@@ -44,7 +44,7 @@ private:
 // The colours a photo states, by its attachments, the colour space object it carries and its ICC profile. A photo is read
 // as sRGB when it has no profile, so what matters is whether what it states is sRGB: BT.709 primaries (sRGB's too) with an
 // sRGB or BT.709 transfer. Those are the explicit attachments, the colour spaces kCGColorSpaceSRGB and kCGColorSpaceITUR_709,
-// and the two spaces Core Video itself makes of those attachments, which are equal to neither named space. A colour space made
+// and the spaces Core Video itself makes of those attachments, which are equal to neither named space. A colour space made
 // of an ICC profile is equal to the one it is the profile of.
 struct StatedColours {
     bool other {};       // something it states is not that
@@ -52,12 +52,13 @@ struct StatedColours {
     bool transfer {};    // its transfer is stated, and is
 };
 
-// The colour space Core Video makes of BT.709 primaries over this transfer function.
-Cf<CGColorSpaceRef> coreVideoSpaceOf(CFStringRef transfer)
+// The colour space Core Video makes of BT.709 primaries over this transfer function and, when there is one, this matrix: the
+// space it makes over the sRGB transfer differs with the matrix a photo carries (a photo here carries none or BT.601's).
+Cf<CGColorSpaceRef> coreVideoSpaceOf(CFStringRef transfer, CFStringRef matrix)
 {
-    const void* keys[] = {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey};
-    const void* values[] = {kCVImageBufferColorPrimaries_ITU_R_709_2, transfer};
-    Cf<CFDictionaryRef> attachments(CFDictionaryCreate(nullptr, keys, values, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    const void* keys[3] = {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey};
+    const void* values[3] = {kCVImageBufferColorPrimaries_ITU_R_709_2, transfer, matrix};
+    Cf<CFDictionaryRef> attachments(CFDictionaryCreate(nullptr, keys, values, matrix ? 3 : 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
     return Cf<CGColorSpaceRef>(attachments ? CVImageBufferCreateColorSpaceFromAttachments(attachments.get()) : nullptr);
 }
 
@@ -67,8 +68,10 @@ bool isSrgbOrBt709Space(CGColorSpaceRef space)
     const Cf<CGColorSpaceRef> statesSrgb[] = {
         Cf<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceSRGB)),
         Cf<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceITUR_709)),
-        coreVideoSpaceOf(kCVImageBufferTransferFunction_ITU_R_709_2),
-        coreVideoSpaceOf(kCVImageBufferTransferFunction_sRGB),
+        coreVideoSpaceOf(kCVImageBufferTransferFunction_ITU_R_709_2, nullptr),
+        coreVideoSpaceOf(kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_601_4),
+        coreVideoSpaceOf(kCVImageBufferTransferFunction_sRGB, nullptr),
+        coreVideoSpaceOf(kCVImageBufferTransferFunction_sRGB, kCVImageBufferYCbCrMatrix_ITU_R_601_4),
     };
     const Cf<CFDataRef> profile(CGColorSpaceCopyICCData(space));
     for (const auto& known : statesSrgb) {
