@@ -1514,13 +1514,13 @@ int main(int argc, char **argv)
 			clean_power_off_releases_the_process(true, Ending::power_off);
 		else if (mode == "release-halt")
 			clean_power_off_releases_the_process(true, Ending::halt);
-#if UML_TEST_AOT
-		else if (mode == "release-reselects-aot")
-			a_release_lets_the_next_session_choose_its_aot_afresh();
 		else if (mode == "refused-start-no-cache-budget")
 			a_refused_start_leaves_no_cache_budget();
 		else if (mode == "waiting-start-memory-limit")
 			a_waiting_start_leaves_the_memory_limit_alone();
+#if UML_TEST_AOT
+		else if (mode == "release-reselects-aot")
+			a_release_lets_the_next_session_choose_its_aot_afresh();
 		else if (mode == "release-race-off-then-on")
 			a_start_waits_for_the_session_before_it_to_end(
 				false, NextStart::on_matching);
