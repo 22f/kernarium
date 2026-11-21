@@ -25,6 +25,30 @@ struct LinkFrameRate {
     [[nodiscard]] bool operator==(const LinkFrameRate&) const = default;
 };
 
+/* What the draws of one frame may still wait for a drawable. The budget
+ * belongs to the frame a draw claims, which is the newest one at the moment of
+ * its claim (a frame that arrives after the tick took its flag, and before the
+ * claim, is the frame drawn): `frame` is the frame the waits so far were for,
+ * `left` what is left of its budget and `whole` the budget of a frame that no
+ * draw has tried. The draw asks the layer for a drawable only while the
+ * allowance for the frame it claimed is above zero. */
+struct DrawableBudget {
+    std::uint64_t frame {};
+    double left {};
+    double whole {};
+
+    [[nodiscard]] double allowanceFor(std::uint64_t claimed) const noexcept
+    {
+        return claimed == frame ? left : whole;
+    }
+
+    /* A draw that nobody paces asks as it always did. */
+    [[nodiscard]] static constexpr DrawableBudget unlimited() noexcept
+    {
+        return {0, 0.0, 1e9};
+    }
+};
+
 /* The decisions of the display link that paces the presents of a 120 Hz
  * display (native_display_ios.mm): what the link asks iOS for, whether a tick
  * presents, and when the link sleeps. It is a state machine with no clock and
@@ -61,11 +85,15 @@ struct LinkFrameRate {
  * The link sleeps when no frame has been waiting for idleSeconds. Whoever
  * runs the link keeps one flag, whether a frame waits, and clears it when a
  * tick presents. A tick that presents draws, and tells the pacer when the
- * drawable was not there (`drew`): the frame is then drawn again on the next
- * ticks, up to maximumDrawRetries of them and until its draws have waited
- * maximumDrawableWaitSeconds for a drawable, so that a transient failure does
- * not leave the newest frame unshown while the link sleeps, and a stalled one
- * does not hold the thread that draws. */
+ * drawable was not there (`drew`, with the frame the draw claimed): the frame
+ * is then drawn again on the next ticks, up to maximumDrawRetries of them and
+ * until its draws have waited maximumDrawableWaitSeconds for a drawable, so
+ * that a transient failure does not leave the newest frame unshown while the
+ * link sleeps, and a stalled one does not hold the thread that draws. The
+ * draw asks for a drawable once, and only while the frame has budget left
+ * (`drawableBudget`), so the waits of a frame add up to under the budget plus
+ * one wait of the layer (a second): under 1.9 s, whatever the draws and the
+ * flags that ask for them. */
 class PresentPacer final {
 public:
     struct Parameters {
@@ -92,10 +120,12 @@ public:
          * 120 step and half a second at the 60 step. */
         unsigned maximumDrawRetries {30};
         /* How long the draws of one frame may have waited for a drawable, in
-         * all, before they are not tried again: a layer waits a second for a
+         * all, before no draw asks again: a layer waits a second for a
          * drawable that the display holds, so a draw that waited it out ends
          * the retries, where 30 of them would hold the thread that draws for
-         * half a minute. Only the wait for the drawable counts. */
+         * half a minute. Only the wait for the drawable counts, and a draw
+         * asks only while less than this has been waited, so the last wait
+         * may end past it by a layer's own second at most. */
         double maximumDrawableWaitSeconds {0.9};
     };
 
@@ -128,21 +158,23 @@ public:
         bool frameWaiting,
         double ceiling) noexcept;
 
-    /* A draw has been made for the newest frame (a tick that presented, or
-     * the display's own draw when it has no link): `unavailable` says it
-     * found no drawable or render pass, which owes the frame another draw at
-     * the next ticks, up to the limits (the draws, and the time they waited
-     * for a drawable: `drawableWaitSeconds`, the acquisition's own time); a
-     * draw that shows the frame ends them. */
-    void drew(bool unavailable, double drawableWaitSeconds = 0.0) noexcept;
+    /* A draw has been made (a tick that presented, or the display's own draw
+     * when it has no link) for `frame`, the frame it claimed: `unavailable`
+     * says it found no drawable or render pass, which owes the frame another
+     * draw at the next ticks, up to the limits (the draws, and the time they
+     * waited for a drawable: `drawableWaitSeconds`, the acquisition's own
+     * time); a draw that shows the frame ends them. The limits are the
+     * frame's: a draw of another frame than the last starts them again. */
+    void drew(bool unavailable, double drawableWaitSeconds = 0.0, std::uint64_t frame = 0) noexcept;
 
     /* Whether the newest frame is owed another draw. The debt, and what is
      * left of the limit, outlive a wake: a link made again (the scene it was
-     * on went) goes on with the frame that was not shown, and only a frame
-     * that arrives renews the limit (`frameArrived`, which a tick does for
-     * the frame it is told of). */
+     * on went) goes on with the frame that was not shown, and only a draw of
+     * another frame renews the limit. */
     [[nodiscard]] bool retryOwed() const noexcept;
-    void frameArrived() noexcept;
+
+    /* What the next draw may wait for a drawable (`DrawableBudget`). */
+    [[nodiscard]] DrawableBudget drawableBudget() const noexcept;
 
     /* For a display with no link to tick, which draws a frame itself and
      * asks again after a delay: whether the caller is to arrange that delay
@@ -183,6 +215,8 @@ private:
     bool retryOwed_ {};
     unsigned retries_ {};
     double drawableWait_ {};
+    /* The frame the retries and the waits count for. */
+    std::uint64_t budgetFrame_ {};
     bool retryArranged_ {};
     /* When the step last changed since the last wake. */
     std::optional<double> changedAt_;

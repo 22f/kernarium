@@ -585,9 +585,14 @@ struct MetalPresentationState final :
      * view, of a layer that belongs to no window. It says when the frame is
      * owed and the view had no drawable or render pass to draw it into
      * (DrawResult::unavailable), the one case in which the frame is neither
-     * shown nor retired and nothing else will ask for it again, and how long
-     * the acquisition of the drawable took. */
-    DrawOutcome draw(MTKView* view, CAMetalLayer* layer) noexcept
+     * shown nor retired and nothing else will ask for it again, how long the
+     * request for the drawable took, and the frame it claimed. It asks for a
+     * drawable once, and not at all when the waits of earlier draws of that
+     * frame have used up its budget (`budget`). */
+    DrawOutcome draw(
+        MTKView* view,
+        CAMetalLayer* layer,
+        const DrawableBudget& budget = DrawableBudget::unlimited()) noexcept
     {
         @autoreleasepool {
             std::uint64_t contentGeneration = 0;
@@ -628,34 +633,42 @@ struct MetalPresentationState final :
                  * one, and this runs on the thread that owns the user
                  * interface. Claim the frame first so a redraw with nothing
                  * new to show never pays for it. */
-                MTLRenderPassDescriptor* pass = nil;
-                id<CAMetalDrawable> drawable = nil;
-                MTLClearColor clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-                const auto acquireStart = std::chrono::steady_clock::now();
-                if (view != nil) {
-                    pass = view.currentRenderPassDescriptor;
-                    drawable = view.currentDrawable;
-                    clearColor = view.clearColor;
-                } else {
-                    drawable = [layer nextDrawable];
-                    if (drawable != nil) {
-                        pass = [MTLRenderPassDescriptor renderPassDescriptor];
-                        pass.colorAttachments[0].texture = drawable.texture;
-                        pass.colorAttachments[0].storeAction =
-                            MTLStoreActionStore;
-                    }
+                if (!(budget.allowanceFor(presentationGeneration) > 0.0)) {
+                    /* The waits of this frame's draws used up its budget:
+                     * the frame stays owed and nothing asks the layer. */
+                    std::lock_guard lock(presentationMutex);
+                    presentationInFlight = false;
+                    return DrawOutcome {
+                        DrawResult::unavailable, 0.0, presentationGeneration};
                 }
-                /* What the acquisition blocked for, taken before any lock. */
+                /* One request, which is the only thing timed. The view's
+                 * render pass is made from the drawable it holds, so it asks
+                 * for no other. */
+                const auto acquireStart = std::chrono::steady_clock::now();
+                id<CAMetalDrawable> drawable = view != nil ?
+                    view.currentDrawable : [layer nextDrawable];
                 const double acquireSeconds = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - acquireStart).count();
-                if (pass == nil || drawable == nil) {
+                if (drawable == nil) {
                     /* Release the claim without retiring the generation: the
                      * frame was not shown, and the next guest frame asks for
                      * this one again. A caller that has no next frame to wait
                      * for draws it again itself (the result). */
                     std::lock_guard lock(presentationMutex);
                     presentationInFlight = false;
-                    return DrawOutcome {DrawResult::unavailable, acquireSeconds};
+                    return DrawOutcome {
+                        DrawResult::unavailable, acquireSeconds, presentationGeneration};
+                }
+                /* A drawable in hand is drawn into, whatever the request
+                 * cost: the view's pass, or one made from the drawable. */
+                MTLClearColor clearColor = view != nil ?
+                    view.clearColor : MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+                MTLRenderPassDescriptor* pass =
+                    view != nil ? view.currentRenderPassDescriptor : nil;
+                if (pass == nil) {
+                    pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                    pass.colorAttachments[0].texture = drawable.texture;
+                    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
                 }
                 if (useCpu) {
                     bool current = false;
@@ -1004,9 +1017,10 @@ PresentOutcome MetalPresentation::present(
     return state_->present(scanout);
 }
 
-DrawOutcome MetalPresentation::draw(void* nativeView) noexcept
+DrawOutcome MetalPresentation::draw(
+    void* nativeView, DrawableBudget budget) noexcept
 {
-    return state_->draw((__bridge MTKView*)nativeView, nil);
+    return state_->draw((__bridge MTKView*)nativeView, nil, budget);
 }
 
 void MetalPresentation::drawLayer(void* metalLayer) noexcept

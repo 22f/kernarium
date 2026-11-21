@@ -145,7 +145,7 @@ struct NativeDisplayState final :
     /* Draws the newest frame as the 60 Hz path does, for a view that has no
      * scene to make a link on, and asks again shortly if there was no
      * drawable: one delay at a time, up to the pacer's limit for the frame
-     * (which a frame that arrives renews and nothing else does). */
+     * (which a draw of another frame renews and nothing else does). */
     void drawWithoutLink() noexcept;
     void reportLink(double now) noexcept;
 
@@ -256,7 +256,8 @@ struct NativeDisplayState final :
 - (void)drawInMTKView:(MTKView*)view
 {
     if (auto state = _state.lock()) {
-        state->drawResult = state->presentation.draw((__bridge void*)view);
+        state->drawResult = state->presentation.draw(
+            (__bridge void*)view, state->pacer.drawableBudget());
     }
 }
 
@@ -618,13 +619,12 @@ void NativeDisplayState::drawWithoutLink() noexcept
     if (nativeView == nil)
         return;
     /* The frame is drawn now, as the 60 Hz path draws it, so that it is not
-     * left unshown for want of a link. A frame that has arrived since the last
-     * draw renews the retries; with none arrived and none owed there is
-     * nothing to draw. */
-    if (frameWaiting.exchange(false, std::memory_order_seq_cst))
-        pacer.frameArrived();
-    else if (!pacer.retryOwed())
+     * left unshown for want of a link. With no frame arrived since the last
+     * draw and none owed there is nothing to draw. */
+    if (!frameWaiting.exchange(false, std::memory_order_seq_cst) &&
+        !pacer.retryOwed()) {
         return;
+    }
     drawResult = {};
     [nativeView draw];
     /* A draw that found no drawable owes the frame again, a few times: a view
@@ -632,7 +632,7 @@ void NativeDisplayState::drawWithoutLink() noexcept
      * frames arrive, and a pending one that finds a link made leaves the
      * retry to it. */
     pacer.drew(drawResult.result == DrawResult::unavailable,
-        drawResult.drawableWaitSeconds);
+        drawResult.drawableWaitSeconds, drawResult.frame);
     if (!pacer.arrangeRetry())
         return;
     auto state = shared_from_this();
@@ -725,7 +725,7 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
              * a bounded number of them: the newest frame must not stay unshown
              * while the link sleeps. */
             pacer.drew(drawResult.result == DrawResult::unavailable,
-                drawResult.drawableWaitSeconds);
+                drawResult.drawableWaitSeconds, drawResult.frame);
         }
         ++reportDraws;
     }

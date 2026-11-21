@@ -44,13 +44,23 @@ LinkFrameRate PresentPacer::wake(
     return rangeFor(rate_);
 }
 
-void PresentPacer::drew(bool unavailable, double drawableWaitSeconds) noexcept
+void PresentPacer::drew(
+    bool unavailable, double drawableWaitSeconds, std::uint64_t frame) noexcept
 {
     if (!unavailable) {
         retryOwed_ = false;
         retries_ = 0;
         drawableWait_ = 0.0;
+        budgetFrame_ = 0;
         return;
+    }
+    /* The limits belong to the frame the draw claimed: a draw of another
+     * frame starts them again, and a flag that a frame's own arrival left
+     * set does not. */
+    if (frame != budgetFrame_) {
+        budgetFrame_ = frame;
+        retries_ = 0;
+        drawableWait_ = 0.0;
     }
     if (drawableWaitSeconds > 0.0)
         drawableWait_ += drawableWaitSeconds;
@@ -67,10 +77,10 @@ bool PresentPacer::retryOwed() const noexcept
     return retryOwed_;
 }
 
-void PresentPacer::frameArrived() noexcept
+DrawableBudget PresentPacer::drawableBudget() const noexcept
 {
-    retries_ = 0;
-    drawableWait_ = 0.0;
+    const double left = parameters_.maximumDrawableWaitSeconds - drawableWait_;
+    return {budgetFrame_, left > 0.0 ? left : 0.0, parameters_.maximumDrawableWaitSeconds};
 }
 
 bool PresentPacer::arrangeRetry() noexcept
@@ -162,9 +172,6 @@ PresentPacer::Decision PresentPacer::tick(
         rate_ = next;
         decision.range = rangeFor(next);
     }
-    /* A frame that arrived has its own retries. */
-    if (frameWaiting)
-        frameArrived();
     if (frameWaiting || retryOwed_) {
         decision.present = true;
         lastPresent_ = now;

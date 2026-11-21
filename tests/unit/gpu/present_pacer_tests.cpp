@@ -49,6 +49,18 @@ public:
      * thread that draws (a layer waits up to a second for a drawable that the
      * display holds). */
     void setDrawableWait(double seconds) { drawableWait_ = seconds; }
+    /* What each request for a drawable waits, in the order the draws make
+     * them (the last repeats), whether the request finds one or not: the
+     * waits of one frame that no single wait stands for. */
+    void setRequestWaits(std::vector<double> seconds)
+    {
+        requestWaits_ = std::move(seconds);
+        requestsMade_ = 0;
+    }
+    /* A frame arrives on the next tick that presents, after the tick took its
+     * flag and before the draw claims the newest frame: the draw is of that
+     * frame, and the flag it left set is the next tick's. */
+    void arriveBeforeNextClaim() { arriveBeforeClaim_ = true; }
     /* The link is made again, as when the scene it was on disconnects and
      * another activates before the next tick: the pacer wakes at once, with
      * whatever the display owes the newest frame. */
@@ -84,6 +96,8 @@ public:
     /* Draws that showed a frame, and draws made (a failed one included). */
     [[nodiscard]] std::uint64_t presents() const { return presents_; }
     [[nodiscard]] std::uint64_t draws() const { return draws_; }
+    /* The requests the draws made of the layer for a drawable. */
+    [[nodiscard]] std::uint64_t requestsMade() const { return requestsMade_; }
     /* The time the draws spent waiting for a drawable, all on the thread that
      * draws. */
     [[nodiscard]] double mainThreadSeconds() const { return mainThread_; }
@@ -155,6 +169,17 @@ private:
 
     [[nodiscard]] double tickRate() const { return preferred_; }
 
+    /* What the next request waits: the plan, or the wait of a request that
+     * finds no drawable. */
+    double requestWait(bool fails)
+    {
+        ++requestsMade_;
+        if (!requestWaits_.empty()) {
+            return requestWaits_[std::min<std::size_t>(requestsMade_ - 1, requestWaits_.size() - 1)];
+        }
+        return fails ? drawableWait_ : 0.0;
+    }
+
     void tick()
     {
         ++ticks_;
@@ -165,13 +190,25 @@ private:
             request(*decision.range);
         if (decision.present) {
             ++draws_;
-            /* The tick draws, and says whether the drawable was there. */
-            const bool unavailable = failures_ > 0;
-            if (unavailable) {
-                --failures_;
-                mainThread_ += drawableWait_;
+            if (arriveBeforeClaim_) {
+                arriveBeforeClaim_ = false;
+                ++frames_;
+                arrived();
             }
-            pacer_.drew(unavailable, unavailable ? drawableWait_ : 0.0);
+            /* The draw claims the newest frame, and asks the layer for a
+             * drawable once, only while that frame has budget left. */
+            const std::uint64_t claimed = frames_;
+            bool unavailable = true;
+            double waited = 0.0;
+            if (pacer_.drawableBudget().allowanceFor(claimed) > 0.0) {
+                const bool fails = failures_ > 0;
+                waited = requestWait(fails);
+                mainThread_ += waited;
+                if (fails)
+                    --failures_;
+                unavailable = fails;
+            }
+            pacer_.drew(unavailable, unavailable ? waited : 0.0, claimed);
             if (!unavailable) {
                 ++presents_;
                 longestWait_ = std::max(longestWait_, now_ - waitingSince_);
@@ -204,6 +241,9 @@ private:
     std::uint64_t draws_ {};
     unsigned failures_ {};
     double drawableWait_ {};
+    std::vector<double> requestWaits_;
+    std::uint64_t requestsMade_ {};
+    bool arriveBeforeClaim_ {};
     double mainThread_ {};
     std::uint64_t ticks_ {};
     std::uint64_t wakes_ {};
@@ -954,6 +994,109 @@ void aLinkMadeAgainDoesNotRenewTheDrawableWait()
     require(std::abs(link.mainThreadSeconds() - 1.0) < 1e-9, "one wait in all");
 }
 
+/* The waits of one frame, whatever each request waits. A draw asks the layer
+ * for a drawable once, and only while its frame has budget left (0.9 s), so
+ * the waits of a frame add up to under the budget and one wait of the layer (a
+ * second): 1.9 s. A frame whose requests wait 0.375, 0.375, 0.95 and 0.95 s
+ * stops after the third, at 1.7 s; a draw that asked twice, as the draws did
+ * (the view's render pass, then its drawable), cost 2.66 s in four waits. */
+void theWaitsOfAFrameAreBoundedWhateverEachRequestWaits()
+{
+    Link link;
+    link.setRequestWaits({0.375, 0.375, 0.95, 0.95});
+    link.offer();
+    link.failNextDraws(1000);
+    link.run(1.0);
+    require(link.requestsMade() == 3, "the fourth request is not made");
+    require(link.draws() == 3);
+    require(std::abs(link.mainThreadSeconds() - 1.7) < 1e-9, "1.7 s in three waits");
+    require(link.asleep(), "the link slept");
+
+    /* Any plan of waits of up to a second costs a frame under 1.9 s. */
+    std::uint32_t seed = 7;
+    double worst = 0.0;
+    for (int plan = 0; plan < 200; ++plan) {
+        std::vector<double> waits;
+        for (int request = 0; request < 40; ++request) {
+            seed = seed * 1103515245U + 12345U;
+            waits.push_back(static_cast<double>((seed >> 16U) % 1000U + 1U) / 1000.0);
+        }
+        Link swept;
+        swept.setRequestWaits(waits);
+        swept.offer();
+        swept.failNextDraws(1000);
+        swept.run(1.0);
+        worst = std::max(worst, swept.mainThreadSeconds());
+        require(swept.mainThreadSeconds() < 1.9 + 1e-9, "a frame costs under 1.9 s");
+    }
+    require(worst > 1.0, "the sweep reaches past a second");
+}
+
+/* A frame that arrives after the tick took its flag and before the draw claims
+ * the newest frame is the frame that is drawn, and its arrival leaves the flag
+ * set for the next tick: that tick draws the same frame again, and its budget
+ * is not renewed by the flag. With requests that wait 0.99, 0.79 and 0.95 s the
+ * frame cost 2.73 s in three draws; now one request, and the next tick asks
+ * nothing. */
+void aFrameThatArrivesBetweenTheFlagAndTheClaimHasOneBudget()
+{
+    Link link;
+    link.setRequestWaits({0.99, 0.79, 0.95});
+    link.offer();
+    link.arriveBeforeNextClaim();
+    link.failNextDraws(1000);
+    link.run(1.0);
+    require(link.requestsMade() == 1, "the layer was asked once for it");
+    require(std::abs(link.mainThreadSeconds() - 0.99) < 1e-9, "one wait of the thread that draws");
+    require(link.draws() == 2, "the tick that the flag left set drew it again");
+    require(link.presents() == 0 && link.asleep());
+
+    /* The next frame has a budget of its own, and a drawable shows it. */
+    link.setRequestWaits({});
+    link.failNextDraws(0);
+    link.offer();
+    link.run(0.2);
+    require(link.presents() == 1, "the next frame was shown");
+}
+
+/* A drawable that is in hand is drawn into, whatever the request cost: the
+ * request whose wait spent the budget may be the one that returns it. */
+void aDrawableThatArrivesAfterALongWaitShowsTheFrame()
+{
+    Link link;
+    link.setRequestWaits({0.75, 0.96});
+    link.offer();
+    link.failNextDraws(1);
+    link.run(1.0);
+    require(link.requestsMade() == 2);
+    require(link.presents() == 1, "the frame was shown by the drawable that came late");
+    require(std::abs(link.mainThreadSeconds() - 1.71) < 1e-9);
+    require(!link.frameWaiting() && link.asleep());
+}
+
+/* The pacer's side: the budget is the frame's that was drawn. */
+void theDrawableBudgetBelongsToTheFrameThatWasDrawn()
+{
+    PresentPacer pacer;
+    require(std::abs(pacer.drawableBudget().allowanceFor(5) - 0.9) < 1e-9, "a frame no draw tried has the whole budget");
+    pacer.drew(true, 0.6, 5);
+    require(pacer.drawableBudget().frame == 5);
+    require(std::abs(pacer.drawableBudget().allowanceFor(5) - 0.3) < 1e-9, "0.3 s of the frame's are left");
+    require(std::abs(pacer.drawableBudget().allowanceFor(6) - 0.9) < 1e-9, "another frame has the whole of its own");
+    require(pacer.retryOwed());
+    pacer.drew(true, 0.5, 5);
+    require(pacer.drawableBudget().allowanceFor(5) == 0.0, "none is left");
+    require(!pacer.retryOwed());
+    /* The frame that was drawn after it starts again, and the first frame is
+     * not remembered. */
+    pacer.drew(true, 0.5, 6);
+    require(pacer.retryOwed());
+    require(std::abs(pacer.drawableBudget().allowanceFor(6) - 0.4) < 1e-9);
+    pacer.drew(false, 0.0, 6);
+    require(pacer.drawableBudget().frame == 0 && !pacer.retryOwed());
+    require(std::abs(pacer.drawableBudget().allowanceFor(6) - 0.9) < 1e-9, "a shown frame owes nothing");
+}
+
 /* The pacer's side of it, with no link: a retry is a present that no frame
  * asked for, a shown draw ends the debt, and a frame renews it. */
 void aRetryIsAPresentNoFrameAskedFor()
@@ -1029,14 +1172,12 @@ void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
 {
     PresentPacer pacer;
     require(!pacer.arrangeRetry(), "nothing owed, nothing arranged");
-    pacer.frameArrived();
-    pacer.drew(true);
+    pacer.drew(true, 0.0, 1);
     require(pacer.retryOwed());
     require(pacer.arrangeRetry(), "the first is arranged");
     /* More frames, more failed draws: still the one. */
-    for (int frame = 0; frame < 100; ++frame) {
-        pacer.frameArrived();
-        pacer.drew(true);
+    for (std::uint64_t frame = 2; frame < 102; ++frame) {
+        pacer.drew(true, 0.0, frame);
         require(!pacer.arrangeRetry(), "a delay is pending already");
     }
     pacer.retryDelayRan();
@@ -1047,10 +1188,9 @@ void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
     /* The limit of a frame is thirty, however many delays it takes, and
      * delays alone do not renew it. */
     PresentPacer spent;
-    spent.frameArrived();
     unsigned draws = 0;
     for (int tries = 0; tries < 100; ++tries) {
-        spent.drew(true);
+        spent.drew(true, 0.0, 1);
         ++draws;
         if (!spent.retryOwed())
             break;
@@ -1058,9 +1198,10 @@ void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
     require(draws == 31, "the draw and thirty retries");
     spent.retryDelayRan();
     require(!spent.retryOwed() && !spent.arrangeRetry(), "nothing more is owed");
-    spent.frameArrived();
-    spent.drew(true);
-    require(spent.retryOwed(), "a frame that arrives has its own");
+    spent.drew(true, 0.0, 1);
+    require(!spent.retryOwed(), "the same frame has no more");
+    spent.drew(true, 0.0, 2);
+    require(spent.retryOwed(), "a frame that is drawn has its own");
 }
 
 void theLinkSleepsWhenNoFrameHasWaitedForTheIdleTime()
@@ -1210,6 +1351,14 @@ int main(int argc, char** argv)
             aDrawWhoseDrawableWaitRanOutTheTimeoutIsNotDrawnAgain},
         {"aLinkMadeAgainDoesNotRenewTheDrawableWait",
             aLinkMadeAgainDoesNotRenewTheDrawableWait},
+        {"theWaitsOfAFrameAreBoundedWhateverEachRequestWaits",
+            theWaitsOfAFrameAreBoundedWhateverEachRequestWaits},
+        {"aFrameThatArrivesBetweenTheFlagAndTheClaimHasOneBudget",
+            aFrameThatArrivesBetweenTheFlagAndTheClaimHasOneBudget},
+        {"aDrawableThatArrivesAfterALongWaitShowsTheFrame",
+            aDrawableThatArrivesAfterALongWaitShowsTheFrame},
+        {"theDrawableBudgetBelongsToTheFrameThatWasDrawn",
+            theDrawableBudgetBelongsToTheFrameThatWasDrawn},
         {"aRetryIsAPresentNoFrameAskedFor", aRetryIsAPresentNoFrameAskedFor},
         {"aLinkMadeAgainWhileAFrameIsOwedStillShowsIt",
             aLinkMadeAgainWhileAFrameIsOwedStillShowsIt},

@@ -333,10 +333,14 @@ largest clock the field holds, for a size beyond it), the screen's maximum and
 Low Power Mode; from 100 it is the 120 step, and any lower rate, a mode of 47
 Hz included, is the 60 step. A frame whose draw found no drawable is drawn
 again, 30 times at most and until its draws have waited 0.9 s in all for a
-drawable (a layer waits a second for one that the display holds, so a draw that
-waited it out is the frame's last, and the thread that draws is held a second at
-most, not half a minute); the debt outlives a link made again, and only a new
-frame renews it. The link pauses after 100 ms without a frame. When the
+drawable. A draw asks the layer for a drawable once, and only while the frame
+it claims has budget left (a layer waits a second for one that the display
+holds), so the thread that draws is held under 1.9 s for a frame, the 0.9 s
+and one wait of the layer, not half a minute; a drawable that arrives late is
+drawn into. The budget is the claimed frame's, so a frame that arrives while a
+tick decides is not given a second one; the debt outlives a link made again,
+and only a draw of another frame renews it. The link pauses after 100 ms
+without a frame. When the
 ceiling is below the mode's rate the guest is held, as under
 Low Power Mode. `CADisableMinimumFrameDurationOnPhone` in the application's
 `Info.plist` lets an iPhone exceed 60. What the guest does with the property
