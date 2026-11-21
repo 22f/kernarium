@@ -191,6 +191,12 @@ struct JitStatus: Equatable, Sendable {
         return debuggerAttached
     }
 
+    /// The footer is the ready sentence: the next start can use the JIT and
+    /// no sentence about an earlier start or a changed guest comes first.
+    var readyForNextStart: Bool {
+        usable && lastStart?.fallbackSentence == nil
+    }
+
     static let ready = String(
         localized: "Ready. Applies to the next start.", table: "JIT",
         comment: "Under the JIT switch on Home: JIT is prepared and the next start uses it. JIT is a name and stays as it is.")

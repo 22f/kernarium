@@ -146,6 +146,26 @@ struct JitStatusTests {
         status.lastStart = .ready
         #expect(status.footer == JitStatus.needsStikDebug)
     }
+
+    /// The row of AOT dims by `readyForNextStart`, so that it and the note
+    /// under JIT never disagree.
+    @Test func theReadySentenceIsShownExactlyWhenTheNextStartCanUseTheJit() {
+        let other = JitShape(memoryMiB: 2048, processorCount: 4)
+        let answers: [JitAnswer?] = [nil, .ready, .disabled, .noDebugger, .failed, .otherSettings, .unsupported]
+        for attached in [false, true] {
+            for prepared in [nil, guest, other] {
+                for last in answers {
+                    for launch in answers {
+                        let status = JitStatus(
+                            debuggerAttached: attached, prepared: prepared, guest: guest, lastStart: last, launch: launch)
+                        #expect(
+                            status.readyForNextStart == (status.footer == JitStatus.ready),
+                            "\(status): the footer is \(status.footer)")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @MainActor

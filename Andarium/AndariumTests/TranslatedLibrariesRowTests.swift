@@ -257,6 +257,22 @@ struct TranslatedLibrariesRowTests {
         #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
     }
 
+    @Test func aStartThatFellBackLeavesTheRowWorkingWhileTheNoteUnderJitSaysSo() {
+        let (model, driver) = fixture(carried: true)
+        driver.debuggerAttached = true
+        model.jitOn = true
+        model.jitDebuggerAttached = true
+        #expect(model.jitStatus.footer == JitStatus.ready)
+        #expect(model.jitInUseForNextStart)
+        // A debugger that came late, and a start that ran without the JIT: the
+        // note says so, and so the row no longer says the JIT is in use.
+        model.jitLastStart = .failed
+        #expect(model.jitStatus.footer == JitAnswer.failed.fallbackSentence)
+        #expect(!model.jitInUseForNextStart)
+        model.jitLastStart = nil
+        #expect(model.jitInUseForNextStart)
+    }
+
     @Test func theBootRequestKeepsTheReleaseOutOnlyWhileTheSwitchIsOffInABuildThatCarriesIt() {
         func field(_ model: AppModel?, jitInUse: Bool = false) -> UInt32 {
             LiveRuntime.aotDisabled(for: LiveRuntime.translatedLibrariesStart(of: model, jitInUse: jitInUse))

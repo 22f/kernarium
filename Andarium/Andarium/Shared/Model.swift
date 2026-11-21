@@ -303,10 +303,11 @@ final class AppModel {
         translatedLibrariesOn = on
     }
     /// The next start runs on the JIT engine, which does not use the translated
-    /// libraries: the JIT is on and its memory is, or can be, prepared for the
-    /// guest.
+    /// libraries: the JIT is on and the note under its row says it is ready
+    /// (its memory is, or can be, prepared for the guest, and no earlier start
+    /// fell back), so that this row and that note agree.
     var jitInUseForNextStart: Bool {
-        jitAvailable && jitOn && jitStatus.usable
+        jitAvailable && jitOn && jitStatus.readyForNextStart
     }
     /// What a start does about the translated libraries, for the runtime's boot
     /// request and the start record. `jitInUse` is whether this start runs on
