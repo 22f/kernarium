@@ -643,6 +643,9 @@ final class LiveRuntime: RuntimeDriver {
         let cameraMode = cameraBootMode()
         let cameraPath = cameraDirectory.map { Self.prepareCalibrationDirectory($0) }?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
+        // Root: the release's Magisk ramdisk for every normal boot of this run;
+        // the model decided it before the start and wrote it with the guest.
+        let rootBoot = run.mode == .normal && run.guest.root.rooted && rootRelease != nil
         let memoryMiB = UInt32(run.guest.memoryMiB)
         runMemoryMiB = run.guest.memoryMiB
         let processorCount = UInt32(run.guest.cores)
@@ -669,7 +672,7 @@ final class LiveRuntime: RuntimeDriver {
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
                 processorCount: processorCount, adbKeyLine: adbKeyLine, timeZone: timeZone,
                 sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, cameraMode: cameraMode,
-                cameraPath: cameraPath, extras: extras
+                cameraPath: cameraPath, extras: extras, rootBoot: rootBoot
             )
             stop.end()
             Task { @MainActor in self.finished(result: result) }
@@ -682,7 +685,7 @@ final class LiveRuntime: RuntimeDriver {
         view: GuestMetalView, dataDiskPath: String, releasePath: String, dataGiB: UInt32, bootMode: UInt32,
         width: UInt32, height: UInt32, dotsPerInch: UInt32, memoryMiB: UInt32,
         processorCount: UInt32, adbKeyLine: String?, timeZone: String?, sessionRecordPath: String?,
-        hostFeatures: UInt32, cameraMode: UInt32, cameraPath: String?, extras: StartExtras
+        hostFeatures: UInt32, cameraMode: UInt32, cameraPath: String?, extras: StartExtras, rootBoot: Bool
     ) -> Int32 {
         dataDiskPath.withCString { dataDisk in
             releasePath.withCString { release in
@@ -723,6 +726,8 @@ final class LiveRuntime: RuntimeDriver {
                                 request.android_camera_calibration_path = calibration
                                 // The JIT engine, once its memory is prepared; gadgets otherwise.
                                 request.use_jit = extras.jit ? 1 : 0
+                                // The release's Magisk-patched ramdisk, or its own.
+                                request.android_root = rootBoot ? 1 : 0
                                 return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }
                             }
                         }
@@ -871,6 +876,15 @@ final class LiveRuntime: RuntimeDriver {
     func guestStallFiles() async -> [BugReportArchive.Entry] {
         await operations.guestProcFiles()
     }
+
+    /// The root the carried release holds, read at launch; nil for a release
+    /// with none. The run asks the runtime for the release's own Magisk ramdisk
+    /// only while `Guest.root.rooted` says so.
+    var rootRelease: RootRelease?
+
+    var rootApkURL: URL? { rootRelease?.apkURL(in: storage.releaseDirectory) }
+
+    var guestShell: (any GuestShell)? { AdbGuestShell(operations: operations) }
 
     func installApk(
         at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void

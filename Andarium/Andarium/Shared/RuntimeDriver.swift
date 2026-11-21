@@ -258,6 +258,15 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// out. It takes the seconds the debugger takes and never blocks the main
     /// thread. Without a servicing debugger it asks the runtime nothing.
     func prepareJit(wanted: Bool, shape: JitShape) async -> JitAnswer
+    /// The root the carried release holds (`RootRelease`), nil when it holds
+    /// none: the boot screen's Magisk app step needs it.
+    var rootRelease: RootRelease? { get }
+    /// The release's own copy of the official Magisk app, which the step puts
+    /// in the guest; nil with no root.
+    var rootApkURL: URL? { get }
+    /// The guest's shell, for the short questions about the Magisk app; nil
+    /// when there is none to ask.
+    var guestShell: (any GuestShell)? { get }
 }
 
 extension RuntimeDriver {
@@ -274,6 +283,10 @@ extension RuntimeDriver {
     func setNetworkNotice(_ denial: NetworkDenial?) {}
     /// A driver with no thermal session tells Android nothing either way.
     func setHeatLimit(_ on: Bool) {}
+    /// A driver with no release to read has no root to offer.
+    var rootRelease: RootRelease? { nil }
+    var rootApkURL: URL? { nil }
+    var guestShell: (any GuestShell)? { nil }
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

@@ -104,4 +104,33 @@ final class RootUITests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, "1")
         XCTAssertTrue(app.staticTexts["Paused after a failed start"].exists)
     }
+
+    @MainActor
+    func testTheBootScreenOfAStartThatInstallsTheAppHasAFifthStep() {
+        let app = launch("boot-root")
+        let step = app.staticTexts["Magisk app"].firstMatch
+        XCTAssertTrue(step.waitForExistence(timeout: 20), "no Magisk app step")
+        XCTAssertTrue(app.staticTexts["Installs the official Magisk app"].exists)
+        // The step comes after Startup, the last of the four.
+        let startup = app.staticTexts["Startup"].firstMatch
+        XCTAssertTrue(startup.exists)
+        XCTAssertLessThan(startup.frame.minY, step.frame.minY)
+    }
+
+    @MainActor
+    func testAStartWithoutRootKeepsTheFourSteps() {
+        let app = launch("boot")
+        XCTAssertTrue(app.staticTexts["Startup"].firstMatch.waitForExistence(timeout: 20))
+        XCTAssertFalse(app.staticTexts["Magisk app"].exists, "a start without root has the Magisk app step")
+    }
+
+    @MainActor
+    func testTheAlertSaysTheMagiskAppCouldNotBeInstalled() {
+        let app = launch("home-root-app-alert")
+        let alert = app.alerts["Magisk app not installed"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 20), "no alert")
+        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "label CONTAINS 'tries again at the next start'")).firstMatch.exists)
+        alert.buttons["OK"].tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForNonExistence(timeout: 5))
+    }
 }

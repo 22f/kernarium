@@ -48,6 +48,11 @@ final class StubDriver: RuntimeDriver {
         plan = .update(from: "r1", to: "r2")
     }
     var savedGuest: Guest?
+    /// What the carried release holds for root, and the guest's shell, as a
+    /// test with root plays them (`RootStartTests`); none for any other.
+    var rootRelease: RootRelease?
+    var rootApkURL: URL?
+    var guestShell: (any GuestShell)?
     /// The denials of the network the model told the driver, in order; nil is none.
     private(set) var networkNotices: [NetworkDenial?] = []
     func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }

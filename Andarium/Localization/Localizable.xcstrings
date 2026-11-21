@@ -5971,6 +5971,29 @@
         }
       }
     },
+    "Installs the official Magisk app" : {
+      "comment" : "Detail of the boot step that installs the official Magisk app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公式のMagiskアプリをインストールしています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安装官方Magisk应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安裝官方Magisk應用程式"
+          }
+        }
+      }
+    },
     "Internal storage" : {
       "comment" : "Android's internal storage.",
       "localizations" : {
@@ -6657,6 +6680,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在尋找舊版應用程式…"
+          }
+        }
+      }
+    },
+    "Magisk app" : {
+      "comment" : "Boot step: the application puts the official Magisk app into the virtual machine. Magisk is the name of the app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskアプリ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk應用程式"
+          }
+        }
+      }
+    },
+    "Magisk app not installed" : {
+      "comment" : "Title of the alert after the official Magisk app could not be put into the virtual machine.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskアプリは未インストールです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk应用未安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk應用程式未安裝"
           }
         }
       }
@@ -10943,6 +11012,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置上的位置受到限制。開啟此開關會說明原因。"
+          }
+        }
+      }
+    },
+    "The Magisk app couldn’t be installed. Root is on, but no app can be given root until it is. Andarium tries again at the next start." : {
+      "comment" : "Text of the alert after the official Magisk app could not be put into the virtual machine.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskアプリをインストールできませんでした。rootはオンですが、インストールされるまでアプリにrootを許可できません。次回の起動時に再試行します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法安装Magisk应用。Root已开启，但在安装之前无法为任何应用授予Root。下次启动时会重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法安裝Magisk應用程式。Root已開啟，但安裝完成前無法為任何應用程式授予Root。下次啟動時會重試。"
           }
         }
       }

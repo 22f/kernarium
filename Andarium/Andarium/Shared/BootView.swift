@@ -146,6 +146,11 @@ struct BootView: View {
         if model.preparingJit {
             steps[0] = Step(title: steps[0].title, detail: JitStatus.preparing, seconds: 0)
         }
+        // A start with root that puts the Magisk app in the guest has one more
+        // step, after Startup; no other start does (`RootAppStep`).
+        if model.rootAppInstalling, kind != .recovery {
+            steps.append(Step(title: RootWords.stepTitle, detail: RootWords.stepDetail, seconds: 1.0))
+        }
         return steps
     }
 
@@ -158,7 +163,13 @@ struct BootView: View {
             try? await Task.sleep(for: .milliseconds(200))
         }
         if Task.isCancelled { return }
-        withAnimation(.snappy) { stage = stepCount }
+        // Android is up. With root, the Magisk app is checked and put in before
+        // the screen ends: the fifth step is added only when an install begins.
+        await model.runRootAppStep(kind: kind) {
+            withAnimation(.snappy) { stage = BootSteps.rootAppStep }
+        }
+        if Task.isCancelled { return }
+        withAnimation(.snappy) { stage = model.rootAppInstalling ? BootSteps.countWithRootApp : stepCount }
         try? await Task.sleep(for: .seconds(0.4))
         if Task.isCancelled { return }
         model.finishBoot(kind)

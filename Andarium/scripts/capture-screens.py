@@ -181,6 +181,8 @@ SHOTS: list[Shot] = [
     s("home-root-on", "Home", "home-root-on", "The Root section with the switch on.", dark=True),
     s("home-root-warning", "Home", "home-root-warning", "The alert that asks before root is turned on: what apps allowed in Magisk can do, Turn On and Cancel."),
     s("home-root-paused", "Home", "home-root-paused", "The Root section after a start with root failed: the switch is still on and the line under it says Paused after a failed start."),
+    s("home-root-app-alert", "Home", "home-root-app-alert", "The alert after a start with root could not put the official Magisk app in the virtual machine."),
+    s("boot-root", "Boot", "boot-root", "The boot screen of a start with root at its fifth step, Magisk app, which installs the official Magisk app before the screen ends.", wait=3.0),
     s("home-capabilities-location-on", "Home", "home-location-on", "Capabilities with Location on, iOS having allowed it with the exact position."),
     s("home-capabilities-location-approximate", "Home", "home-location-approximate", "Location on while iOS gives only an approximate location: the line under it says Approximate location, with an info mark that explains.", dark=True),
     s("home-capabilities-location-approximate-alert", "Home", "home-location-approximate-alert", "The explanation behind Approximate location: Precise Location is off for Andarium, with Open Settings."),

@@ -210,6 +210,10 @@ struct AppEntry {
                 sessionRecord: sessionRecord,
                 cameraDirectory: calibration,
                 freeSpace: watched)
+            // Root is offered only by a release that holds it; with none the
+            // row is not shown and a start boots the release's own ramdisk.
+            runtime.rootRelease = carried?.root
+            model.rootAvailable = carried?.root != nil
             model.driver = runtime
             model.snapshotDriver = runtime
             model.cameraReservePlanner = { policy in
@@ -560,6 +564,9 @@ enum SystemFolder {
 
     struct Release {
         var identity: ReleaseIdentity
+        /// What the release holds for root (`RootRelease`), nil for none: the
+        /// manifest's `root` object with both files in `root/`.
+        var root: RootRelease?
     }
 
     static func release(in folder: URL) throws -> Release {
@@ -578,6 +585,7 @@ enum SystemFolder {
         else { throw Problem.missing("the system disk's size in \(layout)") }
         let actual = UInt64((try? folder.appendingPathComponent(systemDisk).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         guard actual == declared else { throw Problem.sizeDiffers(declared: declared, actual: actual) }
-        return Release(identity: identity)
+        let manifestData = try Data(contentsOf: folder.appendingPathComponent(manifest))
+        return Release(identity: identity, root: RootRelease.carried(in: folder, manifest: manifestData))
     }
 }

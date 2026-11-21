@@ -490,7 +490,7 @@ struct AppEntry {
         HeatLimitPreview.apply(screen: screen, to: model)
         WhatsNewPreview.apply(screen: screen, to: model)
         UpdatePreview.apply(screen: screen, to: model)
-        RootPreview.apply(screen: screen, to: model)
+        RootPreview.apply(screen: screen, to: model, freeze: freeze)
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound

@@ -535,6 +535,10 @@ final class AppModel {
     var rootAvailable = false
     /// The alert that asks before root is turned on is up (`Model+Root.swift`).
     var rootWarningShowing = false
+    /// The boot screen's Magisk app step is under way: Android has booted with
+    /// root and the app is being put in the guest (`runRootAppStep`). The
+    /// screen adds its fifth step only while this is set.
+    var rootAppInstalling = false
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
@@ -1684,6 +1688,13 @@ final class AppModel {
             jitLastStart = nil
             preparingJit = false
             if case let .update(from, _) = plan { bootFrom = from } else { bootFrom = nil }
+            rootAppInstalling = false
+            // The ramdisk this start boots is written with the guest before the
+            // runtime is handed the start, so that a process that ends in the
+            // guest's panic still says which ramdisk it had (`RootFallbackRule`).
+            if let current = guest {
+                guest?.root.rooted = current.bootsRooted(mode: mode, releaseCarriesRoot: rootAvailable)
+            }
             if let driver, let guest {
                 persistNow()
                 driver.begin(guest: guest, mode: mode, kind: kind)
@@ -1760,6 +1771,7 @@ final class AppModel {
         cameraNotice.runEnded()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
+        rootAppInstalling = false
         if end.poweredOff {
             sheet = nil
             sessionPreset = SessionPreset()
@@ -1797,6 +1809,7 @@ final class AppModel {
         session.showStats = showStats
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
+        rootAppInstalling = false
         // A restart before the start finished is the same start; a running
         // session's restart begins a boot of its own.
         var unfinished = false

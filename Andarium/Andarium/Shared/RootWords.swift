@@ -22,4 +22,14 @@ enum RootWords {
         localized:
             "Apps you allow in Magisk can read and change everything in the virtual machine, including other apps’ data. Some apps don’t run on a rooted device. The official Magisk app is installed at the next start. You can turn root off whenever the virtual machine is stopped."
     )
+
+    // MARK: The boot screen's Magisk app step
+
+    static let stepTitle = String(localized: "Magisk app")
+    static let stepDetail = String(localized: "Installs the official Magisk app")
+    static let appFailedTitle = String(localized: "Magisk app not installed")
+    static let appFailedMessage = String(
+        localized:
+            "The Magisk app couldn’t be installed. Root is on, but no app can be given root until it is. Andarium tries again at the next start."
+    )
 }

@@ -660,7 +660,12 @@ address space holds, so this is a fallback.
   start boots the release's own ramdisk. A start with root asks the runtime for
   the release's Magisk-patched ramdisk (`android_root`, runtime API 45;
   [boot selection](../darwin/device/block/README.md#boot-selection)).
-  The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
+  Before the boot screen ends, a start with root asks the guest whether the
+  official Magisk app is there (`RootAppStep`, over the application's adb
+  channel) and puts the release's own copy in when it is not: the screen adds
+  a fifth step, Magisk app, after Startup only for a start that installs, and
+  the check and install are bound together to 45 s. A failure is an alert and
+  the boot goes on with root on. The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
   when an absent Magisk app is installed again (`RootInstallRule`), what becomes
   of the app when root is off (`RootOffRule`), and what a failed start with root
   does to the switch (`RootFallbackRule`).
