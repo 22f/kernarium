@@ -385,7 +385,8 @@ screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
 request carries to an Android guest, and `kernarium-aot-release` (unit) the boot
-request's word that keeps the ahead-of-time component out of a launch.
+request's word that keeps the ahead-of-time component out of a launch and the
+release argument a start then gives the emulator.
 `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
