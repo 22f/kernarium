@@ -524,9 +524,9 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "(allow kernarium_sms kernarium_sms_listener (fd (use)))\n"
         "(allow kernarium_sms kernarium_sms_socket (sock_file (write)))\n"
         "(allow kernarium_sms kernarium_sms_listener (unix_stream_socket (connectto)))\n"
-        # Init makes and binds the handoff socket and does not listen on it: the holder does.
+        # Init makes and binds the handoff socket and does not listen on a stream socket: the holder does.
         "(allow kernarium_sms_listener self (unix_stream_socket (accept getattr getopt listen read write)))\n"
-        "(allow init kernarium_sms_listener (unix_stream_socket (create bind listen)))\n"
+        "(allow init kernarium_sms_listener (unix_stream_socket (create bind)))\n"
         "(allow kernarium_sms_listener ctl_kernarium_sms_wake_prop (property_service (set)))\n"
         "(allow kernarium_sms_listener property_socket (sock_file (write)))\n"
         "(allow kernarium_sms_listener init (unix_stream_socket (connectto)))\n"
@@ -8385,7 +8385,7 @@ def verify_sms_holder(android_root: Path) -> None:
         "typeattribute kernarium_sms_listener unconstrained_vsock_violators;",
         "init_daemon_domain(kernarium_sms_listener)",
         "allow kernarium_sms_listener self:vsock_socket { create bind listen };",
-        "allow init kernarium_sms_listener:unix_stream_socket { create bind listen };",
+        "allow init kernarium_sms_listener:unix_stream_socket { create bind };",
         "allow kernarium_sms_listener self:unix_stream_socket { accept getattr getopt listen read write };",
         "system_internal_prop(ctl_kernarium_sms_wake_prop)",
         "set_prop(kernarium_sms_listener, ctl_kernarium_sms_wake_prop)",

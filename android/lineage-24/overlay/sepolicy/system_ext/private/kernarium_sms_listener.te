@@ -19,13 +19,13 @@ type kernarium_sms_listener_exec, exec_type, system_file_type, file_type;
 init_daemon_domain(kernarium_sms_listener)
 
 # The handoff socket that init makes for it (the rc's socket line, /dev/socket/kernarium_sms): init creates and
-# binds it with the holder's label and does not listen on it (init's rule keeps `listen`, as the platform's rules for
-# its other socket daemons have it), so the holder listens and accepts on it, reads its peer's credentials and
-# context, and writes the one byte that carries the descriptor. A socket that is only bound polls as hung up. The
-# platform's `allow domain self` already grants every domain these rights on its own unix sockets; the rule names
-# what the holder needs, and the target-files verifier requires it of the holder whoever grants it.
+# binds it with the holder's label and does not listen on a stream socket, so its rule has no `listen`, and the
+# holder listens and accepts on it, reads its peer's credentials and context, and writes the one byte that carries
+# the descriptor. A socket that is only bound polls as hung up. The platform's `allow domain self` already grants
+# every domain these rights on its own unix sockets; the rule names what the holder needs, and the target-files
+# verifier requires it of the holder whoever grants it.
 type kernarium_sms_socket, file_type, coredomain_socket;
-allow init kernarium_sms_listener:unix_stream_socket { create bind listen };
+allow init kernarium_sms_listener:unix_stream_socket { create bind };
 allow kernarium_sms_listener self:unix_stream_socket { accept getattr getopt listen read write };
 
 # The vsock socket of port 5560: the holder makes it, binds it and listens on it, and holds no other right on
