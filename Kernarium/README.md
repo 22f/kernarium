@@ -196,7 +196,11 @@ runtime validates the values (`KernariumAdbChannel.hpp`,
 eth0 address, which the runtime keeps in `identity.json` beside the data disk
 ([the identity](../darwin/device/block/README.md#installation-identity)); a
 request states values only for a run that needs fixed ones
-(`android_serial_number` and `android_ethernet_mac`, API 42).
+(`android_serial_number` and `android_ethernet_mac`, API 42). It also asks
+whether the guest boots the release's root ramdisk (`android_root`, API 45; zero,
+which Kernarium sends, boots the release's own): the ramdisk is the release's
+Magisk-patched file and no request names a path
+([the boot selection](../darwin/device/block/README.md#boot-selection)).
 
 ## Devices and display
 

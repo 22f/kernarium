@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 43U
+#define KERNARIUM_RUNTIME_API_VERSION 45U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -183,7 +183,17 @@ enum {
  * contain either value; what the guest itself reports (an Android bug report,
  * the kernel's echo of its command line) carries them as on any Android device.
  * The runtime reads them only from a request whose struct_size covers them; a
- * Linux guest ignores them. */
+ * Linux guest ignores them.
+ *
+ * android_root (runtime API 45) asks for the root boot: a nonzero value starts
+ * the guest, on every boot and restart of the run, with the Magisk-patched
+ * ramdisk that the release carries beside its system disk
+ * (darwin/device/block/README.md, "Boot selection"). Zero, and a request whose
+ * struct_size does not cover the field, boot the release's own ramdisk, so
+ * Kernarium is unchanged. The runtime never takes a ramdisk from any other
+ * file: a request for root against a release that carries none fails the run
+ * with -UML_EMULATOR_INVALID_ARGUMENT, and recovery keeps its own ramdisk. A
+ * Linux guest ignores the field. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -210,6 +220,7 @@ typedef struct kernarium_runtime_boot {
     const char* android_camera_calibration_path;
     const char* android_serial_number;
     const char* android_ethernet_mac;
+    uint32_t android_root;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for
