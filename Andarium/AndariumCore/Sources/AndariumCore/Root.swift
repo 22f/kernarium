@@ -139,6 +139,15 @@ public struct RootState: Equatable, Codable, Sendable {
         if !on { appVersionCode = nil }
     }
 
+    /// The data disk was replaced by another (a snapshot restored), which may
+    /// not have the Magisk app the application put in: what it remembers of
+    /// the app is forgotten, as in a new guest, and the next start with root
+    /// asks the guest again. The switch stays.
+    public mutating func dataDiskReplaced() {
+        appVersionCode = nil
+        appEverHandled = false
+    }
+
     /// "Try with root again": the pause ends and the next start boots Magisk.
     public mutating func tryAgain() {
         on = true

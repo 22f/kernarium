@@ -673,7 +673,9 @@ address space holds, so this is a fallback.
   until the person chooses, and a Home card offers Try with root again and Turn
   off root (or, after a Stop, Start without root); a panic ends the process, so
   the application writes the start's ramdisk (`Guest.root.rooted`) before the
-  runtime is handed it. The bug report carries `andarium/root.txt` (the
+  runtime is handed it. Restoring a snapshot forgets what the application
+  remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
+  snapshot's disk may not have it; the switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release
   carries). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
   when an absent Magisk app is installed again (`RootInstallRule`), what becomes
