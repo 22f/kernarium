@@ -119,10 +119,10 @@ The builders configure each library whose code derives directories from its
 prefix (GLib, Mesa's OpenGL libraries, virglrenderer, FEXCore) for
 `NO_HOST_PREFIX` (see [`build-common.sh`](build-common.sh)) and install it with
 `DESTDIR`, so a prefix can be built beside another and renamed into place.
-`Andarium/scripts/check-app-store-bundle.py` refuses a home, volume or
-temporary path in the host code of the application and its frameworks. The
-platform contracts' `common_recipe` is the recipe identity a prefix was made
-with.
+`Andarium/scripts/check-release-archive.py` refuses a home, volume or
+temporary path in the host code of the application and its frameworks when
+Release is archived. The platform contracts' `common_recipe` is the recipe
+identity a prefix was made with.
 
 ## Apple GPU prefix
 

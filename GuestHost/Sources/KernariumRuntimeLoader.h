@@ -9,12 +9,6 @@
 
 #include "../../Kernarium/Runtime/KernariumRuntime.h"
 
-/* UML_APP_STORE_APPLICATION is defined by the App Store configuration of the
- * application that compiles this loader (Andarium/README.md#configurations).
- * That configuration leaves out the loader's debugging and automation
- * entries: the display mirror, console input and the automation lookups. The
- * App Store runtime answers the first two with -ENOTSUP in any case. */
-
 NS_ASSUME_NONNULL_BEGIN
 
 typedef void (^KernariumConsoleOutputHandler)(NSData* data);
@@ -102,7 +96,6 @@ int kernarium_runtime_loader_read_guest_memory(
  * background policy; see kernarium_runtime_set_background_throttle_function.
  * Returns the number of threads changed, or -1 when no runtime is loaded. */
 int kernarium_runtime_loader_set_background_throttle(int enabled);
-#ifndef UML_APP_STORE_APPLICATION
 /* Mirrors the guest's display to `sink`, or stops the mirror for a null sink;
  * see kernarium_runtime_set_frame_sink_function. Returns the runtime's answer,
  * or -1 when no runtime is loaded. */
@@ -111,7 +104,6 @@ int kernarium_runtime_loader_set_frame_sink(
     void* _Nullable context,
     uint32_t maximum_width,
     uint32_t frames_per_second);
-#endif
 /* Turns periodic guest page-cache trimming on (nonzero) only while the guest
  * is kept running in the background, and off again on return to the
  * foreground. Returns 0 once the guest has applied it, a negative value
@@ -273,7 +265,6 @@ uint32_t kernarium_runtime_loader_plan_camera_reserve_mib(
  * it too, for the same reason. */
 uint32_t kernarium_runtime_loader_application_vcpu_limit(
     uint32_t physical_processor_count);
-#ifndef UML_APP_STORE_APPLICATION
 /* Prepares the JIT for a guest of `guest_memory_mib` and `guest_processor_count`
  * vCPUs when `enable` is nonzero, or tells an attached debugger to detach when
  * it is zero; see kernarium_runtime_prepare_jit_function. Returns the runtime's
@@ -287,7 +278,6 @@ int kernarium_runtime_loader_prepare_jit(
 /* Whether a debugger is attached to this process, which the application knows
  * before any runtime is loaded. */
 int kernarium_runtime_loader_debugger_attached(void);
-#endif
 /* Turns the guest's microphone on (nonzero) or off (zero), as
  * kernarium_runtime_set_microphone_function does, and returns the resulting
  * KERNARIUM_RUNTIME_MICROPHONE_ value, or -1 when no runtime is loaded. It
@@ -371,7 +361,6 @@ int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees);
  * reach the handler they were queued for. */
 void kernarium_runtime_loader_set_memory_pressure_handler(
     KernariumMemoryPressureHandler _Nullable handler);
-#ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always
  * zero for a release runtime, which cannot be asked, and when none is loaded. */
@@ -384,7 +373,6 @@ int kernarium_runtime_loader_automation_hold_delay_ms(void);
 int kernarium_runtime_loader_send_console_input(
     const void* buffer,
     size_t length);
-#endif
 /* Opens a stream to the guest's vsock port; see
  * kernarium_runtime_connect_vsock_function. Returns a connected descriptor
  * the caller owns, or a negated errno: -ENODEV when no runtime is loaded or no

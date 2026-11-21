@@ -558,7 +558,6 @@ void aFrontCameraStated90FollowsTheBodyThroughTheRuntime()
     }
 }
 
-#ifndef UML_APP_STORE_RUNTIME
 void theEnvironmentNamesTheSyntheticCamera()
 {
     require(std::string {sourceVariable} == "KERNARIUM_CAMERA_SOURCE");
@@ -727,7 +726,6 @@ void theBackKnobNeverReachesTheFrontCamera()
     // A host that is not there stays none.
     require(chooseSource(parseSource("host:back"), []() -> uml::camera::CameraSourceHandle { return nullptr; }) == nullptr);
 }
-#endif
 
 } // namespace
 
@@ -752,11 +750,9 @@ int main()
         {"the-device-options-carry-the-sessions-statements", theDeviceOptionsCarryTheSessionsStatements},
         {"a-boot-states-the-orientation-and-a-later-turn-is-a-delta", aBootStatesTheOrientationAndALaterTurnIsADelta},
         {"a-front-camera-stated-90-follows-the-body-through-the-runtime", aFrontCameraStated90FollowsTheBodyThroughTheRuntime},
-#ifndef UML_APP_STORE_RUNTIME
         {"the-environment-names-the-synthetic-camera", theEnvironmentNamesTheSyntheticCamera},
         {"an-unknown-source-never-falls-back-to-the-hosts-camera", anUnknownSourceNeverFallsBackToTheHostsCamera},
         {"the-back-knob-never-reaches-the-front-camera", theBackKnobNeverReachesTheFrontCamera},
-#endif
     };
     return uml::testing::runNamedTests(tests);
 }

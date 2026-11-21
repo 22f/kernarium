@@ -18,9 +18,7 @@ extension AppModel {
     /// Where the list and the opening come from: the runtime, or the list a
     /// preview or a UI test's probe session plays.
     var androidAppsSource: (any AndroidAppsSource)? {
-        #if !APP_STORE
         if let scriptedAndroidApps { return scriptedAndroidApps }
-        #endif
         return driver
     }
 

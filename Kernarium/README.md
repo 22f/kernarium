@@ -139,10 +139,9 @@ unified `rootfs.erofs` carries none of it and boots to its own defaults.
 ## Automation runs
 
 The release runtime accepts no host payload and carries no test campaign.
-Test and benchmark drivers package one of two automation variants instead, and
-Andarium's App Store configuration a third runtime; the packaging script
-(`scripts/package-ios-frameworks.sh`) checks that a release runtime carries
-none of the settings below.
+Test and benchmark drivers package one of two automation variants instead; the
+packaging script (`scripts/package-ios-frameworks.sh`) checks that a release
+runtime carries none of the settings below.
 
 - **Linux automation**: the `kernarium-ios-device-automation` preset
   (`UML_KERNARIUM_AUTOMATION_HARNESS`), packaged with `--automation`. Only it
@@ -172,25 +171,6 @@ none of the settings below.
   `KERNARIUM_BACKGROUND_HOLD_DELAY_MS`, which start a background job with the
   guest and move the GPU hold for a measurement; the packaging script refuses a
   release runtime that contains their names.
-- **App Store runtime**: the `kernarium-ios-device-android-app-store` preset
-  (`UML_APP_STORE_RUNTIME`), packaged with `--app-store --runtimes android` for
-  Andarium's App Store configuration; it conflicts with the automation harness.
-  Every environment variable that tunes, observes or drives a run is read as
-  unset (the `KERNARIUM_` knobs and the `UML_` and `DARWIN_UML_` diagnostics;
-  `TMPDIR` stays). It also carries none of the debugging support, so a shipped
-  application cannot capture its screen, inject input, profile itself or log
-  its memory: the frame mirror, console input (the console output relay stays),
-  the guest sampler, the footprint log, the virtual Jetsam, the activity logs,
-  the frame statistics reports and the JIT (no engine, no executable-memory
-  owner; `prepare_jit` answers unsupported and `use_jit` is ignored). Configuring it with
-  `UML_GADGET_CACHE_CENSUS` or `UML_GADGET_EXECUTION_HISTOGRAM` fails. The
-  runtime API table keeps its layout and version, so `set_frame_sink` and
-  `send_console_input` answer `-ENOTSUP`; touch and key input, adb over vsock,
-  the statistics and motion channels and the lifecycle, trim and budget calls
-  are product features and stay. `Andarium/scripts/check-app-store-bundle.py
-  --runtime`, which packaging runs, refuses the symbols and log text of what is
-  left out. Switches that third-party libraries read from the environment stay
-  in the shipped libraries; nothing reaches them on an installed application.
 
 The launcher alone tells an Android guest how adbd is reached, on its kernel
 command line; a release's command-line file cannot set these arguments. The
@@ -264,7 +244,7 @@ Kernarium attaches:
   the host owns the guest's rotation: each boot derives every camera's sensor
   orientation from it, and a change after the boot turns the picture by the
   difference ([orientation](../darwin/device/camera/README.md#orientation)). A
-  runtime that is not an App Store build serves the synthetic camera when
+  runtime serves the synthetic camera when
   `KERNARIUM_CAMERA_SOURCE` names it, serves the host's cameras with only the
   back ones openable for `host:back` (the front camera is listed, so the
   layout is an image's, every request to open it is refused before the host,

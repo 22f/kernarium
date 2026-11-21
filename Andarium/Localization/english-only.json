@@ -12,8 +12,8 @@
     { "catalog": "AndariumCore", "key": "%lld vCPUs", "reason": "Japanese counts vCPUs as a number and the unit name, as it counts GiB." }
   ],
   "english": [
-    { "text": "JIT", "file": "Andarium/Andarium/Shared/HomeSections.swift", "reason": "A section only development builds have; the App Store build compiles it out." },
-    { "text": "Input probe", "file": "Andarium/Andarium/Shared/Settings.swift", "reason": "The field UI tests type into; compiled out of the App Store build." },
+    { "text": "JIT", "file": "Andarium/Andarium/Shared/HomeSections.swift", "reason": "A section only development builds have." },
+    { "text": "Input probe", "file": "Andarium/Andarium/Shared/Settings.swift", "reason": "The field UI tests type into." },
     { "text": "adb connect", "file": "Andarium/Andarium/Shared/Settings.swift", "reason": "The command typed on a computer." },
     { "text": "The previous session ended in a guest kernel panic", "file": "Andarium/AndariumCore/Sources/AndariumCore/SessionRecord.swift", "reason": "Session record text: bug report data, English by decision." },
     { "text": "Stalls of the guest's vCPUs", "file": "Andarium/AndariumCore/Sources/AndariumCore/BugReportArchive.swift", "reason": "Bug report text, English by decision." },

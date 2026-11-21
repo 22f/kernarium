@@ -26,12 +26,10 @@ std::mutex selectionMutex;
 std::atomic<const kernarium_runtime_api*> selectedApi;
 uint32_t selectedFlavor;
 bool selectionAttempted;
-#ifndef UML_APP_STORE_APPLICATION
 /* The selected runtime's automation extensions (KernariumRuntime.h), or null:
  * a release runtime does not export them. */
 int (*automationJobAtStart)(void);
 int (*automationHoldDelayMs)(void);
-#endif
 /* The runtime relay can still call into the loader while exit() destroys
  * ordinary statics. Keep its lock and retained handler alive together. */
 struct ConsoleOutputHandlerState final {
@@ -443,7 +441,6 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
     updateCameraStateForwarder(api);
     updateMemoryPressureForwarder(api);
     updateInputStatusForwarder(api);
-#ifndef UML_APP_STORE_APPLICATION
     /* Optional: only a runtime built for automation has it. */
     automationJobAtStart = reinterpret_cast<int (*)(void)>(
         dlsym(handle, "kernarium_runtime_automation_job_at_start"));
@@ -451,7 +448,6 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
     automationHoldDelayMs = reinterpret_cast<int (*)(void)>(
         dlsym(handle, "kernarium_runtime_automation_hold_delay_ms"));
     (void)dlerror();
-#endif
     selectedFlavor = guestFlavor;
     selectedApi.store(api, std::memory_order_release);
     std::printf(
@@ -558,7 +554,6 @@ extern "C" int kernarium_runtime_loader_set_background_throttle(int enabled)
     return runtime == nullptr ? -1 : runtime->set_background_throttle(enabled);
 }
 
-#ifndef UML_APP_STORE_APPLICATION
 extern "C" int kernarium_runtime_loader_set_frame_sink(
     kernarium_runtime_frame_sink sink,
     void* context,
@@ -570,7 +565,6 @@ extern "C" int kernarium_runtime_loader_set_frame_sink(
         -1 :
         runtime->set_frame_sink(sink, context, maximumWidth, framesPerSecond);
 }
-#endif
 
 extern "C" int kernarium_runtime_loader_set_page_cache_trimming(int enabled)
 {
@@ -1029,16 +1023,13 @@ extern "C" int kernarium_runtime_loader_connect_vsock(
         runtime->connect_vsock(port, timeoutMilliseconds);
 }
 
-#ifndef UML_APP_STORE_APPLICATION
 extern "C" int kernarium_runtime_loader_automation_hold_delay_ms(void)
 {
     return api() != nullptr && automationHoldDelayMs != nullptr
         ? automationHoldDelayMs()
         : 0;
 }
-#endif
 
-#ifndef UML_APP_STORE_APPLICATION
 extern "C" int kernarium_runtime_loader_prepare_jit(
     int enable,
     uint32_t guestMemoryMiB,
@@ -1059,7 +1050,6 @@ extern "C" int kernarium_runtime_loader_debugger_attached(void)
         return 0;
     return (information.kp_proc.p_flag & P_TRACED) != 0 ? 1 : 0;
 }
-#endif
 
 extern "C" int kernarium_runtime_loader_guest_display_active(void)
 {
@@ -1088,7 +1078,6 @@ extern "C" int kernarium_runtime_loader_read_guest_memory(
     return runtime == nullptr ? -ENODEV : runtime->read_guest_memory(memory);
 }
 
-#ifndef UML_APP_STORE_APPLICATION
 extern "C" int kernarium_runtime_loader_automation_job_at_start(void)
 {
     return api() != nullptr && automationJobAtStart != nullptr
@@ -1105,4 +1094,3 @@ extern "C" int kernarium_runtime_loader_send_console_input(
         return -1;
     return runtime->send_console_input(buffer, length);
 }
-#endif
