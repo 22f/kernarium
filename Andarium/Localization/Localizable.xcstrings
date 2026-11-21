@@ -9603,13 +9603,13 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このディスプレイでより滑らかに動きますが、バッテリーの消費が増えます。次にAndroidを起動したときに反映されます。"
+            "value" : "このディスプレイでの動きがより滑らかになりますが、バッテリーの消費が増えます。次回のAndroid起動時に適用されます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此显示屏上的动画更流畅，但会更耗电。下次启动Android时生效。"
+            "value" : "此显示屏上的动态画面更流畅，但会更耗电。下次启动Android时生效。"
           }
         },
         "zh-Hant" : {
