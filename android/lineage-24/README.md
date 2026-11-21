@@ -1447,6 +1447,22 @@ are made from by name, version and SHA-256 of its official APK. The pin is a
 release input, the APK is given to the producer as a local file, and no Magisk
 file is in the repository.
 
+`build/assemble-image.sh --magisk-apk APK` makes them on the builder, after the
+disk is assembled: `tools/magisk-boot.py` refuses an APK that is not the pin,
+reads the disk's own `init_boot` partition, and runs Magisk's `boot_patch.sh`
+from the APK twice with fixed inputs (the verified boot and encryption of the
+stock ramdisk are kept, the pre-init partition is the data disk's `userdata`),
+Magisk's x86-64 `magiskboot` patching and only its arm64 `magiskinit`, `magisk`
+and `init-ld` going into the ramdisk. The two results must be identical.
+`tools/verify-magisk-boot.py` (`tools/magisk_image.py`) then checks the result
+as the stock image plus exactly what Magisk adds, with the standard library
+alone: the same boot header; an lz4-legacy ramdisk whose entries are the stock
+ones except `/init`, which is the APK's `magiskinit`; `.backup/init.xz` as the
+stock `/init`; `overlay.d/sbin/{magisk,init-ld}.xz` as the APK's arm64 binaries;
+and `.backup/.magisk` as the fixed flags, the pre-init partition and the SHA-1
+of the stock image. `root/init_boot-magisk.img` and the unmodified
+`root/Magisk-<version>.apk` land in the output directory.
+
 ### Superseded releases
 
 After a replacement release is validated, remove the superseded Android build,

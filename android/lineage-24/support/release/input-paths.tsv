@@ -39,6 +39,8 @@ excluded	android/lineage-24/README.md	documentation
 input	dependencies/patches/espeak-ng	the series applied to eSpeak NG, with its Soong build
 input	dependencies/patches/talkback	the series applied to TalkBack, with its Soong build
 input	android/lineage-24/tools/precompile-first-boot-apps.py	compiles the first-boot artifacts the image ships
+input	android/lineage-24/tools/magisk-boot.py	patches the release's init_boot with the pinned Magisk release
+input	android/lineage-24/tools/magisk_image.py	the patch's fixed inputs and formats, shared by the producer and the verifier
 input	android/lineage-24/tools/publish-release.py	writes the manifest fields and assembles the release
 input	android/lineage-24/tools/release_common.py	derives the manifest's tracked fields and its constants
 input	android/lineage-24/tools/release_inputs.py	reads this list and records the object IDs
@@ -61,6 +63,7 @@ excluded	android/lineage-24/tools/snapshot-source.py	rewrites the metadata, whic
 excluded	android/lineage-24/tools/verify-accessibility-source.py	verifier
 excluded	android/lineage-24/tools/verify-aosp-patches.py	verifier
 excluded	android/lineage-24/tools/verify-initramfs.py	verifier
+excluded	android/lineage-24/tools/verify-magisk-boot.py	verifier
 excluded	android/lineage-24/tools/verify-lineage-recovery.py	verifier
 excluded	android/lineage-24/tools/verify-mesa-venus-source.py	verifier
 excluded	android/lineage-24/tools/verify-target-files.py	verifier
