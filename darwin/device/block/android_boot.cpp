@@ -183,6 +183,10 @@ std::optional<std::string_view> commandOf(
 				static_cast<std::size_t>(end - message.begin())};
 }
 
+/* The command views the message, which a temporary would not outlive. */
+std::optional<std::string_view> commandOf(
+	const std::array<std::byte, bootloaderMessageSize> &&) = delete;
+
 std::filesystem::path requireAbsolute(std::filesystem::path path, std::string_view label)
 {
 	if (!path.is_absolute())
@@ -247,7 +251,8 @@ BootSelection Storage::selectBoot(BootMode requestedMode, RootMode root) const
 			"this Android release carries no root boot image");
 	auto selected = requestedMode;
 	if (requestedMode == BootMode::automatic) {
-		const auto command = commandOf(readBootloaderMessage(layout_, dataDisk_));
+		const auto message = readBootloaderMessage(layout_, dataDisk_);
+		const auto command = commandOf(message);
 		if (!command)
 			throw std::invalid_argument(
 				"Android bootloader message command is malformed");
@@ -268,7 +273,8 @@ BootSelection Storage::selectBoot(BootMode requestedMode, RootMode root) const
 bool Storage::consumeBootloaderCommand() const
 {
 	validate();
-	if (commandOf(readBootloaderMessage(layout_, dataDisk_)) != bootloaderCommand)
+	const auto message = readBootloaderMessage(layout_, dataDisk_);
+	if (commandOf(message) != bootloaderCommand)
 		return false;
 	const int descriptor = open(dataDisk_.c_str(), O_WRONLY | O_NOFOLLOW);
 	if (descriptor < 0)

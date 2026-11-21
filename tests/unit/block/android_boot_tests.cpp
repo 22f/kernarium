@@ -1020,6 +1020,10 @@ void testRestartSelectsAutomaticMode(const Fixture &fixture, const fs::path &dir
 	require(!restarted.bootloaderConsumed);
 	require(miscCommand(layout, disk) == "boot-recovery");
 
+	/* The same request read by an automatic selection of its own. */
+	require(storage.selectBoot(android::BootMode::automatic).mode ==
+		android::BootMode::recovery);
+
 	/* Recovery's own reboot cleared the request: the next boot is normal. */
 	requestCommand(layout, disk, "");
 	require(storage.selectRestartBoot().boot.mode == android::BootMode::normal);
