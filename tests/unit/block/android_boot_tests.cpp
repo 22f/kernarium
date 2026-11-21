@@ -971,11 +971,18 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 		(void)storage.selectBoot(android::BootMode::normal, android::RootMode::on);
 		fs::rename(original, image);
 	}
-	/* A file with no ramdisk page, and one past the size bound. */
+	/* A file with no ramdisk page. */
 	fs::copy_file(image, original, fs::copy_options::overwrite_existing);
 	fs::resize_file(image, pageSize);
 	refuse();
-	fs::resize_file(image, 257U * mebibyte);
+	fs::rename(original, image);
+	/* The size bound, on the valid image grown past it: its header, ramdisk
+	 * and format stay as they were, so only the bound can refuse it. 256 MiB
+	 * is the most taken. */
+	fs::copy_file(image, original, fs::copy_options::overwrite_existing);
+	fs::resize_file(image, 256U * mebibyte);
+	(void)storage.selectBoot(android::BootMode::normal, android::RootMode::on);
+	fs::resize_file(image, 256U * mebibyte + 1U);
 	refuse();
 	fs::rename(original, image);
 	(void)storage.selectBoot(android::BootMode::normal, android::RootMode::on);
