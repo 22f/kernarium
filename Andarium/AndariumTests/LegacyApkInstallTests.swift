@@ -619,6 +619,19 @@ struct LegacyApkInstallAlertTests {
         return false
     }
 
+    /// The double tap on the alert's button `title`: the element is asked to activate. Before iOS 27
+    /// UIKit's view for an alert's button declines that and does nothing, and VoiceOver then taps the
+    /// button where it is; a hosted test has no finger, so the button's action runs, as the tap
+    /// makes UIKit run it.
+    private func activate(_ element: UIView, titled title: String, on alert: UIAlertController) -> Bool {
+        if activate(element) { return true }
+        guard #unavailable(iOS 27.0) else { return false }
+        guard let action = alert.actions.first(where: { $0.title == title }),
+              let handler = action.value(forKey: "handler") as AnyObject? else { return false }
+        unsafeBitCast(handler, to: (@convention(block) (UIAlertAction) -> Void).self)(action)
+        return true
+    }
+
     /// The views from `element` up to the window, as a failure names them.
     private func chain(_ element: UIView) -> String {
         var parts: [String] = []
@@ -697,7 +710,7 @@ struct LegacyApkInstallAlertTests {
             let title = installAnyway ? "Install anyway" : "Cancel"
             let button = try #require(control(labelled: title, in: shown.view), "\(title) is not on the alert")
             // What VoiceOver does with a double tap; a control that declines it is tapped.
-            try #require(activate(button), "\(title) takes no activation: \(chain(button))")
+            try #require(activate(button, titled: title, on: shown), "\(title) takes no activation: \(chain(button))")
             try #require(await eventually { model.legacyInstallQuestion == nil }, "\(title) answered nothing")
             if installAnyway {
                 try #require(await eventually { model.busy?.result != nil })
@@ -763,7 +776,7 @@ struct LegacyApkInstallAlertTests {
         // The alert is on screen before its buttons are built.
         try #require(await eventually { control(labelled: "Cancel", in: shown.view) != nil }, "no Cancel on the alert")
         let cancel = try #require(control(labelled: "Cancel", in: shown.view))
-        try #require(activate(cancel), "Cancel takes no activation: \(chain(cancel))")
+        try #require(activate(cancel, titled: "Cancel", on: shown), "Cancel takes no activation: \(chain(cancel))")
         try #require(await eventually { alert(over: controller) == nil && model.busy == nil })
         #expect(driver.installAttempts == [false])
     }
