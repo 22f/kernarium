@@ -15,47 +15,53 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
- * The host channel's listening socket: vsock port 5560, on any CID, one connection at a time. It is the
- * only Android glue of the server, and names only the classes of android.system, so that a plain JVM can
- * compile it against stand-ins and run the server's tests over it. Which peer may be served is the
- * server's rule (CID 2); this class reports the peer's CID and never decides. The CID is the one that
- * accept fills into the address it is given: libjavacore converts an AF_VSOCK address there only, and
- * Os.getpeername throws for it. The overload of Os.accept that takes a SocketAddress is @hide, and the
- * public one fills an InetSocketAddress only, so the hidden one is found by reflection, once. The service
- * is signed with the platform key, which the platform exempts from the hidden-API restrictions. When the
+ * The host channel's listener: it accepts from the listening vsock socket (port 5560, any CID) that the holder
+ * of the port passed to the service, one connection at a time. It is the only Android glue of the server, and
+ * names only the classes of android.system, so that a plain JVM can compile it against stand-ins and run the
+ * server's tests over it. It never makes, binds or listens on a socket, and never closes the descriptor: both
+ * belong to the holder and to the session that was given it.
+ *
+ * <p>Which peer may be served is the server's rule (CID 2); this class reports the peer's CID and never decides.
+ * The CID is the one that accept fills into the address it is given: libjavacore converts an AF_VSOCK address
+ * there only, and Os.getpeername throws for it. The overload of Os.accept that takes a SocketAddress is @hide,
+ * and the public one fills an InetSocketAddress only, so the hidden one is found by reflection, once. The
+ * service is signed with the platform key, which the platform exempts from the hidden-API restrictions. When the
  * method cannot be found, the public accept takes every connection and gives none a peer address, and the
  * server refuses each of them, so nothing is read and the failure is logged.
  *
- * <p>A bind that fails is tried again every second and never ends the service; an accept that fails for
- * any reason but EINTR, EAGAIN or ECONNABORTED closes the listener, waits a second and listens again.
+ * <p>The listener ends the session instead of recovering: accept returns null once nothing has come for the idle
+ * window, counted from the call, so a request that takes time starts the window again; and on any failure but
+ * EINTR, EAGAIN or ECONNABORTED. The holder keeps the port, so a connection that arrives after the session has
+ * ended waits in its queue for the next one.
  */
 final class VsockListener implements Server.Listener {
-    static final int PORT = 5560;
-    private static final int BACKLOG = 4;
     private static final int WAKE_MILLIS = 1000;
 
-    /** Waits; a test's does not. */
-    interface Sleeper {
-        void sleep(long millis) throws InterruptedException;
-    }
-
     private final Consumer<String> log;
-    private final Sleeper sleeper;
+    private final FileDescriptor listening;
+    private final long idleNanos;
+    private final LongSupplier clock;
     /** Os.accept(FileDescriptor, SocketAddress), or null when it cannot be called. */
     private Method acceptWithAddress;
-    private FileDescriptor listening;
-    private boolean complained;
 
-    VsockListener(Consumer<String> log, Sleeper sleeper) {
-        this(log, sleeper, "accept");
+    /** The listener over {@code listening}, which ends its session after {@code idleMillis} with nothing to accept. */
+    VsockListener(FileDescriptor listening, long idleMillis, Consumer<String> log, LongSupplier clock) {
+        this(listening, idleMillis, log, clock, "accept");
     }
 
     /** {@code acceptName} is the hidden method's name: a test names one that is not there. */
-    VsockListener(Consumer<String> log, Sleeper sleeper, String acceptName) {
+    VsockListener(FileDescriptor listening, long idleMillis, Consumer<String> log, LongSupplier clock,
+            String acceptName) {
+        if (listening == null || idleMillis <= 0 || clock == null) {
+            throw new IllegalArgumentException("no descriptor or window");
+        }
         this.log = log;
-        this.sleeper = sleeper;
+        this.listening = listening;
+        this.idleNanos = idleMillis * 1_000_000L;
+        this.clock = clock;
         try {
             final Method method = Os.class.getDeclaredMethod(acceptName, FileDescriptor.class, SocketAddress.class);
             if (!Modifier.isStatic(method.getModifiers()) || method.getReturnType() != FileDescriptor.class) {
@@ -68,12 +74,23 @@ final class VsockListener implements Server.Listener {
         }
     }
 
+    /**
+     * The next connection, or null when the session is over: nothing came for the idle window (which starts with
+     * this call), the thread was interrupted, or the accept failed in a way that no wait mends. The waits are a
+     * second at most, and the descriptor stays open.
+     */
     @Override
-    public Server.Conn accept() throws IOException {
+    public Server.Conn accept() {
+        final long deadline = clock.getAsLong() + idleNanos;
         for (;;) {
-            if (listening == null) listen();
+            if (Thread.currentThread().isInterrupted()) return null;
+            final long left = deadline - clock.getAsLong();
+            if (left <= 0) {
+                log.accept("host channel: idle for " + idleNanos / 1_000_000_000L + " s, ending the session");
+                return null;
+            }
             try {
-                if (!readable(listening, -1)) continue;
+                if (!readable(listening, (int) Math.min(WAKE_MILLIS, Math.max(1, left / 1_000_000L)))) continue;
                 // An address that accept leaves alone keeps the CID it starts with, which no peer has.
                 final VmSocketAddress peer = new VmSocketAddress(0, OsConstants.VMADDR_CID_ANY);
                 final FileDescriptor fd = acceptFrom(peer);
@@ -85,11 +102,10 @@ final class VsockListener implements Server.Listener {
                     continue;
                 }
                 log.accept("host channel: accept failed, errno " + e.errno);
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 log.accept("host channel: accept failed: " + e.getClass().getSimpleName());
             }
-            closeListener();
-            pause(WAKE_MILLIS);
+            return null;
         }
     }
 
@@ -111,45 +127,6 @@ final class VsockListener implements Server.Listener {
             }
         }
         return Os.accept(listening, (InetSocketAddress) null);
-    }
-
-    private void listen() throws IOException {
-        for (;;) {
-            FileDescriptor fd = null;
-            try {
-                fd = Os.socket(OsConstants.AF_VSOCK, OsConstants.SOCK_STREAM | OsConstants.SOCK_CLOEXEC
-                        | OsConstants.SOCK_NONBLOCK, 0);
-                Os.bind(fd, new VmSocketAddress(PORT, OsConstants.VMADDR_CID_ANY));
-                Os.listen(fd, BACKLOG);
-                listening = fd;
-                complained = false;
-                log.accept("listening on vsock port " + PORT);
-                return;
-            } catch (ErrnoException | IOException e) {
-                if (fd != null) closeQuietly(fd);
-                if (!complained) {
-                    complained = true;
-                    log.accept("host channel: cannot listen on vsock port " + PORT + ": "
-                            + (e instanceof ErrnoException ? "errno " + ((ErrnoException) e).errno
-                                    : e.getClass().getSimpleName()));
-                }
-            }
-            pause(WAKE_MILLIS);
-        }
-    }
-
-    private void closeListener() {
-        if (listening != null) closeQuietly(listening);
-        listening = null;
-    }
-
-    private void pause(long millis) throws IOException {
-        try {
-            sleeper.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("interrupted");
-        }
     }
 
     private static void closeQuietly(FileDescriptor fd) {

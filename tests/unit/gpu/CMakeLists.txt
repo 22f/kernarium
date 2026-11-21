@@ -288,20 +288,34 @@ if(TARGET uml_gpu_service)
         LIBRARIES ${_uml_host_gl_libraries}
         VULKAN UNIT_DIRECTORY TIMEOUT 120)
 
-    # A guest chooses what the pipeline binary commands read: the size of each
-    # key it imports a binary under (a plain field beside a key array of 32
-    # bytes), which source a create request names, and which objects a command
-    # refers to, null or already in use. Each is refused or answered with an
-    # error, and none of it is read, copied or dereferenced past what the guest
-    # sent. The faults lie past the end of a heap block or in freed memory, so
-    # the test runs each row in a child under Guard Malloc, and the rows that
-    # name an object the renderer must free again under the leak checker.
+    # The renderer serves no VK_KHR_pipeline_binary, which imports a binary under
+    # a key and data the guest names and builds a pipeline from it: it does not
+    # offer the extension, and every command of it, and every pipeline creation
+    # that chains binaries, ends the context of a guest that enabled it by name
+    # anyway. The rows of the renderer's object table that the binaries once
+    # served as the vehicle of stay. The faults lie past the end of a heap block
+    # or in freed memory, so the test runs each row in a child under Guard
+    # Malloc, and the rows that name an object the renderer must free again under
+    # the leak checker.
     uml_add_gpu_unit_test(gpu-venus-pipeline-binary-requests
         uml_gpu_venus_pipeline_binary_requests_tests
         venus_pipeline_binary_requests_tests.cpp
         LIBRARIES ${_uml_host_gl_libraries}
         VULKAN UNIT_DIRECTORY TIMEOUT 600)
     set_tests_properties(gpu-venus-pipeline-binary-requests PROPERTIES
+        SKIP_RETURN_CODE 77)
+
+    # A guest chooses the data of a pipeline cache, which the host driver parses
+    # as if its own serializer had written it, so the renderer makes every cache
+    # empty and answers a read of one with the blob of an empty cache. The
+    # faults lie past the end of a heap block or at address zero, so the test
+    # runs each row in a child under Guard Malloc.
+    uml_add_gpu_unit_test(gpu-venus-pipeline-cache-bytes
+        uml_gpu_venus_pipeline_cache_bytes_tests
+        venus_pipeline_cache_bytes_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        VULKAN UNIT_DIRECTORY TIMEOUT 600)
+    set_tests_properties(gpu-venus-pipeline-cache-bytes PROPERTIES
         SKIP_RETURN_CODE 77)
 
     # A handle the specification does not allow to be VK_NULL_HANDLE reaches its

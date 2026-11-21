@@ -391,6 +391,20 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 120)
 
+# The text message holder on the host: its source compiled as it is and run
+# against the handoff socket as init makes it (bound, not listening), a vsock
+# port stood in for by a unix socket, the waker's property, the descriptor
+# passed to the service alone, and the next wake after a session. It skips (77)
+# where the host has no C++ compiler.
+uml_add_tooling_test(
+    NAME android17-sms-holder
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_holder.py
+    LABELS android
+    TIMEOUT 300)
+set_tests_properties(android17-sms-holder PROPERTIES
+    SKIP_RETURN_CODE 77)
+
 # The keyboard and mouse runner's reading of the guest's input dump and of the
 # probe's log, its VNC client's wire, and its key table against the launcher's.
 uml_add_tooling_test(

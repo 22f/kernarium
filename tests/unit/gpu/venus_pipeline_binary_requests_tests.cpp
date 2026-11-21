@@ -1,48 +1,33 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// A guest drives the Venus renderer, so no guest command stream may make the
-// host read bytes the guest did not send, dereference an object the guest did
-// not name, or fail to tear its context down. The pipeline binary commands
-// take several guest-chosen values the generated codec leaves unbounded, and
-// each one is checked here the way a guest sends it:
+// A guest drives the Venus renderer, and in the product the renderer runs in
+// the app's own process, so no guest command stream may hand the host driver
+// bytes the guest chose for a parser that is not written for hostile input.
+// VK_KHR_pipeline_binary imports a binary under a key and data the guest
+// names, with no header at all, and builds a pipeline from it. The renderer
+// serves none of the extension: it does not offer it, and a guest that
+// enables the extension on a device by name anyway, which the renderer passes
+// to the driver as it does every name, still has each command of it end the
+// context, the host living on, so that no key or data reaches the driver:
 //
-//  - vkCreatePipelineBinariesKHR imports a binary under a key whose length the
-//    guest names in VkPipelineBinaryKeyKHR::keySize. The registry marks that
-//    field noautovalidity and the codec decodes it as a plain number beside a
-//    key array that always holds VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR (32)
-//    bytes, so a guest chooses keySize freely. An import under a key of 32
-//    bytes succeeds (the control); any other size is answered with
-//    VK_ERROR_VALIDATION_FAILED and leaves the context live.
-//  - The same command takes its binaries from exactly one of a list of keys
-//    and data, a pipeline, or a pipeline create info. A request with none of
-//    them, or with only a create info on a driver that has no internal cache
-//    to look it up in (this one), has no source to read; it is answered with
-//    VK_ERROR_VALIDATION_FAILED and leaves the context live.
-//  - A command that names a binary by a null handle, or a pipeline creation
-//    that reads one, reaches the driver as a null pointer, because the
-//    codec's lookup yields NULL for object id 0 and leaves the refusal to the
-//    handler. The context is lost instead, as it is for every other null
-//    handle a command needs. An id the renderer never made, or made and then
-//    destroyed, is refused by the lookup itself.
-//  - A second object created under an id that is already in use, or under id 0,
-//    loses the context, and tearing it down must still be clean: the object the
-//    context refused is freed whichever order its owner and the owner of the
-//    other object are torn down in, and the other object is left alone.
-//  - vkGetPipelineKeyKHR takes its pipeline from the first structure of the
-//    create info's chain, which the driver reads by that structure's type. A
-//    request whose chain is empty, or begins with a structure that is not a
-//    graphics, compute or ray tracing pipeline's, is refused with
-//    VK_ERROR_VALIDATION_FAILED, and the key it replies with is zero. No
-//    create info at all is the key of the device, which is served.
+//  - the five commands of the extension, each sent the way a guest sends them
+//    (an import under a key of every size, a binary named by the null handle,
+//    by an id never made and by one that was never offered).
+//  - a pipeline creation, graphics or compute, whose create info chains
+//    pipeline binaries, whatever it names.
+//  - the extension is absent from the list the renderer reports, and the list
+//    still holds the extension beside it that the renderer does serve.
 //
-// A refusal that the driver would also make is told apart from the renderer's
-// own by the line the renderer logs when it refuses: a row that expects the
-// renderer to refuse names that line.
+// And the rows of the renderer's object table, which the binaries once served
+// as the vehicle of: a second object under an id that is already in use, or
+// under id 0, loses the context, and tearing it down must still be clean: the
+// object the context refused is freed whichever order its owner and the owner
+// of the other object are torn down in, and the other object is left alone.
 //
 // The test drives the real vkr renderer in-process against the real host
 // Vulkan driver and submits hand-encoded Venus command streams, in the style of
-// venus_render_pass_lifetime_tests.cpp. A row asks for a reply and reads the
-// VkResult the host answered with, or finds that the context was lost.
+// venus_render_pass_lifetime_tests.cpp. A row asks for a reply and finds that
+// the context was lost.
 //
 // Each row runs in a child process under Guard Malloc, and the rows that name
 // a leak run a second time under the leak checker, as venus_row_runner.hpp
@@ -52,12 +37,12 @@
 #include "venus_pipeline_wire.hpp"
 #include "venus_row_runner.hpp"
 
-#include <algorithm>
+#include <array>
 #include <cstdint>
-#include <cstring>
 #include <functional>
-#include <string>
 #include <vector>
+
+extern "C" std::uint32_t vkr_extension_get_spec_version(const char* name);
 
 namespace {
 
@@ -68,7 +53,8 @@ using namespace uml::gpu::testing::venus;
 // The object ids the guest assigns.
 enum Id : std::uint64_t {
     instanceId = 1, physDevId = 2, deviceId = 3, binaryId = 10, otherBinaryId = 11,
-    pipelineId = 20, poolId = 30, otherPoolId = 31, commandBufferId = 40, neverMadeId = 77,
+    pipelineId = 20, cacheId = 25, poolId = 30, otherPoolId = 31, commandBufferId = 40,
+    neverMadeId = 77,
 };
 constexpr std::uint32_t keyBytes = VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR;
 constexpr std::size_t binaryDataBytes = 8;
@@ -189,33 +175,28 @@ void encodeGraphicsPipelineFromBinary(Stream& s, std::uint64_t binary)
     s.arraySize(1); s.u64(pipelineId);          // pPipelines
 }
 
-// What the create info of vkGetPipelineKeyKHR carries.
-enum class KeyRequest {
-    device,           // no create info: the key of the device
-    emptyChain,       // a create info with no chain
-    robustnessFirst,  // a chain that begins with VkPipelineRobustnessCreateInfo
-};
-
-// vkGetPipelineKeyKHR. The key is written by the host and the request carries
-// only its type.
-void encodeGetKey(Stream& s, KeyRequest request)
+// vkGetPipelineKeyKHR of the device, which names no pipeline.
+void encodeGetKey(Stream& s)
 {
     s.command(getPipelineKey, true);
     s.u64(deviceId);
-    s.ptr(request != KeyRequest::device);       // pPipelineCreateInfo
-    if (request != KeyRequest::device) {
-        s.u32(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
-        if (request == KeyRequest::robustnessFirst) {
-            s.ptr(true);
-            s.u32(VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO); s.ptr(false);
-            for (int field = 0; field < 4; ++field)
-                s.u32(0);                       // every behaviour: the device default
-        } else {
-            s.ptr(false);
-        }
-    }
+    s.ptr(false);                               // pPipelineCreateInfo
     s.ptr(true);                                // pPipelineKey
     s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR); s.ptr(false);
+}
+
+// vkCreatePipelineCache under the guest's id, with no data.
+void encodeCreateCache(Stream& s, std::uint64_t cache)
+{
+    s.command(createPipelineCache);
+    s.u64(deviceId);
+    s.ptr(true);
+    s.u32(VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO); s.ptr(false);
+    s.u32(0);                                   // flags
+    s.u64(0);                                   // initialDataSize
+    s.arraySize(0);                             // pInitialData: none
+    s.ptr(false);                               // pAllocator
+    s.ptr(true); s.u64(cache);
 }
 
 // A command pool of the device, under the guest's id.
@@ -249,226 +230,80 @@ void encodeSetup(Stream& s)
     encodeInstanceAndDevice(s, VK_API_VERSION_1_3, instanceId, physDevId, deviceId, extras);
 }
 
-// The lines the renderer logs when it refuses a request of this extension.
-constexpr const char* noSourceLine = "names no source for its binaries";
-constexpr const char* keySizeLine = "a key is not 32 bytes";
-constexpr const char* chainHeadLine =
-    "does not begin with a graphics, compute or ray tracing pipeline's";
-// What vkGetPipelineBinaryDataKHR's and vkGetPipelineKeyKHR's replies hold
-// beyond the result. A data reply is the command, the result, the key as a
-// pointer and a 56-byte structure, then the size's pointer and the size; a key
-// reply is the command, the result, the key as a pointer and a structure of
-// its type, chain, size and 32 bytes.
-std::uint64_t dataSizeOf(const Answer& answer)
-{
-    std::uint64_t size = 0;
-    std::memcpy(&size, answer.raw.data() + 80, 8);
-    return size;
-}
-std::uint32_t keySizeOf(const Answer& answer)
-{
-    std::uint32_t size = 0;
-    std::memcpy(&size, answer.raw.data() + 28, 4);
-    return size;
-}
 
-// An import under a key of the size every key has, into the guest's id; true
-// when the host made the binary.
-bool importsABinary(Session& session, std::uint64_t id)
+// A command that a guest sends for an extension the renderer does not serve
+// loses the context, and the host lives on: a context of its own is served
+// afterwards.
+Row contextLostRow(const char* name, std::function<void(Stream&)> encode)
 {
-    Stream s;
-    encodeCreate(s, {.keysAndData = true, .binary = id});
-    const Answer answer = session.ask(s);
-    return answer.submitted && answer.command == static_cast<std::int32_t>(createPipelineBinaries)
-        && answer.result == VK_SUCCESS;
-}
-
-// A row that imports under a key of one size and is answered with the result.
-// The driver refuses a key of the wrong size with the same result, so the row
-// also asks the renderer to have refused it before the call was forwarded.
-Row keyRow(const char* name, std::uint32_t keySize, std::int32_t result)
-{
-    return {name, [keySize, result](Session& session) {
+    return {name, [encode = std::move(encode)](Session& session) {
         Stream s;
-        encodeCreate(s, {.keysAndData = true, .keySize = keySize});
-        requireAnswered(session.ask(s), createPipelineBinaries, result,
-            result == VK_SUCCESS ? "an import under a key of 32 bytes was refused"
-                                 : "an import under a key of the wrong size was not refused");
-        require(rendererSaid(keySizeLine) == (result != VK_SUCCESS),
-            result == VK_SUCCESS ? "the renderer refused a key of 32 bytes"
-                                 : "the renderer did not refuse the key itself");
-    }};
-}
-
-// A create request that has no source the binaries can come from is refused
-// and the context lives on: the next import is served. A request that names
-// nothing at all is refused by the renderer; one with only a pipeline create
-// info is the driver's to refuse, because a driver with an internal cache
-// would look it up.
-Row noSourceRow(const char* name, const CreateRequest& request, bool refusedByRenderer)
-{
-    return {name, [request, refusedByRenderer](Session& session) {
-        Stream s;
-        encodeCreate(s, request);
-        requireAnswered(session.ask(s), createPipelineBinaries, VK_ERROR_VALIDATION_FAILED,
-            "a request with no source for its binaries was not refused");
-        require(rendererSaid(noSourceLine) == refusedByRenderer,
-            refusedByRenderer ? "the renderer did not refuse the request itself"
-                              : "the renderer refused a request the driver answers");
-        require(importsABinary(session, otherBinaryId),
-            "the context did not serve an import after a refused request");
-    }};
-}
-
-// A command that names an object the renderer cannot find loses the context
-// and the host lives on. `encode` builds the command, after any setup it
-// does itself, and a binary is made first when `makeABinaryFirst`.
-Row contextLostRow(const char* name, std::function<void(Session&, Stream&)> encode,
-    bool makeABinaryFirst = false)
-{
-    return {name, [encode = std::move(encode), makeABinaryFirst](Session& session) {
-        if (makeABinaryFirst)
-            require(importsABinary(session, binaryId), "the setup import was refused");
-        Stream s;
-        encode(session, s);
+        encode(s);
         const Answer answer = session.ask(s);
-        require(!answer.submitted,
-            "a command that names an object the renderer cannot find was served");
-    }};
-}
-
-// vkGetPipelineKeyKHR before which a request that dirties the decoder's temp
-// pool has been decoded. The refused request's key lands in memory the pool
-// held before, so a reply that is not zeroed carries what was left in it.
-void dirtyTheTempPool(Session& session)
-{
-    require(importsABinary(session, otherBinaryId), "the setup import was refused");
-}
-
-bool keyIsZero(const Answer& answer)
-{
-    return keySizeOf(answer) == 0
-        && std::all_of(answer.raw.begin() + 40, answer.raw.begin() + 40 + keyBytes,
-            [](std::uint8_t b) { return b == 0; });
-}
-
-// A create info that names no pipeline is refused, the renderer says so, the
-// reply's key is zero, and the context lives on.
-Row keyRefusedRow(const char* name, KeyRequest request)
-{
-    return {name, [request](Session& session) {
-        dirtyTheTempPool(session);
-        Stream s;
-        encodeGetKey(s, request);
-        const Answer answer = session.ask(s);
-        require(answer.submitted, "a request that names no pipeline lost the context");
-        require(keyIsZero(answer), "a refused key request replied with a key that was never written");
-        requireAnswered(answer, getPipelineKey, VK_ERROR_VALIDATION_FAILED,
-            "a create info that names no pipeline was not refused");
-        require(rendererSaid(chainHeadLine), "the renderer did not refuse the request itself");
+        require(!answer.submitted, "a command of an extension the renderer does not serve was answered");
+        Session fresh(2, encodeSetup, replyResourceId + 1);
         Stream next;
-        encodeGetKey(next, KeyRequest::device);
-        requireAnswered(session.ask(next), getPipelineKey, VK_SUCCESS,
-            "the context did not serve a key after a refused request");
+        encodeCreateCache(next, cacheId);
+        require(fresh.send(next), "a context of its own was not served after another was lost");
     }};
 }
-
-// The pipeline's binary is named by a null handle: a pipeline creation that
-// reads it loses the context, as the other commands that need a binary do.
-// Each row names the command it creates the pipeline with.
-
-// An object of a pool whose id the context refuses is freed with its pool,
-// whichever pool is torn down first, and so is one under id 0. The context is
-// lost when the object is made, so the teardown of the session does the rest.
-// A leak is the only trace a release renderer leaves, so these rows are also
-// run under the leak checker (see runLeakCheck).
 
 const std::vector<Row>& rows()
 {
     static const std::vector<Row> all = {
-        // keySize.
-        keyRow("key-of-32", keyBytes, VK_SUCCESS),
-        keyRow("key-of-0", 0, VK_ERROR_VALIDATION_FAILED),
-        keyRow("key-of-31", keyBytes - 1, VK_ERROR_VALIDATION_FAILED),
-        keyRow("key-of-33", keyBytes + 1, VK_ERROR_VALIDATION_FAILED),
-        keyRow("key-of-4096", 4096, VK_ERROR_VALIDATION_FAILED),
-        keyRow("key-of-0xffffffff", 0xffffffffu, VK_ERROR_VALIDATION_FAILED),
-
-        // The key of a pipeline, and of the device.
-        {"get-the-key-of-the-device", [](Session& session) {
-            Stream s;
-            encodeGetKey(s, KeyRequest::device);
-            const Answer answer = session.ask(s);
-            requireAnswered(answer, getPipelineKey, VK_SUCCESS,
-                "the key of the device was not served");
-            require(keySizeOf(answer) == keyBytes, "the key of the device is not a key's size");
-            require(!keyIsZero(answer) && keySizeOf(answer) == keyBytes,
-                "the key of the device is zero");
-            require(!rendererSaid(chainHeadLine), "the renderer refused the key of the device");
+        // What the renderer reports.
+        {"the-extension-is-not-offered", [](Session&) {
+            require(vkr_extension_get_spec_version(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME) == 0,
+                "the renderer reports VK_KHR_pipeline_binary");
+            require(vkr_extension_get_spec_version(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) != 0,
+                "the renderer reports no extension at all");
         }},
-        keyRefusedRow("get-the-key-of-an-empty-chain", KeyRequest::emptyChain),
-        keyRefusedRow("get-the-key-of-a-robustness-chain", KeyRequest::robustnessFirst),
 
-        // The source of a create request.
-        noSourceRow("create-from-no-source", {}, true),
-        noSourceRow("create-from-a-create-info-only", {.createInfo = true}, false),
+        // The five commands, sent to a device that named the extension.
+        contextLostRow("import-under-a-key-of-32-bytes",
+            [](Stream& s) { encodeCreate(s, {.keysAndData = true}); }),
+        contextLostRow("import-under-a-key-of-4096-bytes",
+            [](Stream& s) { encodeCreate(s, {.keysAndData = true, .keySize = 4096}); }),
+        contextLostRow("create-from-a-pipeline",
+            [](Stream& s) { encodeCreate(s, {.pipeline = neverMadeId}); }),
+        contextLostRow("create-from-a-create-info",
+            [](Stream& s) { encodeCreate(s, {.createInfo = true}); }),
+        contextLostRow("get-data-of-the-null-handle", [](Stream& s) { encodeGetData(s, 0); }),
+        contextLostRow("get-data-of-an-id-never-made", [](Stream& s) { encodeGetData(s, neverMadeId); }),
+        contextLostRow("destroy-the-null-handle", [](Stream& s) { encodeDestroy(s, 0); }),
+        contextLostRow("destroy-an-id-never-made", [](Stream& s) { encodeDestroy(s, neverMadeId); }),
+        contextLostRow("release-the-null-pipeline", [](Stream& s) { encodeRelease(s, 0); }),
+        contextLostRow("release-a-pipeline-never-made", [](Stream& s) { encodeRelease(s, neverMadeId); }),
+        contextLostRow("get-the-key-of-the-device", [](Stream& s) { encodeGetKey(s); }),
 
-        // vkGetPipelineBinaryDataKHR: a binary that is there, and the three
-        // ways of naming one that is not.
-        {"get-data-of-a-binary", [](Session& session) {
-            require(importsABinary(session, binaryId), "the setup import was refused");
+        // The same, to a device that never named it.
+        {"import-to-a-device-that-never-named-the-extension", [](Session& session) {
             Stream s;
-            encodeGetData(s, binaryId);
-            const Answer answer = session.ask(s);
-            requireAnswered(answer, getPipelineBinaryData, VK_SUCCESS, "a binary's data size was refused");
-            require(dataSizeOf(answer) == binaryDataBytes, "the binary's data size is not the imported one");
+            encodeCreate(s, {.keysAndData = true});
+            require(!session.ask(s).submitted, "an import was answered by a device without the extension");
+        }, false, [](Stream& s) {
+            encodeInstanceAndDevice(s, VK_API_VERSION_1_3, instanceId, physDevId, deviceId);
         }},
-        contextLostRow("get-data-of-the-null-handle",
-            [](Session&, Stream& s) { encodeGetData(s, 0); }),
-        contextLostRow("get-data-of-an-id-never-made",
-            [](Session&, Stream& s) { encodeGetData(s, neverMadeId); }),
-        contextLostRow("get-data-of-a-destroyed-binary",
-            [](Session& session, Stream& s) {
-                Stream destroy;
-                encodeDestroy(destroy, binaryId);
-                require(session.send(destroy), "destroying a binary lost the context");
-                encodeGetData(s, binaryId);
-            },
-            true),
 
-        // vkDestroyPipelineBinaryKHR: a null handle is a no-op the command
-        // defines, and an id never made is refused.
-        {"destroy-the-null-handle", [](Session& session) {
-            Stream s;
-            encodeDestroy(s, 0);
-            require(session.send(s), "destroying the null handle lost the context");
-            require(importsABinary(session, binaryId),
-                "the context did not serve an import after destroying the null handle");
-        }},
-        contextLostRow("destroy-an-id-never-made",
-            [](Session&, Stream& s) { encodeDestroy(s, neverMadeId); }),
-
-        // vkReleaseCapturedPipelineDataKHR names a pipeline.
-        contextLostRow("release-the-null-pipeline",
-            [](Session&, Stream& s) { encodeRelease(s, 0); }),
-        contextLostRow("release-a-pipeline-never-made",
-            [](Session&, Stream& s) { encodeRelease(s, neverMadeId); }),
-
-        // A pipeline creation reads the binaries its create info names. The
-        // ray tracing form is the same code; this driver has no ray tracing,
-        // so there is no row for it.
+        // A pipeline creation reads the binaries its create info names, which
+        // no object can be.
         contextLostRow("compute-pipeline-from-the-null-binary",
-            [](Session&, Stream& s) { encodeComputePipelineFromBinary(s, 0); }),
+            [](Stream& s) { encodeComputePipelineFromBinary(s, 0); }),
+        contextLostRow("compute-pipeline-from-a-binary-never-made",
+            [](Stream& s) { encodeComputePipelineFromBinary(s, neverMadeId); }),
         contextLostRow("graphics-pipeline-from-the-null-binary",
-            [](Session&, Stream& s) { encodeGraphicsPipelineFromBinary(s, 0); }),
+            [](Stream& s) { encodeGraphicsPipelineFromBinary(s, 0); }),
+        contextLostRow("graphics-pipeline-from-a-binary-never-made",
+            [](Stream& s) { encodeGraphicsPipelineFromBinary(s, neverMadeId); }),
 
         // An object id the guest already used.
         {"create-again-under-a-used-id", [](Session& session) {
-            require(importsABinary(session, binaryId), "the setup import was refused");
+            Stream first;
+            encodeCreateCache(first, cacheId);
+            require(session.send(first), "a pipeline cache was refused");
             Stream s;
-            encodeCreate(s, {.keysAndData = true, .binary = binaryId});
-            const Answer answer = session.ask(s);
-            require(!answer.submitted, "a second object under a used id was accepted");
+            encodeCreateCache(s, cacheId);
+            require(!session.send(s), "a second object under a used id was accepted");
             // The session's end destroys the context with both objects in it.
         }, true},
 
@@ -518,6 +353,6 @@ const std::vector<Row>& rows()
 
 int main(int argc, char** argv)
 {
-    const row_runner::Suite suite {rows(), encodeSetup, "pipeline binary request"};
+    const row_runner::Suite suite {rows(), encodeSetup, "pipeline binary"};
     return row_runner::main(argc, argv, suite);
 }
