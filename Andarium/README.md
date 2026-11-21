@@ -313,7 +313,11 @@ control out.
   from 1.5 GiB, so a guest has at least that (`Limits.minimumMemoryMiB`,
   Andarium's own: the runtime still accepts less for Kernarium's guests); a
   stored smaller size is raised to it on load, and a device whose bound is
-  lower offers the bound alone. The runtime starts every size the picker
+  lower offers the bound alone, and a bound of zero (the loader's answer where
+  the process has no room for even the smallest window) offers none: the
+  System sheet leaves the memory row out, and the guest shows zero for that
+  run alone: a save keeps the size the person had, and a guest set up there
+  takes the default once there is room. The runtime starts every size the picker
   offers: a start whose memory the loader refuses
   (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
   that reason. `MemoryPolicy` holds those bounds, defaults
@@ -421,7 +425,12 @@ ready, on a thread of its own. Android's clean power-off releases the kernel's
 resources and guest RAM and returns to Home, which states the storage the data
 disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
-requires reopening Andarium.
+requires reopening Andarium. A run the host cannot give the guest's memory
+ends before the kernel starts with a result of its own
+(`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`), which the library's bare
+out-of-memory status is not, and the failure screen names the
+memory and says to lower it; the settings offer only sizes the process's
+address space holds, so this is a fallback.
 
 - **No Google apps, on purpose.** The boot screen of a new installation's
   first Android boot (a first start, and the retry of one that ended before

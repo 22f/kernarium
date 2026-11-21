@@ -76,8 +76,29 @@ never returns address space while the process lives: the first run reserves it
 once (`runtime::reserve_process_native_window`) and every later run takes the
 same window. Guest pages are mapped over it with `MAP_FIXED`, and releasing one
 hands its range back as a reservation, never with `munmap`, which would let an
-unrelated `mmap(NULL)` take the gap. Guest RAM that a host-service view still
-borrows stays mapped until the last view is released. The linear physical window
+unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run checks the
+geometry of the guest's size and reserves its window, and then the process's
+heap region (`runtime::reserve_process_heap`), whose first block the kernel's
+mapping takes; no host's placement of the window is displaced by the region,
+and a size with no layout reserves nothing. A start refused the region leaves the
+process's window as it was before the start: what the start reserved for itself
+(the window's growth, or a new window beside the held one) is given back and
+nothing else (`runtime::undo_process_window`), so that a smaller guest tried
+next has its room and the signed kernel text an earlier load kept stays where
+it is; a region once reserved stays. The run
+then maps its RAM beyond the first 64 MiB of the window (the kernel image and
+its reserved prefix, where a signed text alias of an earlier guest is
+permanent) as the kernel will and hands the range back to the reservation
+(`runtime::native_guest_memory_mappable`); a refusal of that trial keeps the
+window and the region. A host that will not reserve the window or the region or
+map the RAM ends the run with `-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the
+process's guest unspent, where the kernel would end the process, and marks the
+run of that handle (`emulator/src/start_refusal.hpp`): the same status also
+comes from a failed allocation of the library's own, so the Kernarium runtime
+returns its own result (`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`) for a
+marked run of its handle alone, whatever another handle's run did. Guest
+RAM that a host-service view still borrows stays mapped until the last view is
+released. The linear physical window
 is the anonymous RAM root; consumers borrow it or create non-copying Mach
 aliases, and disks stay file-backed.
 
@@ -186,9 +207,18 @@ signed 14 GiB envelope (`device_window_guest_memory_maximum_mib`, pinned by the
 layout tests against `runtime/native_kernel_layout.hpp`), and the host's RAM
 (at most 1 TiB, the largest limit a launch states) in a macOS window, which a
 Mac and an iOS application on a Mac use; where the host sets no limit `G_max`
-is C. A run starts exactly the sizes from 512 MiB through C in 64 MiB steps
-(`guest_memory_admitted`, with `process_guest_memory_ceiling_mib` for a
-process): the runtime refuses any other, and the loader answers both
+is C. In an iOS application signed without Extended Virtual Addressing C is also
+held to the address space the process has: the system gives such an application
+one run of a few GiB (its highest mappable address is under 512 GiB), and the
+guest's window (`native_window_bytes`) and the process's heap region (1 GiB,
+`memory/heap_region_size.hpp`, which has no other hole of that size there) must
+fit in it. The loader measures the run once at launch, for that process alone
+(`platform/apple/os_address_space.hpp`: the Simulator, a macOS process and an
+entitled application are not measured and are answered as they always were), and
+`address_space_guest_memory_mib` turns it into the largest RAM that fits, which
+bounds C, the offered sizes and the defaults alike. A run starts exactly the sizes from 512 MiB through C in
+64 MiB steps (`guest_memory_admitted`, with `process_guest_memory_ceiling_mib`
+for a process): the runtime refuses any other, and the loader answers both
 applications with the same two functions. The settings of Kernarium and
 Andarium offer no more than `G_max(v)` under a set that counts none of A,
 E_rest and S (`maximum_memory_set`), so every size they offer is one a run

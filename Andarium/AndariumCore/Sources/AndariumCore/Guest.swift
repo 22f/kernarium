@@ -157,10 +157,13 @@ public struct Guest: Equatable, Codable, Sendable {
 
     /// The memory this guest loads with: a stored size below the minimum or
     /// above the bound of its vCPU count, or off the steps, comes to the
-    /// nearest allowed size.
+    /// nearest allowed size. A stored size of zero is none (a guest set up
+    /// where no size could start, `TwoDiskStorage.save`) and takes the host's
+    /// default for its vCPU count; where no size can start, zero.
     public func memoryWithinBound(on host: HostDevice) -> Guest {
         var guest = self
-        guest.memoryMiB = host.memory.clamped(memoryMiB, vCPUs: cores)
+        let size = memoryMiB > 0 ? memoryMiB : host.memory.defaultMemoryMiB(vCPUs: cores)
+        guest.memoryMiB = host.memory.clamped(size, vCPUs: cores)
         return guest
     }
 }
