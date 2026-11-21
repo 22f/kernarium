@@ -8,17 +8,39 @@ import Foundation
 /// The words live in this package's catalog (`Resources/Localizable.xcstrings`)
 /// so Kernarium and Andarium say them the same way; the application's name is
 /// the one thing each passes in.
+///
+/// Each sentence is read in the person's language, as the bundle negotiates it.
+/// A test reads one in another by `language`, so that it does not depend on the
+/// machine's.
 public nonisolated enum UpdateWords {
+    /// The language the words are read in: the one the resource bundle
+    /// negotiates for this process, unless a test names another.
+    @TaskLocal static var language: Locale?
+
+    private static var locale: Locale {
+        language ?? Locale(identifier: Bundle.module.preferredLocalizations.first ?? "en")
+    }
+
+    private static var bundle: LocalizedStringResource.BundleDescription { .atURL(Bundle.module.bundleURL) }
+
     // MARK: The card
 
-    public static let cardTitle = String(localized: "Update available", bundle: .module)
-    public static let cardButton = String(localized: "Get Update", bundle: .module)
+    public static var cardTitle: String {
+        String(localized: LocalizedStringResource("Update available", locale: locale, bundle: bundle))
+    }
+
+    public static var cardButton: String {
+        String(localized: LocalizedStringResource("Get Update", locale: locale, bundle: bundle))
+    }
+
     /// What VoiceOver says for the card's close button.
-    public static let cardClose = String(localized: "Later", bundle: .module)
+    public static var cardClose: String {
+        String(localized: LocalizedStringResource("Later", locale: locale, bundle: bundle))
+    }
 
     /// "Andarium 1.1 (16) is out. You have 1.0 (15)."
     public static func cardLine(app: String, label: String, installed: String) -> String {
-        String(localized: "\(app) \(label) is out. You have \(installed).", bundle: .module)
+        String(localized: LocalizedStringResource("\(app) \(label) is out. You have \(installed).", locale: locale, bundle: bundle))
     }
 
     // MARK: The detail
@@ -27,52 +49,89 @@ public nonisolated enum UpdateWords {
     public static func detailTitle(app: String, version: String) -> String { "\(app) \(version)" }
 
     public static func versionLine(_ label: String) -> String {
-        String(localized: "Version \(label)", bundle: .module)
+        String(localized: LocalizedStringResource("Version \(label)", locale: locale, bundle: bundle))
     }
 
-    public static let released = String(localized: "Released", bundle: .module)
-    public static let size = String(localized: "Size", bundle: .module)
-    public static let requires = String(localized: "Requires", bundle: .module)
-    public static let installed = String(localized: "Installed", bundle: .module)
+    public static var released: String {
+        String(localized: LocalizedStringResource("Released", locale: locale, bundle: bundle))
+    }
+
+    public static var size: String { String(localized: LocalizedStringResource("Size", locale: locale, bundle: bundle)) }
+
+    public static var requires: String {
+        String(localized: LocalizedStringResource("Requires", locale: locale, bundle: bundle))
+    }
+
+    public static var installed: String {
+        String(localized: LocalizedStringResource("Installed", locale: locale, bundle: bundle))
+    }
 
     public static func requiresValue(_ os: UpdateOSVersion) -> String {
-        String(localized: "iOS \(os.description) or later", bundle: .module)
+        String(localized: LocalizedStringResource("iOS \(os.description) or later", locale: locale, bundle: bundle))
     }
 
     /// The tool's name is a proper name and stays as it is in every language.
     public static func updateWith(_ tool: UpdateTool) -> String {
-        String(localized: "Update with \(tool.name)", bundle: .module)
+        String(localized: LocalizedStringResource("Update with \(tool.name)", locale: locale, bundle: bundle))
     }
 
-    public static let downloadAppFile = String(localized: "Download App File", bundle: .module)
-    public static let openReleasePage = String(localized: "Open Release Page", bundle: .module)
+    public static var downloadAppFile: String {
+        String(localized: LocalizedStringResource("Download App File", locale: locale, bundle: bundle))
+    }
 
-    /// What the same Apple ID keeps and another one does not.
-    public static let sameAppleID = String(
-        localized: "Install it with the same Apple ID and the same app you installed this one with: it replaces this version and your virtual machine stays. With another Apple ID it becomes a second app, without your virtual machine.",
-        bundle: .module)
+    public static var openReleasePage: String {
+        String(localized: LocalizedStringResource("Open Release Page", locale: locale, bundle: bundle))
+    }
 
-    public static let stepsTitle = String(localized: "How to update", bundle: .module)
-    public static let steps = [
-        String(localized: "Download the app file.", bundle: .module),
-        String(localized: "Install it with the app or computer you installed this one with.", bundle: .module),
-        String(localized: "Sign it with the same Apple ID.", bundle: .module),
-    ]
+    /// What the detail says under its rows: the same Apple ID and the same app
+    /// replace this version and keep the virtual machine.
+    public static var sameAppleID: String {
+        String(
+            localized: LocalizedStringResource(
+                "Install it with the same Apple ID and the same app as before, so it replaces this version and keeps your virtual machine.",
+                locale: locale, bundle: bundle))
+    }
 
-    public static let skip = String(localized: "Skip This Version", bundle: .module)
-    public static let done = String(localized: "Done", bundle: .module)
+    public static var stepsTitle: String {
+        String(localized: LocalizedStringResource("How to update", locale: locale, bundle: bundle))
+    }
+
+    public static var steps: [String] {
+        [
+            String(localized: LocalizedStringResource("Download the app file.", locale: locale, bundle: bundle)),
+            String(
+                localized: LocalizedStringResource(
+                    "Install it with the same app or computer and the same Apple ID as before.", locale: locale,
+                    bundle: bundle)),
+        ]
+    }
+
+    public static var skip: String {
+        String(localized: LocalizedStringResource("Skip This Version", locale: locale, bundle: bundle))
+    }
+
+    public static var done: String { String(localized: LocalizedStringResource("Done", locale: locale, bundle: bundle)) }
 
     // MARK: Info
 
-    public static let infoHeader = String(localized: "Updates", bundle: .module)
-    public static let infoRow = String(localized: "Update Available", bundle: .module)
-    public static let checkSwitch = String(localized: "Check for Updates", bundle: .module)
+    public static var infoHeader: String {
+        String(localized: LocalizedStringResource("Updates", locale: locale, bundle: bundle))
+    }
+
+    public static var infoRow: String {
+        String(localized: LocalizedStringResource("Update Available", locale: locale, bundle: bundle))
+    }
+
+    public static var checkSwitch: String {
+        String(localized: LocalizedStringResource("Check for Updates", locale: locale, bundle: bundle))
+    }
 
     /// What the check reads and sends, under its switch.
-    public static func checkFootnote(app: String) -> String {
+    public static var checkFootnote: String {
         String(
-            localized: "Once a day, \(app) reads one small file from where its updates are published, to see whether a newer version exists. It sends no account, identifier or usage data.",
-            bundle: .module)
+            localized: LocalizedStringResource(
+                "Checks once a day for a newer version. Sends no account, identifier or usage data.", locale: locale,
+                bundle: bundle))
     }
 
     // MARK: Formats

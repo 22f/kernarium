@@ -52,7 +52,7 @@ private struct UpdateLinkRow: View {
 /// What a card or an Info row opens: the version, its day, its size, the iOS
 /// it needs and the one installed, from the file; then the ways to update the
 /// device has, and Skip This Version. The sentences are the application's own.
-/// With no sideloading app to hand the file to, three steps take their place.
+/// With no sideloading app to hand the file to, two steps take their place.
 struct UpdateDetailList<Glyph: View>: View {
     @Environment(\.dismiss) private var dismiss
     let notice: UpdateNotice
@@ -60,8 +60,19 @@ struct UpdateDetailList<Glyph: View>: View {
     @ViewBuilder let glyph: () -> Glyph
 
     var body: some View {
-        if let offer = notice.offer {
-            list(offer)
+        Group {
+            if let offer = notice.offer {
+                list(offer)
+            } else {
+                // A read that ends while the detail is open can withdraw the
+                // version; there is nothing left to show, so the detail
+                // closes (a sheet's Done goes with it).
+                Color.clear
+            }
+        }
+        .onAppear { if notice.offer == nil { dismiss() } }
+        .onChange(of: notice.offer == nil) { _, withdrawn in
+            if withdrawn { dismiss() }
         }
     }
 
@@ -189,7 +200,7 @@ struct UpdateInfoSection<Glyph: View>: View {
         } header: {
             Text(UpdateWords.infoHeader)
         } footer: {
-            Text(UpdateWords.checkFootnote(app: notice.app.name))
+            Text(UpdateWords.checkFootnote)
         }
     }
 }

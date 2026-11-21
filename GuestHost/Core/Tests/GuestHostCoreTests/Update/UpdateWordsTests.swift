@@ -28,32 +28,73 @@ struct UpdateWordsTests {
         for language in Self.languages { #expect(found.contains(language), "\(language) is not in \(found.sorted())") }
     }
 
+    /// The sentences as English reads them, whatever the machine's language is.
+    private static func inEnglish<Result>(_ read: () throws -> Result) rethrows -> Result {
+        try UpdateWords.$language.withValue(Locale(identifier: "en"), operation: read)
+    }
+
     @Test func englishIsTheKeyAndThePlainWords() {
-        #expect(UpdateWords.cardTitle == "Update available")
-        #expect(UpdateWords.cardButton == "Get Update")
-        #expect(UpdateWords.cardClose == "Later")
-        #expect(UpdateWords.cardLine(app: "Andarium", label: "1.1 (16)", installed: "1.0 (15)")
-            == "Andarium 1.1 (16) is out. You have 1.0 (15).")
-        #expect(UpdateWords.detailTitle(app: "Andarium", version: "1.1") == "Andarium 1.1")
-        #expect(UpdateWords.versionLine("1.1 (16)") == "Version 1.1 (16)")
-        #expect(UpdateWords.requiresValue(UpdateOSVersion(major: 26)) == "iOS 26.0 or later")
-        #expect(UpdateWords.updateWith(.altStore) == "Update with AltStore")
-        #expect(UpdateWords.updateWith(.sideStore) == "Update with SideStore")
-        #expect(UpdateWords.downloadAppFile == "Download App File")
-        #expect(UpdateWords.openReleasePage == "Open Release Page")
-        #expect(UpdateWords.skip == "Skip This Version")
-        #expect(UpdateWords.infoHeader == "Updates")
-        #expect(UpdateWords.infoRow == "Update Available")
-        #expect(UpdateWords.checkSwitch == "Check for Updates")
-        #expect(UpdateWords.checkFootnote(app: "Andarium").hasPrefix("Once a day, Andarium reads one small file"))
-        #expect(UpdateWords.steps.count == 3)
+        Self.inEnglish {
+            #expect(UpdateWords.cardTitle == "Update available")
+            #expect(UpdateWords.cardButton == "Get Update")
+            #expect(UpdateWords.cardClose == "Later")
+            #expect(UpdateWords.cardLine(app: "Andarium", label: "1.1 (16)", installed: "1.0 (15)")
+                == "Andarium 1.1 (16) is out. You have 1.0 (15).")
+            #expect(UpdateWords.detailTitle(app: "Andarium", version: "1.1") == "Andarium 1.1")
+            #expect(UpdateWords.versionLine("1.1 (16)") == "Version 1.1 (16)")
+            #expect(UpdateWords.released == "Released")
+            #expect(UpdateWords.size == "Size")
+            #expect(UpdateWords.requires == "Requires")
+            #expect(UpdateWords.installed == "Installed")
+            #expect(UpdateWords.requiresValue(UpdateOSVersion(major: 26)) == "iOS 26.0 or later")
+            #expect(UpdateWords.updateWith(.altStore) == "Update with AltStore")
+            #expect(UpdateWords.updateWith(.sideStore) == "Update with SideStore")
+            #expect(UpdateWords.downloadAppFile == "Download App File")
+            #expect(UpdateWords.openReleasePage == "Open Release Page")
+            #expect(UpdateWords.sameAppleID
+                == "Install it with the same Apple ID and the same app as before, so it replaces this version and keeps your virtual machine.")
+            #expect(UpdateWords.stepsTitle == "How to update")
+            #expect(UpdateWords.steps == [
+                "Download the app file.", "Install it with the same app or computer and the same Apple ID as before.",
+            ])
+            #expect(UpdateWords.skip == "Skip This Version")
+            #expect(UpdateWords.done == "Done")
+            #expect(UpdateWords.infoHeader == "Updates")
+            #expect(UpdateWords.infoRow == "Update Available")
+            #expect(UpdateWords.checkSwitch == "Check for Updates")
+            #expect(UpdateWords.checkFootnote
+                == "Checks once a day for a newer version. Sends no account, identifier or usage data.")
+        }
     }
 
     @Test func everyAppSentenceSaysVirtualMachineNeverGuest() {
-        #expect(UpdateWords.sameAppleID.contains("virtual machine"))
-        for sentence in [UpdateWords.sameAppleID, UpdateWords.checkFootnote(app: "Andarium")] {
-            #expect(!sentence.lowercased().contains("guest"))
+        Self.inEnglish {
+            #expect(UpdateWords.sameAppleID.contains("virtual machine"))
+            for sentence in [UpdateWords.sameAppleID, UpdateWords.checkFootnote] + UpdateWords.steps {
+                #expect(!sentence.lowercased().contains("guest"))
+            }
         }
+    }
+
+    /// With no language named, the words are the ones the bundle negotiates for
+    /// the process: one of the four the application ships.
+    @Test func theMachinesOwnLanguageIsOneOfTheFour() {
+        let shipped = ["en", "ja", "zh-Hans", "zh-Hant"].map { language in
+            UpdateWords.$language.withValue(Locale(identifier: language)) { UpdateWords.cardTitle }
+        }
+        #expect(Set(shipped).count == 4)
+        #expect(shipped.contains(UpdateWords.cardTitle), "\(UpdateWords.cardTitle)")
+    }
+
+    @Test(arguments: UpdateWordsTests.languages)
+    func aNamedLanguageIsTheOneTheWordsAreReadIn(language: String) {
+        let named = UpdateWords.$language.withValue(Locale(identifier: language)) {
+            (UpdateWords.cardTitle, UpdateWords.sameAppleID, UpdateWords.steps, UpdateWords.checkFootnote)
+        }
+        #expect(named.0 == text("Update available", in: language))
+        #expect(named.1 == text("Install it with the same Apple ID and the same app as before, so it replaces this version and keeps your virtual machine.", in: language))
+        #expect(named.2.count == 2)
+        #expect(named.3 == text("Checks once a day for a newer version. Sends no account, identifier or usage data.", in: language))
     }
 
     @Test func theSizeIsWrittenAsEverySizeIs() {
@@ -65,7 +106,12 @@ struct UpdateWordsTests {
 
     @Test(arguments: UpdateWordsTests.languages)
     func theCardIsTranslated(language: String) {
-        for word in ["Update available", "Get Update", "Later", "Skip This Version", "Done", "Updates", "Update Available", "Check for Updates"] as [String.LocalizationValue] {
+        for word in [
+            "Update available", "Get Update", "Later", "Skip This Version", "Done", "Updates", "Update Available",
+            "Check for Updates", "Install it with the same Apple ID and the same app as before, so it replaces this version and keeps your virtual machine.",
+            "Install it with the same app or computer and the same Apple ID as before.",
+            "Checks once a day for a newer version. Sends no account, identifier or usage data.",
+        ] as [String.LocalizationValue] {
             let english = text(word, in: "en")
             #expect(text(word, in: language) != english, "\(language) says \"\(english)\" in English")
         }
@@ -89,10 +135,7 @@ struct UpdateWordsTests {
         #expect(ios.contains("iOS 26.0"))
         let tool = text("Update with \("AltStore")", in: language)
         #expect(tool.contains("AltStore"))
-        let footnote = text(
-            "Once a day, \("Andarium") reads one small file from where its updates are published, to see whether a newer version exists. It sends no account, identifier or usage data.",
-            in: language)
-        #expect(footnote.contains("Andarium"))
+        let footnote = text("Checks once a day for a newer version. Sends no account, identifier or usage data.", in: language)
         #expect(!footnote.contains("%@"))
         // Chinese and Japanese write no space between their text and a Latin name or a number.
         for sentence in [version, ios, tool, footnote] {

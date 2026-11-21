@@ -275,6 +275,10 @@ struct AppUpdateNoticeTests {
         let spoken = labels(in: controller.view)
         #expect(!spoken.contains { $0.contains("AltStore") || $0.contains("SideStore") }, "\(spoken)")
         #expect(spoken.contains { $0.contains("Download the app file.") }, "\(spoken)")
+        #expect(
+            spoken.contains { $0.contains("Install it with the same app or computer and the same Apple ID as before.") },
+            "\(spoken)")
+        #expect(!spoken.contains { $0.contains("Sign it with") }, "the steps are two: \(spoken)")
         #expect(opener.urls.isEmpty)
     }
 
@@ -307,6 +311,24 @@ struct AppUpdateNoticeTests {
         #expect(!notice.showsCard)
     }
 
+    @Test func aVersionWithdrawnWhileTheDetailIsOpenClosesIt() async throws {
+        let notice = AppUpdateFixture.notice()
+        let model = model(notice: notice)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = hostHome(model, in: lease)
+        try await drawn(["Update available"], in: controller.view)
+        model.sheet = .appUpdate
+        #expect(await eventually { controller.presentedViewController?.view.window != nil })
+        let sheet = try #require(controller.presentedViewController)
+        try await drawn(["Skip This Version", "Done"], in: sheet.view)
+        // What a read that ends now would do to a version the file has dropped.
+        notice.setChecks(false)
+        #expect(notice.offer == nil)
+        #expect(await eventually { controller.presentedViewController == nil }, "the sheet, with its Done, is gone")
+        #expect(model.sheet == nil)
+    }
+
     @Test func aBuildAlreadyPutAwayHasNoSkipRow() async throws {
         let model = model(notice: AppUpdateFixture.notice(store: .init(hidden: 16)))
         let lease = try await HostWindow.take()
@@ -325,7 +347,10 @@ struct AppUpdateNoticeTests {
         let controller = hostInfo(model, in: lease)
         try await drawn(["Update Available", "Check for Updates"], in: controller.view)
         let spoken = labels(in: controller.view)
-        #expect(spoken.contains { $0.contains("Once a day, Andarium reads one small file") }, "\(spoken)")
+        #expect(
+            spoken.contains {
+                $0.contains("Checks once a day for a newer version. Sends no account, identifier or usage data.")
+            }, "\(spoken)")
         let row = try #require(element("Update Available", in: controller.view))
         #expect(row.accessibilityLabel?.contains("Update Available") == true && row.accessibilityLabel?.contains("1.1\u{A0}(16)") == true)
         // The Updates section follows the app's own header and precedes System info.

@@ -339,8 +339,8 @@ positions, buttons, scroll), and the latch of a run's host stop with the
 guest's write-back before it (`RunStop`, `StopSettle`), and the update notice
 (the version file's reading and every rule that decides what is offered or
 opened, the one request against an in-process network with no real address,
-the daily schedule and the record, the model's moments, and its words in each
-language), and
+the daily schedule and the record (a record edited on the device included), the
+model's moments, and its words in each language), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the hardware input's plug policy and pointer
 capture, the snapshot store on APFS clones of sparse
@@ -447,7 +447,8 @@ the example value of its own, `FOLLOW_X_HANDLE=example_handle`
 ([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
 `AppUpdateNoticeTests` host Home, the detail and Info with the update notice on a
 fake store: the card first among the notices, the tools offered only when installed
-and none on a Mac or Vision Pro, Skip This Version, the switch, the launch's gates
+and none on a Mac or Vision Pro, Skip This Version, a detail that closes when its
+version is withdrawn, the switch, the launch's gates
 and the keys the build writes (`UPDATE_SOURCE_HOST=example.com` and
 `UPDATE_SOURCE_PATH=/source.json`: [Update notice](../Andarium/README.md#update-notice));
 `UpdateNoticeUITests` of `AndariumPreviewUITests` tap the same screens in the
