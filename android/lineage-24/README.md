@@ -521,7 +521,7 @@ connection waits and no session runs, it sets the control property that starts
 `kernarium_sms_wake`, a script in a second domain that asks the activity manager
 to start the service as the system user (again after 20 s if no session attached,
 and after a session that ended early with a connection still waiting, after a wait
-that doubles from half a second to 2 s for the first sixteen such sessions, which
+that doubles from half a second to 2 s for the first seventeen such sessions, which
 outlast the host's 30 s window, and to 20 s after them); the service then takes the listening
 socket from the holder over its unix socket (`/dev/socket/kernarium_sms`), which
 only the service's domain may connect to; init makes and binds that socket and
@@ -539,7 +539,12 @@ connection waits that nothing has accepted (or while a session runs, and that se
 one waiting), the kernel closes the connection: a request the host had already written gets no
 answer, a connection that arrives while no holder listens is refused and asked for again within
 the host's deadline, and the host's retry for the lost request is answered as uncertain and never
-handed over. That message is lost and never delivered twice. `HostFrame.java` and
+handed over. That message is lost and never delivered twice. While the service keeps ending
+early with a request waiting (the holder runs, and the request stays queued), the request may get
+no answer within the host's 30 s: when the fault clears in about the last 2.5 s of it, or when the
+request arrives after the 2 s phase (the next try is up to 20 s later). The app then reports it as
+not confirmed, and the next send asks again with the same identifier, so that request is neither
+lost nor handed over twice. `HostFrame.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
 frame. A message is a sender (a number or a short name), a text of limited
 length and an identifier the host chooses for it. `Message.java` and
