@@ -602,23 +602,28 @@ def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str =
         "ctl.sigstop_on$  u:object_r:ctl_sigstop_prop:s0\n"
         "ctl.sigstop_off$  u:object_r:ctl_sigstop_prop:s0\n"
         "ctl.start$  u:object_r:ctl_start_prop:s0\n"
-        "ctl.stop$  u:object_r:ctl_stop_prop:s0\n"
+        # A type field that reads exact is not the match operation (the third field): the entry is a prefix, and
+        # labels every longer name, which the product's keys include.
+        "ctl.stop$  u:object_r:ctl_stop_prop:s0 string exact\n"
         "ctl.restart$  u:object_r:ctl_restart_prop:s0\n"
     )
     if variant != "wake-property-generic":
         property_context += ("ctl.start$kernarium_sms_wake  u:object_r:ctl_kernarium_sms_wake_prop:s0"
-                             + ("" if variant == "wake-property-not-exact" else " exact") + "\n")
+                             + {"wake-property-not-exact": "", "wake-property-exact-in-a-later-field": " string exact"
+                                }.get(variant or "", " exact") + "\n")
     locked, generic = "u:object_r:ctl_kernarium_sms_locked_prop:s0", "u:object_r:ctl_default_prop:s0"
     for service in ("kernarium_sms_listener", "kernarium_sms_wake"):
         if variant != "control-legacy-unlabelled":
             as_generic = variant == "control-legacy-generic" or (
                 variant == "control-legacy-waker-generic" and service == "kernarium_sms_wake")
             property_context += (f"ctl.{service}  {generic if as_generic else locked}"
-                                 + ("" if variant == "control-legacy-not-exact" else " exact") + "\n")
+                                 + {"control-legacy-not-exact": "", "control-legacy-exact-in-a-later-field": " string exact"
+                                    }.get(variant or "", " exact") + "\n")
         if variant != "control-oneshot-unlabelled":
             for state in ("on", "off"):
                 property_context += (f"ctl.oneshot_{state}${service}  "
-                                     f"{generic if variant == 'control-oneshot-generic' else locked} exact\n")
+                                     f"{generic if variant == 'control-oneshot-generic' else locked}"
+                                     f"{' string exact' if variant == 'control-oneshot-exact-in-a-later-field' else ' exact'}\n")
     labels = {
         "holder-unlabelled": "kernarium_sms_listener_exec", "waker-unlabelled": "kernarium_sms_wake_exec",
         "socket-unlabelled": "kernarium_sms_socket",
@@ -6763,6 +6768,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "labelled ctl_default_prop: only \\['init', 'kernarium_sms_listener'\\] may"),
             ("sms-wake-property-not-exact", {"sms_policy_variant": "wake-property-not-exact"},
              "no exact entry for ctl.start\\$kernarium_sms_wake"),
+            ("sms-wake-property-exact-in-a-later-field", {"sms_policy_variant": "wake-property-exact-in-a-later-field"},
+             "no exact entry for ctl.start\\$kernarium_sms_wake"),
+            ("sms-control-legacy-exact-in-a-later-field",
+             {"sms_policy_variant": "control-legacy-exact-in-a-later-field"},
+             "no exact entry for ctl.kernarium_sms_listener"),
+            ("sms-control-oneshot-exact-in-a-later-field",
+             {"sms_policy_variant": "control-oneshot-exact-in-a-later-field"},
+             "no exact entry for ctl.oneshot_on\\$kernarium_sms_listener"),
             ("sms-control-oneshot-unlabelled", {"sms_policy_variant": "control-oneshot-unlabelled"},
              "no exact entry for ctl.oneshot_on\\$kernarium_sms_listener"),
             ("sms-control-oneshot-generic", {"sms_policy_variant": "control-oneshot-generic"},

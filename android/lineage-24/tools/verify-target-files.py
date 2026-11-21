@@ -5380,6 +5380,13 @@ def check_shell_density_property_audit(policies: tuple[bytes, ...]) -> None:
     )
 
 
+def property_match_is_exact(fields: list[str]) -> bool:
+    """Whether the fields of a property contexts line make it an exact entry. Android reads the match operation
+    from the third field alone (libpropertyinfoserializer, ParsePropertyInfoLine): a later field that reads exact
+    is a type, and the entry is a prefix."""
+    return len(fields) >= 3 and fields[2] == "exact"
+
+
 def property_label(name: str, contexts: list[str]) -> str | None:
     """The SELinux type that property_contexts give a property: an exact entry, else the longest prefix."""
     best: tuple[int, str] | None = None
@@ -5390,7 +5397,7 @@ def property_label(name: str, contexts: list[str]) -> str | None:
         label = fields[1].split(":")[2] if fields[1].count(":") >= 3 else None
         if label is None:
             continue
-        if "exact" in fields[2:]:
+        if property_match_is_exact(fields):
             if fields[0] == name:
                 return label
         elif name.startswith(fields[0]) and (best is None or len(fields[0]) > best[0]):
@@ -5402,7 +5409,7 @@ def property_entry_is_exact(name: str, contexts: list[str]) -> bool:
     """Whether the property contexts have an entry for exactly this name that is marked exact: without the marker
     the entry is a prefix and labels every longer name too."""
     return any(
-        len(fields) >= 3 and fields[0] == name and "exact" in fields[2:]
+        fields[:1] == [name] and property_match_is_exact(fields)
         for fields in (line.split() for line in contexts if not line.lstrip().startswith("#"))
     )
 
