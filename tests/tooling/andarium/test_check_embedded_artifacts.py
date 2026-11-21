@@ -498,6 +498,15 @@ class CheckTests(unittest.TestCase):
                         app=False, decision=RELEASE_ID)
                     self.fails(result, "the packaged system" if packaged else "the staged system", message)
 
+    def test_an_installed_reference_whose_guest_is_a_link_is_not_read(self) -> None:
+        # The installed accepted release is the reference of every digest the checks
+        # compare. Its layout is not read through a linked guest/, whatever it holds.
+        installed = self.fixture.install()
+        (installed / "guest").rename(installed / "guest.real")
+        (installed / "guest").symlink_to("guest.real")
+        self.fails(self.fixture.run(app=False, decision=RELEASE_ID),
+                   "the installed accepted release has a guest/ that is not a real directory")
+
     def test_a_system_directory_that_is_a_link_is_refused_staged_and_packaged(self) -> None:
         # A package is moved, and what a link points to stays behind: the system
         # directory and what the checks read below it must be real directories, and
@@ -1069,6 +1078,18 @@ class AotTests(unittest.TestCase):
         result = self.run_check()
         self.passes(result)
         self.assertIn("the packaged AOT blob is made from the packaged system", result.stdout)
+
+    def test_a_packaged_system_that_is_a_link_is_not_read_for_the_blob(self) -> None:
+        # The Android check reports the link, and the blob's release is not then read
+        # through it: the packaged system is what the blob would be compared with.
+        self.accept("yes")
+        self.package_aot()
+        system = self.fixture.app / "andarium-system"
+        system.rename(system.with_name("andarium-system.real"))
+        system.symlink_to("andarium-system.real")
+        result = self.run_check()
+        self.fails(result, "the packaged AOT blob cannot be compared with the packaged system")
+        self.assertNotIn("is made from the packaged system", result.stdout)
 
     def test_a_packaged_system_that_states_no_release_cannot_be_compared(self) -> None:
         self.accept("yes")

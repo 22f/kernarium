@@ -309,18 +309,22 @@ def descriptor_of(repo, relative):
 # ---------------------------------------------------------------- Android --
 
 
-def real_system_directories(report, system, label):
-    """The system directory and the two directories the checks read below it
-    (guest/ and boot/) are real directories, checked before any is read: a link
-    stays behind when the package is moved, whatever it holds now. A directory that
-    is missing is left to the check that reads it."""
-    for relative in ("", "guest", "boot"):
-        path = system / relative
-        try:
-            mode = os.lstat(path).st_mode
-        except OSError:
-            continue
-        if not stat.S_ISDIR(mode):
+def is_link_or_file(path):
+    """The path exists and is not a real directory: a link (whatever it points to)
+    or a file. A missing path is not."""
+    try:
+        return not stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def real_directories(report, base, label, relatives):
+    """Each of `relatives` below `base` ("" is `base` itself) is a real directory,
+    checked before any is read: a link stays behind when a tree is moved, whatever it
+    holds now. A directory that is missing is left to the check that reads it."""
+    for relative in relatives:
+        path = base / relative
+        if is_link_or_file(path):
             report.error(
                 f"{label} {f'has a {relative}/ that is' if relative else 'is'} not a real directory",
                 f"{path} is a link or a file: stage the accepted release with "
@@ -328,6 +332,12 @@ def real_system_directories(report, system, label):
             )
             return False
     return True
+
+
+def real_system_directories(report, system, label):
+    """The system directory and the two directories the checks read below it
+    (guest/ and boot/) are real directories."""
+    return real_directories(report, system, label, ("", "guest", "boot"))
 
 
 def check_staged_system(report, release_id, descriptor, system, label):
@@ -420,6 +430,8 @@ def installed_release(repo, report, descriptor, release_id):
         report.error("the accepted descriptor names no release directory", ANDROID_DESCRIPTOR)
         return None
     installed = repo / INSTALLED_RELEASES / name
+    if not real_directories(report, installed, "the installed accepted release", ("guest",)):
+        return None
     try:
         manifest = read_json(installed / MANIFEST)
         digest = read_json(installed / LAYOUT)["system_disk"]["sha256"]
@@ -681,6 +693,14 @@ def check_blob_release(report, app, blob):
     ID, manifest digest and system partition digest) is the release it boots,
     which the staged system's own files state. Anything else would archive an
     application that silently runs without it."""
+    if any(is_link_or_file(app / PACKAGED_SYSTEM / relative) for relative in ("", "guest")):
+        # A link to the packaged system is reported by the Android check, which
+        # runs only with --android-release; nothing is read through it here.
+        report.error(
+            "the packaged AOT blob cannot be compared with the packaged system",
+            f"{app / PACKAGED_SYSTEM} or its guest/ is a link or a file, not a real directory",
+        )
+        return
     try:
         _, _, named = release_artifact.parse_blob_header(blob[:release_artifact.BLOB_HEADER_BYTES])
         booted = release_artifact.release_identity(app / PACKAGED_SYSTEM)
