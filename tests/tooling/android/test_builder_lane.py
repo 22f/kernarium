@@ -569,12 +569,23 @@ def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str =
         ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms_listener))\n"
     # The platform labels the user's directories with the user's categories, which the service's level lacks: only a
     # domain that is trusted against the multi-level constraints can search them. The daemons search none.
+    # The platform's compiler writes a membership as a chain of set expressions that name one another, which the
+    # service's trust is here (the expression that the attribute names comes first, as the compiler's order allows).
+    def trusted_through_expressions(domain: str, number: int) -> str:
+        return (f"(typeattributeset mlstrustedsubject (and (base_typeattr_{number} ) (not (surfaceflinger ))))\n"
+                f"(typeattributeset base_typeattr_{number} (and (base_typeattr_{number + 1} ) (not (surfaceflinger ))))\n"
+                f"(typeattributeset base_typeattr_{number + 1} ({domain}))\n")
+
     if variant != "no-mls-trust":
-        ext += "(typeattributeset mlstrustedsubject (kernarium_sms))\n"
+        ext += trusted_through_expressions("kernarium_sms", 501)
     if variant == "holder-mls-trusted":
         ext += "(typeattributeset mlstrustedsubject (kernarium_sms_listener))\n"
     if variant == "waker-mls-trusted":
         ext += "(typeattributeset mlstrustedsubject (kernarium_sms_wake))\n"
+    if variant == "holder-mls-trusted-through-expressions":
+        ext += trusted_through_expressions("kernarium_sms_listener", 503)
+    if variant == "waker-mls-trusted-through-expressions":
+        ext += trusted_through_expressions("kernarium_sms_wake", 505)
     if variant != "no-core-domain":
         ext += "(typeattributeset coredomain (kernarium_sms))\n"
     if variant != "holder-not-a-core-domain":
@@ -6677,6 +6688,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("sms-holder-mls-trusted", {"sms_policy_variant": "holder-mls-trusted"},
              "kernarium_sms_listener is in mlstrustedsubject: it searches no directory of the user"),
             ("sms-waker-mls-trusted", {"sms_policy_variant": "waker-mls-trusted"},
+             "kernarium_sms_wake is in mlstrustedsubject: it searches no directory of the user"),
+            ("sms-holder-mls-trusted-through-expressions", {"sms_policy_variant": "holder-mls-trusted-through-expressions"},
+             "kernarium_sms_listener is in mlstrustedsubject: it searches no directory of the user"),
+            ("sms-waker-mls-trusted-through-expressions", {"sms_policy_variant": "waker-mls-trusted-through-expressions"},
              "kernarium_sms_wake is in mlstrustedsubject: it searches no directory of the user"),
             ("sms-package-selects-no-domain", {"sms_policy_variant": "no-seapp-line"},
              "seapp_contexts do not select kernarium_sms"),

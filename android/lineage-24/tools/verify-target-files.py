@@ -6073,8 +6073,7 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
 
     # An application domain inherits the platform's grants to every one of them, among them vsock rights: the
     # holder and the waker are plain daemons.
-    if "appdomain" in cil_types_and_attributes(policies, SMS_LISTENER) \
-            or "appdomain" in cil_types_and_attributes(policies, SMS_WAKE):
+    if SMS_LISTENER in sets.members("appdomain") or SMS_WAKE in sets.members("appdomain"):
         fail(f"{SMS_LISTENER} and {SMS_WAKE} are plain daemons: neither is an application domain")
 
     exact = CilSets(policies, exact=True)
@@ -6124,28 +6123,27 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         if rule.source == SMS_WAKE.encode():
             fail(f"{SMS_WAKE} holds {sorted(rule.permissions)} on a vsock socket: the waker touches none")
 
-    attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
-        if attribute not in attributes:
+        if SMS_DOMAIN not in sets.members(attribute):
             fail(f"{SMS_DOMAIN} is not in {attribute}")
     # The platform gives a user's directories that user's categories at run time, in the preparation of the user's
     # storage (/data/user_de/<id> from the second boot of a data image on, /data/data from the first), not through its
     # file contexts. The multi-level constraint on searching a directory that is not application data lets a subject
     # through only when its level dominates, or it is mlstrustedsubject. The service has no categories and every
     # system application is trusted: without it the service cannot reach its record at all.
-    if "mlstrustedsubject" not in attributes:
+    trusted = sets.members("mlstrustedsubject")
+    if SMS_DOMAIN not in trusted:
         fail(f"{SMS_DOMAIN} is not in mlstrustedsubject: the directories of the user it runs for carry categories "
              "that its level lacks, so it could not search the path of its record")
     for daemon in (SMS_LISTENER, SMS_WAKE):
-        if "mlstrustedsubject" in cil_types_and_attributes(policies, daemon):
+        if daemon in trusted:
             fail(f"{daemon} is in mlstrustedsubject: it searches no directory of the user")
-    holder_attributes = cil_types_and_attributes(policies, SMS_LISTENER)
     for attribute in ("coredomain", "unconstrained_vsock_violators"):
-        if attribute not in holder_attributes:
+        if SMS_LISTENER not in sets.members(attribute):
             fail(f"{SMS_LISTENER} is not in {attribute}")
-    if "coredomain" not in cil_types_and_attributes(policies, SMS_WAKE):
+    if SMS_WAKE not in sets.members("coredomain"):
         fail(f"{SMS_WAKE} is not in coredomain")
-    if "unconstrained_vsock_violators" in cil_types_and_attributes(policies, SMS_WAKE):
+    if SMS_WAKE in sets.members("unconstrained_vsock_violators"):
         fail(f"{SMS_WAKE} is in unconstrained_vsock_violators: the waker touches no vsock socket")
     found: set[str] = set()
     for rule in rules_of("service_manager"):
