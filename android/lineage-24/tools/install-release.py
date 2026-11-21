@@ -85,7 +85,13 @@ def main() -> None:
             saved_stdout = os.dup(1)
             os.dup2(2, 1)
             try:
-                verify_release(source, android_root, acceptance_path=descriptor)
+                # A candidate is accepted for the tree it was built from: its Magisk
+                # release is the one the tracked pin names. An accepted release that
+                # is installed later is history, bound by its descriptor instead.
+                verify_release(
+                    source, android_root, acceptance_path=descriptor,
+                    pin=android_root / "metadata/magisk.env",
+                )
             finally:
                 sys.stdout.flush()
                 os.dup2(saved_stdout, 1)

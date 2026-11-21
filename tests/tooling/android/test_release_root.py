@@ -15,9 +15,11 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -26,12 +28,43 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 from pathlib import Path
 
 import magisk_fixture
 from magisk_fixture import TEST_VERSION, Fixture, make_apk_bytes, patch_script
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+# What the semantic checks read of a release besides the disk: the fixed partitions
+# of the fstab and well-formed XML; the rest of a payload is a byte.
+PAYLOADS = {
+    "support/fstab.uml": "".join(
+        f"/dev/block/by-name/{name} /{name} ext4 ro 0 0\n"
+        for name in ("system", "system_ext", "product", "vendor", "odm", "metadata", "userdata", "misc")
+    ).encode(),
+    "support/vintf-manifest.xml": b"<manifest/>",
+    "support/compatibility-matrix.xml": b"<compatibility-matrix/>",
+    "provenance/source-repo-manifest.xml": b"<manifest/>",
+}
+
+
+@contextlib.contextmanager
+def tools_stubbed():
+    """The semantic checks that need a kernel, a disk and their tools do nothing: what
+    runs is the rest of verify_semantics, the root check among it."""
+    with mock.patch.object(release_common, "run_checked", lambda *a, **k: None), \
+            mock.patch.object(release_common, "verify_kernel_config", lambda *a, **k: None), \
+            mock.patch.object(release_common, "verify_disk_boot_payloads", lambda *a, **k: None):
+        yield
+
+
+def load_installer():
+    spec = importlib.util.spec_from_file_location("install_release_tool", TOOLS / "install-release.py")
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    return installer
 
 
 class ReleaseFixture:
@@ -51,7 +84,7 @@ class ReleaseFixture:
         for relative in release_common.PAYLOAD_SPECS:
             path = self.release / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"x")
+            path.write_bytes(PAYLOADS.get(relative, b"x"))
         shutil.copyfile(self.synthetic.disk, self.release / "guest/system.img")
         shutil.copyfile(self.synthetic.layout, self.release / "guest/partition-layout.json")
         self.root = root
@@ -128,13 +161,98 @@ class ReleaseFixture:
         self.acceptance = self.directory / "accepted-release.env"
         self.acceptance.write_text(release_common.render_acceptance(manifest))
 
-    def verify(self) -> dict:
-        return release_common.verify_release(
-            self.release, self.android_root, acceptance_path=self.acceptance, semantic=False)
+    def verify(self, *, semantic: bool = False) -> dict:
+        with tools_stubbed() if semantic else contextlib.nullcontext():
+            return release_common.verify_release(
+                self.release, self.android_root, acceptance_path=self.acceptance, semantic=semantic)
 
     def refuses(self, test: unittest.TestCase, pattern: str) -> None:
         with test.assertRaisesRegex(SystemExit, pattern):
             self.verify()
+
+
+class AcceptanceTests(unittest.TestCase):
+    """The accepted descriptor binds the reviewed root record, and the accepting side
+    checks it: the pin where a candidate is accepted, the descriptor where it is installed."""
+
+    def setUp(self) -> None:
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def make(self, **options) -> ReleaseFixture:
+        return ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)), **options)
+
+    def test_the_descriptor_binds_the_root_record_including_its_absence(self) -> None:
+        rooted, plain = self.make(), self.make(root=False)
+        key = release_common.ROOT_RECORD_KEY
+        self.assertRegex(release_common.parse_env(rooted.acceptance)[key], "^[0-9a-f]{64}$")
+        self.assertEqual(release_common.parse_env(plain.acceptance)[key], "none")
+        self.assertNotEqual(rooted.acceptance.read_text(), plain.acceptance.read_text())
+        # Nothing else of the two descriptors differs: one release identity, two roots.
+        keep = lambda fixture: [  # noqa: E731
+            line for line in fixture.acceptance.read_text().splitlines()
+            if not line.startswith(key) and "INPUT_TREES" not in line]
+        self.assertEqual(keep(rooted), keep(plain))
+
+    def test_a_release_installs_only_against_the_descriptor_that_binds_its_root(self) -> None:
+        rooted, plain = self.make(), self.make(root=False)
+        for release, descriptor, label in (
+            (rooted, plain, "a rooted release against the rootless descriptor"),
+            (plain, rooted, "a rootless release against the rooted descriptor"),
+        ):
+            with self.subTest(label), self.assertRaisesRegex(
+                    SystemExit, "differs from accepted descriptor field LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256"):
+                release_common.verify_release(
+                    release.release, release.android_root,
+                    acceptance_path=descriptor.acceptance, semantic=False)
+        # Another root that is consistent with its own record is not the reviewed one.
+        other = self.make()
+        apk = other.release / f"root/Magisk-{TEST_VERSION}.apk"
+        payload = apk.read_bytes() + b"\0"
+        apk.write_bytes(payload)
+        manifest = copy.deepcopy(other.manifest)
+        manifest["root"]["apk"].update(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload))
+        other.write(manifest)
+        other.verify()
+        with self.assertRaisesRegex(SystemExit, "LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256"):
+            release_common.verify_release(
+                other.release, other.android_root, acceptance_path=rooted.acceptance, semantic=False)
+
+    def test_a_schema_7_release_keeps_its_descriptor(self) -> None:
+        older = self.make(root=False, schema=7)
+        text = older.acceptance.read_text()
+        self.assertEqual(set(release_common.parse_env(older.acceptance)), release_common.INPUT_TREES_ACCEPTANCE_KEYS)
+        self.assertNotIn("ROOT", text)
+        self.assertTrue(text.splitlines()[-1].startswith("LINEAGE24_ACCEPTED_INPUT_TREES='"))
+
+    def run_installer(self, *arguments: str) -> None:
+        installer = load_installer()
+        with tools_stubbed(), mock.patch.object(sys, "argv", ["install-release.py", *arguments]):
+            installer.main()
+
+    def test_printing_the_acceptance_of_a_candidate_checks_the_tracked_pin(self) -> None:
+        # The candidate's APK is the synthetic one, not the pin the tracked tree names.
+        rooted = self.make()
+        with self.assertRaisesRegex(SystemExit, "not the pinned Magisk version"):
+            self.run_installer("--source", str(rooted.release), "--print-acceptance")
+        # A release without root files has no pin to check.
+        plain = self.make(root=False)
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.run_installer("--source", str(plain.release), "--print-acceptance")
+        self.assertEqual(printed.getvalue(), plain.acceptance.read_text())
+
+    def test_installing_an_accepted_release_is_checked_against_its_descriptor_alone(self) -> None:
+        # History is not held to a pin that has moved: the descriptor binds the record.
+        rooted = self.make()
+        destination = self.directory / "releases"
+        self.run_installer(
+            "--source", str(rooted.release), "--destination-root", str(destination),
+            "--acceptance", str(rooted.acceptance))
+        self.assertTrue((destination / rooted.name / "root/init_boot-magisk.img").is_file())
+        other = self.make(root=False)
+        with self.assertRaisesRegex(SystemExit, "LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256"):
+            self.run_installer(
+                "--source", str(rooted.release), "--destination-root", str(self.directory / "again"),
+                "--acceptance", str(other.acceptance))
 
 
 class ManifestTests(unittest.TestCase):
@@ -492,9 +610,7 @@ class ProducerTests(unittest.TestCase):
                 self.release / "guest/partition-layout.json", self.fixture.pin)
 
     def test_the_installer_copies_the_root_files_it_verified(self) -> None:
-        spec = importlib.util.spec_from_file_location("install_release_tool", TOOLS / "install-release.py")
-        installer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(installer)
+        installer = load_installer()
         manifest = json.loads((self.release / "release-manifest.json").read_text())
         staging = self.directory / "staging"
         staging.mkdir()

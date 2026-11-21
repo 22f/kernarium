@@ -218,6 +218,7 @@ INVENTORY_KEYS = {"path", "role", "format", "size"}
 # The accepted descriptor's keys in file order, each with whether its value is
 # written as a bare number. A schema 7 descriptor adds the input trees.
 INPUT_TREES_KEY = "LINEAGE24_ACCEPTED_INPUT_TREES"
+ROOT_RECORD_KEY = "LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256"
 ACCEPTANCE_FIELDS = (
     ("LINEAGE24_ACCEPTED_SCHEMA", True),
     ("LINEAGE24_ACCEPTED_RELEASE_ID", False),
@@ -236,7 +237,10 @@ ACCEPTANCE_FIELDS = (
     ("LINEAGE24_ACCEPTED_ABI_FINGERPRINT", False),
 )
 LEGACY_ACCEPTANCE_KEYS = {key for key, _ in ACCEPTANCE_FIELDS}
-ACCEPTANCE_KEYS = LEGACY_ACCEPTANCE_KEYS | {INPUT_TREES_KEY}
+INPUT_TREES_ACCEPTANCE_KEYS = LEGACY_ACCEPTANCE_KEYS | {INPUT_TREES_KEY}
+# A schema 8 descriptor also binds the root record the reviewer saw, or its absence,
+# so a release with root files and one without never share a descriptor.
+ACCEPTANCE_KEYS = INPUT_TREES_ACCEPTANCE_KEYS | {ROOT_RECORD_KEY}
 
 
 def payload_specs(manifest: dict) -> dict[str, tuple[str, str]]:
@@ -595,6 +599,8 @@ def acceptance_values(manifest: dict) -> dict[str, str]:
     }
     if manifest["schema_version"] >= INPUT_TREES_SCHEMA:
         values[INPUT_TREES_KEY] = release_inputs.render_trees(manifest["outer"]["input_trees"])
+    if manifest["schema_version"] >= ROOT_SCHEMA:
+        values[ROOT_RECORD_KEY] = magisk_image.root_record_digest(manifest.get(ROOT_KEY))
     return values
 
 
@@ -607,8 +613,9 @@ def render_acceptance(manifest: dict) -> str:
     ]
     for key, numeric in ACCEPTANCE_FIELDS:
         lines.append(f"{key}={values[key]}" if numeric else f"{key}='{values[key]}'")
-    if INPUT_TREES_KEY in values:
-        lines.append(f"{INPUT_TREES_KEY}='{values[INPUT_TREES_KEY]}'")
+    for key in (INPUT_TREES_KEY, ROOT_RECORD_KEY):
+        if key in values:
+            lines.append(f"{key}='{values[key]}'")
     return "\n".join(lines) + "\n"
 
 
@@ -854,6 +861,7 @@ def verify_semantics(
     manifest: dict,
     *,
     enforce_tracked_policy: bool,
+    pin: Path | None = None,
 ) -> None:
     run_checked([
         str(android_root / "build/verify-kernel-elf.py"),
@@ -930,7 +938,7 @@ def verify_semantics(
     verify_root(
         release_root,
         manifest,
-        pin=android_root / "metadata/magisk.env" if enforce_tracked_policy else None,
+        pin=android_root / "metadata/magisk.env" if enforce_tracked_policy else pin,
     )
 
     schema = android_root / "support/release/release-manifest.schema.json"
@@ -944,6 +952,7 @@ def verify_release(
     *,
     acceptance_path: Path | None = None,
     semantic: bool = True,
+    pin: Path | None = None,
 ) -> dict:
     if not release_root.is_absolute():
         fail("release source must be an absolute local path")
@@ -969,5 +978,6 @@ def verify_release(
             android_root,
             manifest,
             enforce_tracked_policy=acceptance_path is None,
+            pin=pin,
         )
     return manifest

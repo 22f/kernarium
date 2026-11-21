@@ -1477,10 +1477,13 @@ passes to `assemble-image.sh`, and `--without-root`, so a release cannot lose it
 root files by omission. `install-release.py` verifies and installs the files with
 the rest, and the verification refuses by name: a `root/` that is partial or
 holds files the record does not declare, a file that is not the recorded one, a
-patched image that is not its own disk's `init_boot` plus what Magisk adds, and,
-for a release the tracked tree builds, an APK that is not the pinned one. The
-accepted descriptor needs no field of its own: the pin is a release input, so
-`LINEAGE24_ACCEPTED_INPUT_TREES` records it. `tools/verify-magisk-boot.py
+patched image that is not its own disk's `init_boot` plus what Magisk adds.
+A schema 8 accepted descriptor binds the root record
+(`LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256`: a digest of it, or `none` for a release
+without root files), so a release with root files and one without never share a
+descriptor. `install-release.py --print-acceptance` also checks the candidate's
+Magisk release against the tracked pin; an accepted release installed later is
+history and is checked against its descriptor alone. `tools/verify-magisk-boot.py
 --release DIR` runs the same check on a release directory.
 `Andarium/scripts/stage-system-image.py` runs it on the release it stages and
 stages the files with the rest, and `scripts/check-embedded-artifacts.py` ties

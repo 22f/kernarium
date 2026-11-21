@@ -125,6 +125,7 @@ def main() -> None:
         LEGACY_SCHEMA_VERSION,
         INPUT_TREES_SCHEMA,
         ACCEPTANCE_KEYS,
+        INPUT_TREES_ACCEPTANCE_KEYS,
         LEGACY_ACCEPTANCE_KEYS,
         INPUT_TREES_KEY,
         acceptance_values,
@@ -156,7 +157,9 @@ def main() -> None:
     # embedded-artifact check then refuses it as unverifiable until a release of
     # schema 7 or later is accepted.
     tracked_schema = tracked_acceptance.get("LINEAGE24_ACCEPTED_SCHEMA")
-    if tracked_schema in (str(INPUT_TREES_SCHEMA), str(SCHEMA_VERSION)):
+    if tracked_schema == str(INPUT_TREES_SCHEMA):
+        tracked_keys = INPUT_TREES_ACCEPTANCE_KEYS
+    elif tracked_schema == str(SCHEMA_VERSION):
         tracked_keys = ACCEPTANCE_KEYS
     elif tracked_schema == str(LEGACY_SCHEMA_VERSION):
         tracked_keys = LEGACY_ACCEPTANCE_KEYS
@@ -308,7 +311,7 @@ def main() -> None:
                     "tools = sys.argv[1]\n"
                     "sys.path.insert(0, tools)\n"
                     "import release_common\n"
-                    "def verified(release_root, android_root, *, acceptance_path=None, semantic=True):\n"
+                    "def verified(release_root, android_root, *, acceptance_path=None, semantic=True, pin=None):\n"
                     "    print('verified in process')\n"
                     "    subprocess.run(['echo', 'verified in a tool'], check=True)\n"
                     "    return {}\n"

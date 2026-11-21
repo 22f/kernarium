@@ -260,6 +260,16 @@ def validate_root_record(value: object, error: Error) -> dict:
     return record
 
 
+def root_record_digest(record: dict | None) -> str:
+    """What an accepted-release descriptor keeps of a release's root record: the
+    SHA-256 of its canonical JSON, or `none` for a release without root files."""
+    if record is None:
+        return "none"
+    return sha256_bytes(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    )
+
+
 def root_payload_specs(record: dict) -> dict[str, tuple[str, str]]:
     """The inventory role and format of each root file, by path."""
     return {
