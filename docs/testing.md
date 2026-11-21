@@ -1517,7 +1517,8 @@ status), the service's domain and that it is not persistent, every denial of the
 every vsock process of an unreviewed domain; neither the shell nor an application can create
 a vsock socket, and the shell cannot connect to the handoff socket (N5). The record
 mode checks that no message is handed over twice across a crash, a clean power-off and
-restart on the same data image, and fifty kills that each end a process (`am force-stop`),
+restart on the same data image (where the service must still read the label of its record
+directory and be denied no directory), and fifty kills that each end a process (`am force-stop`),
 and each restart is the next request's. `--mode proof` (a userdebug build)
 writes a pending record and traces the order of the record's writes; the variants
 without Messaging or without an SMS provider, the adbd topic and the kernel

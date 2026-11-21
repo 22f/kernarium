@@ -982,6 +982,8 @@ class Simulation:
         self.starts = 0
         self.rows: list[tuple[int, str, str]] = []
         self.step_log: list[str] = []
+        self.record_label = "u:object_r:kernarium_sms_data_file:s0"   # what the service reads on its record directory
+        self.record_lines: list[str] = []   # the service's line about its record, one per session of this boot
         self.commands: list[str] = []
         self.keep_running = False       # the service never ends (a persistent one)
         self.hand_over_copies = 1       # step lines and inbox rows a message gets
@@ -1003,6 +1005,9 @@ class Simulation:
             self.counter += 1
             self.pid = self.counter
             self.starts += 1
+            self.record_lines.append(
+                f"{1731758405 + self.clock.now:.3f}  {self.pid}  {self.pid + 8} I AndariumSms: record in "
+                f"{runner.RECORD_DIRECTORY}, labelled {self.record_label}\n")
         self.last = self.clock.now
 
 
@@ -1048,7 +1053,10 @@ class SimulatedGuest:
         return self.sim.holder
 
     def logcat(self, *arguments: str) -> str:
-        return self.sim.holder_log if f"-s {runner.HOLDER_TAG}:I" in " ".join(arguments) else ""
+        text = " ".join(arguments)
+        if f"-s {runner.TAG}:I" in text:
+            return "".join(self.sim.record_lines)
+        return self.sim.holder_log if f"-s {runner.HOLDER_TAG}:I" in text else ""
 
     def service_log(self) -> str:
         return "".join(self.sim.step_log)
@@ -1591,6 +1599,7 @@ class OnDemandTests(unittest.TestCase):
             simulation.commands.append("restart the instance")
             simulation.pid = None  # the new boot has no service process, and its log has no line of the old session
             simulation.step_log.clear()
+            simulation.record_lines.clear()
 
         with mock.patch.object(runner, "restart_instance", restart):
             self.run_row(runner.row_i2, simulation, RecordingHost)
@@ -1605,7 +1614,8 @@ class OnDemandTests(unittest.TestCase):
                 return super().reply(payload)
 
         forgetful = Simulation()
-        with mock.patch.object(runner, "restart_instance", lambda run: forgetful.step_log.clear()):
+        with mock.patch.object(runner, "restart_instance",
+                               lambda run: (forgetful.step_log.clear(), forgetful.record_lines.clear())):
             with self.assertRaisesRegex(runner.Failure, "the retry after the restart was answered .*unsettled"):
                 self.run_row(runner.row_i2, forgetful, Forgetful)
         # The holder's start is judged on the new console.
@@ -1614,10 +1624,30 @@ class OnDemandTests(unittest.TestCase):
         def restart_without_a_console_line(run: "runner.Run") -> None:
             nothing.console = ""
             nothing.step_log.clear()
+            nothing.record_lines.clear()
 
         with mock.patch.object(runner, "restart_instance", restart_without_a_console_line):
             with self.assertRaisesRegex(runner.Failure, "no init line that started the holder"):
                 self.run_row(runner.row_i2, nothing, RecordingHost)
+        # The finding of the second boot (BOOT2): the service could not search the path of its record, read no label
+        # ("labelled null") and was denied directories. Each is reported on its own.
+        blind = Simulation()
+
+        def restart_blind(run: "runner.Run") -> None:
+            blind.pid = None
+            blind.step_log.clear()
+            blind.record_lines.clear()
+            blind.record_label = "null"
+
+        with mock.patch.object(runner, "restart_instance", restart_blind):
+            with self.assertRaisesRegex(runner.Failure, "after the restart, the record's place is .*labelled null"):
+                self.run_row(runner.row_i2, blind, RecordingHost)
+        denied = ("1731758405.000  1  1 I auditd  : type=1400 audit(0.0:130): avc:  denied  { search } for  "
+                  "comm=\"d.kernarium.sms\" name=\"0\" dev=\"ubdb3\" ino=390146 scontext=u:r:kernarium_sms:s0 "
+                  "tcontext=u:object_r:system_data_file:s0:c512,c768 tclass=dir permissive=0")
+        self.assertEqual(len(runner.storage_denial_problems(denied)), 1)
+        self.assertEqual(runner.storage_denial_problems(denied.replace("tclass=dir", "tclass=service_manager")), [])
+        self.assertEqual(runner.storage_denial_problems(denied.replace("kernarium_sms:s0", "system_app:s0")), [])
 
     def test_i9_ends_the_holder_and_wants_the_port_back(self) -> None:
         simulation = Simulation()

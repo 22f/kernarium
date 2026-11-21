@@ -41,8 +41,8 @@ service ends 30 s after the last message. The runner has four modes, each one bo
   service running and with it disabled and stopped) needs the adbd topic of the AOSP patches, and G7 (the
   development launch) is not a gate: each is opt-in.
 - ``record`` (a release image): the record's rows over this channel. I1 a process ended between sends, I2 a
-  clean power-off and a start on the same data image (the holder starts, nothing runs at idle, a retry and a
-  new message are answered), I4 fifty rounds, each of which ends a process with ``am force-stop`` at a varying
+  clean power-off and a start on the same data image (the holder starts, nothing runs at idle, the service reads
+  its record directory's label and is denied no directory, a retry and a new message are answered), I4 fifty rounds, each of which ends a process with ``am force-stop`` at a varying
   time and counts only when the process was seen to die, I5 the answers' bytes, I7 an image with
   no SMS provider, I8 payloads that are not version 2.
 - ``proof`` (a userdebug proof build: it needs ``su``): I3 a pending record left by an ended process, I6 the
@@ -465,6 +465,20 @@ def denial_problems(full_log: str) -> list[str]:
     return list(dict.fromkeys(problems))
 
 
+def storage_denial_problems(full_log: str) -> list[str]:
+    """SELinux denied the service a directory. The platform gives a user's directories the user's categories (the
+    data directory from the first boot, ``/data/user_de/<id>`` from the second), which the multi-level constraint
+    holds against a subject that neither carries them nor is trusted: the service must be trusted, or it cannot
+    search the path of its record."""
+    problems = []
+    for line in full_log.splitlines():
+        found = AVC_DENIAL.search(line)
+        if found is not None and found.group(1) == "kernarium_sms" and found.group(2) == "dir":
+            problems.append("SELinux denied the service a directory of the user's storage (the service must be "
+                            "trusted against the categories of the user's directories)")
+    return list(dict.fromkeys(problems))
+
+
 def service_log_problems(service_log: str, full_log: str, pids: str | set[str]) -> list[str]:
     """What the service's log, and the whole log of the service's processes, must not show after the host's
     messages were delivered: the service says it serves the host's requests, and no line of it says a connection
@@ -863,7 +877,8 @@ ROWS = (
     Row("H9", "channel", "the kernel's vsock configuration", (), "kernel-config"),
     Row("I1", "record", "a process ended between sends"),
     Row("I2", "record", "a clean power-off and a start on the same data image between sends: the holder starts, "
-        "nothing runs at idle, a retry and a new message are answered, and the process ends after the window"),
+        "nothing runs at idle, the service reads its record directory's label and is denied no directory, a retry "
+        "and a new message are answered, and the process ends after the window"),
     Row("I4", "record", "never twice under kills"),
     Row("I5", "record", "the answers' bytes"),
     Row("I7", "record", "an image with no SMS provider", (), "no-provider"),
@@ -878,7 +893,8 @@ ROWS = (
 ELSEWHERE = (
     ("R1-R24, U1-U5", "the JVM rows of tests/tooling/android (android17-sms-service)"),
     ("U6", "the target-files verifier and its fixtures (lineage24-target-files-fixtures): who may create, bind or "
-           "listen on vsock, who may set the control keys of the holder and the waker, and what they hold in effect"),
+           "listen on vsock, who may set the control keys of the holder and the waker, what they hold in effect, and "
+           "that the service alone is trusted against the categories of the user's directories"),
     ("B1", "the unsigned image build of the change, on each variant built"),
     ("H12", "the commit message of the adbd topic (route p0011) names the function and the listen forms; G2e tries each"),
 )
@@ -1784,8 +1800,9 @@ def restart_instance(run: Run) -> None:
 def row_i2(run: Run) -> None:
     """The record across a clean power-off and a start on the same data image. One message is answered; after the
     restart init has started the holder again (the console's line) and the service has no process; the retry of the
-    message is answered as handed over earlier, one new message is handed over once, and the process is gone one
-    window after it. Every part is judged, and each problem is reported."""
+    message is answered as handed over earlier, one new message is handed over once, the service reads the label of
+    its record directory and is denied no directory (the platform relabels the user's directories at the second boot),
+    and the process is gone one window after it. Every part is judged, and each problem is reported."""
     sender, text = run.sender_and_text("i2")
     identifier = new_identifier()
     run.expect(run.first(identifier, sender, text), "handed-over", identifier, "1")
@@ -1806,6 +1823,12 @@ def row_i2(run: Run) -> None:
     steps += step_lines(guest.service_log(), identifier)
     if steps != 1:
         problems.append(f"{steps} step-1 lines for the first message across the restart, expected 1")
+    # The second boot is where the platform relabels the user's directories with the user's categories: the service
+    # must still read its record directory's label (the first line of this boot's log) and be denied no directory.
+    problem = check_record_location(guest.logcat("-b", "all", "-v", "epoch", "-s", f"{TAG}:I"))
+    if problem:
+        problems.append(f"after the restart, {problem}")
+    problems += storage_denial_problems(guest.logcat("-b", "all"))
     problem = idle_timing_problem(run.wait_gone())
     if problem:
         problems.append(problem)
