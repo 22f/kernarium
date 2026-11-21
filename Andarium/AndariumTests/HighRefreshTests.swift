@@ -68,6 +68,27 @@ struct HighRefreshTests {
         #expect(model.highRefreshOffered)
     }
 
+    /// An iPad app on a Vision Pro (or on a Mac) has no 120 Hz display that the
+    /// link can pace: the offer follows the played host, whatever the screen
+    /// and the idiom say.
+    @Test func theSettingIsNotOfferedToAnIPadAppOnAVisionProOrAMac() {
+        let model = model()
+        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        model.playedPadAppHost = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
+        #expect(model.highRefreshOffered, "an iPhone or iPad was refused")
+        for (name, host) in [
+            ("a Vision Pro", IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: true)),
+            ("a Mac", IPadAppHost(isiOSAppOnMac: true, isiOSAppOnVision: false)),
+        ] {
+            model.playedPadAppHost = host
+            #expect(!model.highRefreshOffered, "\(name) was offered 120 Hz")
+            model.setHighRefresh(true)
+            #expect(!model.asksForHighRefresh, "\(name) asked for the 120 Hz display")
+        }
+        model.playedPadAppHost = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
+        #expect(model.highRefreshOffered && model.asksForHighRefresh)
+    }
+
     @Test func theSettingIsNotOfferedOnAMac() {
         let model = model()
         model.host.idiom = .mac

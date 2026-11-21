@@ -71,7 +71,7 @@ public enum HighRefresh {
     private static let maximumEdidDimension = 4095
     private static let maximumDetailedTimingClock = 65535
 
-    /// Whether Settings offers the setting: the screen shows at least 100
+    /// Whether Home offers the setting: the screen shows at least 100
     /// frames a second, the host is an iPhone or an iPad (not an iPad app on a
     /// Mac or on a Vision Pro), and the display the next start gives the guest
     /// is a size whose 120 Hz mode the EDID can state. A size not known yet

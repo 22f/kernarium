@@ -5,7 +5,7 @@ import Testing
 
 @testable import AndariumCore
 
-/// Settings' "120 Hz": what the setting is offered on, what the boot asks for,
+/// Home's "120 Hz": what the setting is offered on, what the boot asks for,
 /// how the choice is kept, and what the thermal session tells Android while
 /// Low Power Mode holds the 120 Hz display to 60.
 struct HighRefreshPolicyTests {
