@@ -109,6 +109,9 @@ the views; a build with no address has no configuration and no notice.
   Release build carries it; any other build, a fork's included, has no address,
   no read and no notice. `Config/Update.xcconfig` is the shared mapping an
   application's own xcconfig includes.
+- `Sources/UpdateNoticeViews.swift` is the detail and Info's Updates section,
+  drawn with a mark and the accent the application supplies. The application
+  adds the card, which sits among its own notices.
 
 ## Signing
 
