@@ -877,7 +877,8 @@ ROWS = (
 # What no run of this runner covers, and where it is covered.
 ELSEWHERE = (
     ("R1-R24, U1-U5", "the JVM rows of tests/tooling/android (android17-sms-service)"),
-    ("U6", "the target-files verifier and its fixtures (lineage24-target-files-fixtures)"),
+    ("U6", "the target-files verifier and its fixtures (lineage24-target-files-fixtures): who may create, bind or "
+           "listen on vsock, who may set the control keys of the holder and the waker, and what they hold in effect"),
     ("B1", "the unsigned image build of the change, on each variant built"),
     ("H12", "the commit message of the adbd topic (route p0011) names the function and the listen forms; G2e tries each"),
 )
