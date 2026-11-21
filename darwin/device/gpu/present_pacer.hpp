@@ -76,15 +76,16 @@ struct DrawableBudget {
  * early or late by up to 4 ms. With 4 ms of jitter in the interval between its
  * frames it can change it up to five times in 12 s, at rates from about 60.05
  * to 62.05. A guest just over a threshold whose frames bunch at the boundaries
- * of the second can stay on the old step for about 5 s. The time that a rule
- * states (the second of a rise, the 2 s of a fall and of the dwell) is a time
- * plus one tick: the link decides at its ticks. A link that wakes asks for the fastest rate the
- * ceiling allows, because the first frame of a burst should wait for the
- * shortest tick, and settles after the first second of the burst. The ceiling
- * is the fastest rate the host allows now (the mode's rate, or less when the
- * screen can show less, as in Low Power Mode): the 120 step is for a ceiling
- * of 100 or more, and any lower ceiling, a mode of 47 Hz included, is the 60
- * step.
+ * of the second can stay on the old step for several seconds, longer the more
+ * frames bunch (at 63 frames a second about 4 s with three bunched, 5 s with
+ * four, 7 s with six). The time that a rule states (the second of a rise, the
+ * 2 s of a fall and of the dwell) is a time plus one tick: the link decides at
+ * its ticks. A link that wakes asks for the fastest rate the ceiling allows,
+ * because the first frame of a burst should wait for the shortest tick, and
+ * settles after the first second of the burst. The ceiling is the fastest rate
+ * the host allows now (the mode's rate, or less when the screen can show less,
+ * as in Low Power Mode): the 120 step is for a ceiling of 100 or more, and any
+ * lower ceiling, a mode of 47 Hz included, is the 60 step.
  *
  * The link sleeps when no frame has been waiting for idleSeconds. Whoever
  * runs the link keeps one flag, whether a frame waits, and clears it when a

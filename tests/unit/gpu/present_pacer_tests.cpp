@@ -999,7 +999,10 @@ void aLinkMadeAgainDoesNotRenewTheDrawableWait()
  * the waits of a frame add up to under the budget and one wait of the layer (a
  * second): 1.9 s. A frame whose requests wait 0.375, 0.375, 0.95 and 0.95 s
  * stops after the third, at 1.7 s; a draw that asked twice, as the draws did
- * (the view's render pass, then its drawable), cost 2.66 s in four waits. */
+ * (the view's render pass, then its drawable), cost 2.66 s in four waits.
+ * The row drives the test's own model of the draw, so it checks the pacer's
+ * side (the budget it hands out and the waits it records); that a draw asks
+ * once is `metal_presentation.mm`'s, which no unit test runs. */
 void theWaitsOfAFrameAreBoundedWhateverEachRequestWaits()
 {
     Link link;
@@ -1060,7 +1063,10 @@ void aFrameThatArrivesBetweenTheFlagAndTheClaimHasOneBudget()
 }
 
 /* A drawable that is in hand is drawn into, whatever the request cost: the
- * request whose wait spent the budget may be the one that returns it. */
+ * request whose wait spent the budget may be the one that returns it. The row
+ * drives the test's own model of the draw, so it checks the pacer's side (the
+ * link sleeps and wakes right after a shown draw); that the draw does not
+ * discard the drawable is `metal_presentation.mm`'s, which no unit test runs. */
 void aDrawableThatArrivesAfterALongWaitShowsTheFrame()
 {
     Link link;
