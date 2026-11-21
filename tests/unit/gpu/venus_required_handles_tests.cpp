@@ -30,9 +30,10 @@
 //  - a pipeline create info that chains a library which is the null handle.
 //  - a host image copy (VK_EXT_host_image_copy) of a region the image cannot
 //    hold: a mip level, an aspect, an offset or an extent the image does not
-//    have (a chroma plane's extent is the subsampled one), or a row length or
-//    image height that makes the region reach further than the memory the
-//    guest sent. The command is answered with VK_ERROR_OUT_OF_HOST_MEMORY, as
+//    have (a chroma plane's extent is the subsampled one, rounded down as the
+//    driver lays it out, also in an image no application may create), or a
+//    row length or image height that makes the region reach further than the
+//    memory the guest sent. The command is answered with VK_ERROR_OUT_OF_HOST_MEMORY, as
 //    for a region whose footprint cannot be stated, and the renderer logs
 //    why. So is an image-to-image copy whose source or destination does not
 //    hold its region, whose sides differ in layers or bytes, or that names the
@@ -147,7 +148,9 @@ void encodeBuffer(Stream& s, std::uint64_t id, bool reply = false)
 
 void encodeImage(Stream& s, std::uint64_t id, VkFormat format = VK_FORMAT_R8G8B8A8_UNORM,
     std::uint32_t mipLevels = 1, VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-    std::uint32_t arrayLayers = 1, VkImageType type = VK_IMAGE_TYPE_2D, std::uint32_t depth = 1)
+    std::uint32_t arrayLayers = 1, VkImageType type = VK_IMAGE_TYPE_2D, std::uint32_t depth = 1,
+    std::uint32_t width = extent, std::uint32_t height = extent,
+    VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL)
 {
     s.command(createImage);
     s.u64(deviceId);
@@ -155,9 +158,9 @@ void encodeImage(Stream& s, std::uint64_t id, VkFormat format = VK_FORMAT_R8G8B8
     s.u32(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO); s.u64(0);
     s.u32(0);
     s.u32(type); s.u32(format);
-    s.u32(extent); s.u32(extent); s.u32(depth);
+    s.u32(width); s.u32(height); s.u32(depth);
     s.u32(mipLevels); s.u32(arrayLayers);
-    s.u32(VK_SAMPLE_COUNT_1_BIT); s.u32(VK_IMAGE_TILING_OPTIMAL);
+    s.u32(VK_SAMPLE_COUNT_1_BIT); s.u32(tiling);
     s.u32(usage);
     s.u32(VK_SHARING_MODE_EXCLUSIVE); s.u32(0); s.arraySize(0);
     s.u32(VK_IMAGE_LAYOUT_UNDEFINED);
@@ -507,14 +510,17 @@ void encodeCopyMemoryToImage(Stream& s, std::uint64_t image, const HostCopy& cop
     encodeSubresourceRegion(s, copy);
 }
 
-// What the image of a host copy is: the format, the mip levels, the layers,
-// and the aspects its layout transition names.
+// What the image of a host copy is: the format, the size, the mip levels, the
+// layers, the tiling, and the aspects its layout transition names.
 struct HostImage {
     VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
     VkImageType type = VK_IMAGE_TYPE_2D;
+    std::uint32_t width = extent;
+    std::uint32_t height = extent;
     std::uint32_t depth = 1;
     std::uint32_t mipLevels = 1;
     std::uint32_t arrayLayers = 1;
+    VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL;
     VkImageAspectFlags aspects = VK_IMAGE_ASPECT_COLOR_BIT;
 };
 
@@ -525,7 +531,7 @@ void encodeHostCopyImage(Stream& s, std::uint64_t image, std::uint64_t memory,
 {
     encodeImage(s, image, spec.format, spec.mipLevels,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT, spec.arrayLayers,
-        spec.type, spec.depth);
+        spec.type, spec.depth, spec.width, spec.height, spec.tiling);
     s.command(getImageMemoryRequirements);
     s.u64(deviceId); s.u64(image); s.ptr(true);
     encodeMemory(s, memory);
@@ -543,6 +549,7 @@ void encodeHostCopyImage(Stream& s, std::uint64_t image, std::uint64_t memory,
 // image, each with its own mip level, layers and offset.
 struct ImageCopy {
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkImageAspectFlags dstAspect = 0;           // the destination's aspect; 0 means `aspect`
     std::uint64_t src = imageId;
     std::uint64_t dst = otherImageId;
     std::uint32_t srcMip = 0, dstMip = 0;
@@ -564,7 +571,8 @@ void encodeCopyImageToImage(Stream& s, const ImageCopy& copy)
     s.u32(VK_STRUCTURE_TYPE_IMAGE_COPY_2); s.ptr(false);
     s.u32(copy.aspect); s.u32(copy.srcMip); s.u32(0); s.u32(copy.srcLayers);
     s.u32(static_cast<std::uint32_t>(copy.srcOffset)); s.u32(0); s.u32(0);
-    s.u32(copy.aspect); s.u32(copy.dstMip); s.u32(0); s.u32(copy.dstLayers);
+    s.u32(copy.dstAspect ? copy.dstAspect : copy.aspect); s.u32(copy.dstMip); s.u32(0);
+    s.u32(copy.dstLayers);
     s.u32(static_cast<std::uint32_t>(copy.dstOffset)); s.u32(0); s.u32(0);
     s.u32(copy.width); s.u32(copy.height); s.u32(1);
 }
@@ -700,6 +708,14 @@ Row hostCopyRefusedRow(const char* name, const char* line, bool toMemory, const 
     }, false, setupOf(hostCopyDevice())};
 }
 
+// Whether the reply of a copy out of an image carries the bytes that went in,
+// as many of them as the reply keeps after its 16 header bytes.
+bool replyHoldsBytes(const Answer& answer, const std::vector<std::uint8_t>& data)
+{
+    const std::size_t kept = std::min(data.size(), answer.raw.size() - 16);
+    return std::equal(data.begin(), data.begin() + kept, answer.raw.begin() + 16);
+}
+
 // A region the image holds is copied into it and read back, and the renderer
 // refuses nothing. `compare` asks for the bytes to come back as they went in,
 // which holds for what the driver stores as given.
@@ -716,7 +732,7 @@ Row hostCopyServedRow(const char* name, const HostImage& image, const HostCopy& 
         const Answer answer = session.ask(read);
         requireAnswered(answer, copyImageToMemory, VK_SUCCESS, "a copy out of the image was refused");
         if (compare) {
-            require(std::equal(data.begin(), data.end(), answer.raw.begin() + 16),
+            require(replyHoldsBytes(answer, data),
                 "what a copy out of the image returned is not what was copied into it");
         }
         require(!rendererSaid("host image copy:"), "the renderer refused a region the image holds");
@@ -776,6 +792,29 @@ constexpr HostImage planar3 {.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM,
 // A region of the first plane, which a context serves after a refusal.
 constexpr HostCopy planar420Valid {.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT, .memoryBytes = 4 * 4};
 constexpr HostCopy planar422Valid = planar420Valid;
+
+// A 4:2:0 image with an odd extent, or with more than one mip level, is one no
+// application may create, and the driver creates it: it lays the chroma plane
+// out as the extent divided by two and rounded down, 31 texels across and down
+// for 63, and 1 at the third level of 12.  Linear, the first of them has
+// the 31 rows of a temporary the driver sizes from it.
+constexpr HostImage oddPlanar420 {.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, .width = 63,
+    .height = 63, .tiling = VK_IMAGE_TILING_LINEAR,
+    .aspects = VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT};
+constexpr HostImage mippedPlanar420 {.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, .width = 12,
+    .height = 12, .mipLevels = 3,
+    .aspects = VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT};
+// The destination that takes a texel of that plane, 32 of them across and down.
+constexpr HostImage twoChannelLinear {.format = VK_FORMAT_R8G8_UNORM, .width = 32, .height = 32,
+    .tiling = VK_IMAGE_TILING_LINEAR};
+constexpr HostCopy oddChromaPlane {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = 31, .height = 31,
+    .memoryBytes = 31 * 31 * 2};
+constexpr HostCopy oddChromaPlanePlusOne {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = 32,
+    .height = 32, .memoryBytes = 32 * 32 * 2};
+constexpr HostCopy mippedChromaLevel {.mipLevel = 2, .aspect = VK_IMAGE_ASPECT_PLANE_1_BIT,
+    .width = 1, .height = 1, .memoryBytes = 2};
+constexpr HostCopy mippedChromaLevelPlusOne {.mipLevel = 2, .aspect = VK_IMAGE_ASPECT_PLANE_1_BIT,
+    .width = 2, .height = 2, .memoryBytes = 2 * 2 * 2};
 
 constexpr const char* mipLine = "is past the image's";
 constexpr const char* aspectLine = "is not one aspect of the image";
@@ -977,6 +1016,15 @@ const std::vector<Row>& rows()
             {.aspect = VK_IMAGE_ASPECT_PLANE_2_BIT, .width = extent, .height = extent,
                 .memoryBytes = extent * extent},
             planar3, planar420Valid),
+        // The plane is the extent divided and rounded down, as the driver
+        // lays it out: of a 63x63 image 31x31 texels, and at the third level
+        // of a 12x12 image one.  The control is the largest region each holds.
+        hostCopyRefusedRow("host-copy-to-memory-past-the-odd-420-chroma-plane", outsideLine, true,
+            oddChromaPlanePlusOne, oddPlanar420, oddChromaPlane),
+        hostCopyRefusedRow("host-copy-from-memory-past-the-odd-420-chroma-plane", outsideLine, false,
+            oddChromaPlanePlusOne, oddPlanar420, oddChromaPlane),
+        hostCopyRefusedRow("host-copy-to-memory-past-the-420-chroma-plane-of-a-mip-level", outsideLine,
+            true, mippedChromaLevelPlusOne, mippedPlanar420, mippedChromaLevel),
 
         // A region the image holds is copied, and what was written is read
         // back, from memory padded to a longer row as well as packed.
@@ -1068,6 +1116,9 @@ const std::vector<Row>& rows()
         hostCopyServedRow("host-copy-of-the-whole-422-chroma-plane", planar422,
             {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = extent / 2, .height = extent,
                 .memoryBytes = (extent / 2) * extent * 2}),
+        hostCopyServedRow("host-copy-of-the-whole-odd-420-chroma-plane", oddPlanar420, oddChromaPlane),
+        hostCopyServedRow("host-copy-of-the-whole-420-chroma-plane-of-a-mip-level", mippedPlanar420,
+            mippedChromaLevel),
         hostCopyServedRow("host-copy-of-the-whole-third-plane", planar3,
             {.aspect = VK_IMAGE_ASPECT_PLANE_2_BIT, .width = extent / 2, .height = extent / 2,
                 .memoryBytes = (extent / 2) * (extent / 2)}),
@@ -1122,6 +1173,38 @@ const std::vector<Row>& rows()
             {.arrayLayers = 2}, {.arrayLayers = 2}),
         imageToImageRefusedRow("image-to-image-copy-into-a-wider-format",
             "do not move the same layers and bytes", {}, {.format = VK_FORMAT_R8_UNORM}, {}),
+        // The driver reads the source plane into a temporary the size of that
+        // plane, the 31 rows of the plane of a 63x63 image, and uploads the
+        // destination's footprint from it.  The two footprints of a copy of 32x32
+        // texels are the same 2048 bytes, so only the plane's extent tells
+        // that the source does not hold the region.
+        imageToImageRefusedRow("image-to-image-copy-from-past-the-odd-420-chroma-plane",
+            "the source of an image-to-image copy does not hold its region",
+            {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .dstAspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                .width = 32, .height = 32},
+            oddPlanar420, twoChannelLinear),
+        {"image-to-image-copy-of-the-whole-odd-420-chroma-plane", [](Session& session) {
+            makes([](Stream& s) {
+                encodeHostCopyImage(s, imageId, imageMemoryId, oddPlanar420);
+                encodeHostCopyImage(s, otherImageId, otherImageMemoryId, twoChannelLinear);
+            })(session);
+            const std::vector<std::uint8_t> data = patternOf(oddChromaPlane.memoryBytes);
+            Stream write;
+            encodeCopyMemoryToImage(write, imageId, oddChromaPlane, data);
+            requireAnswered(session.ask(write), copyMemoryToImage, VK_SUCCESS, "a copy into the plane was refused");
+            Stream between;
+            encodeCopyImageToImage(between, {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT,
+                .dstAspect = VK_IMAGE_ASPECT_COLOR_BIT, .width = 31, .height = 31});
+            requireAnswered(session.ask(between), copyImageToImage, VK_SUCCESS,
+                "an image-to-image copy of the whole plane was refused");
+            Stream read;
+            encodeCopyImageToMemory(read, otherImageId,
+                {.width = 31, .height = 31, .memoryBytes = 31 * 31 * 2});
+            const Answer answer = session.ask(read);
+            requireAnswered(answer, copyImageToMemory, VK_SUCCESS, "a copy out of the destination was refused");
+            require(replyHoldsBytes(answer, data), "the destination does not hold what the plane held");
+            require(!rendererSaid("host image copy:"), "the renderer refused the whole plane");
+        }, false, setupOf(hostCopyDevice())},
         imageToImageRefusedRow("image-to-image-copy-of-the-null-destination",
             "an image of an image-to-image copy is the null handle", {.dst = 0}),
         imageToImageRefusedRow("image-to-image-copy-of-the-null-source",
