@@ -764,7 +764,7 @@ final class AppModel {
     private var nextDisplaySize: (width: Int, height: Int)? {
         resolutionLayout.map { ($0.width, $0.height) }
     }
-    /// Home's "120 Hz" in Virtual machine: whether the next Android start asks
+    /// Home's "120 Hz" in Performance: whether the next Android start asks
     /// for a 120 Hz display. Off is the default. Kept for the install
     /// (`HighRefreshPreference`).
     var highRefreshOn = false

@@ -65,9 +65,6 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
-    /// The most lines the line under the title shows: two, or all of it (nil)
-    /// for a row whose note must never be cut, in any language.
-    var detailLines: Int? = 2
     /// What the line under the title does when it is touched; the line then
     /// reads as a button. None leaves it plain text.
     var detailAction: (() -> Void)?
@@ -103,7 +100,7 @@ struct OptionRow<Control: View>: View {
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(detailLines)
+                            .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -125,13 +122,12 @@ struct RowDivider: View {
 
 // MARK: System
 
-/// The guest's system in one section: CPU and memory states the vCPUs and RAM,
-/// with Edit opening the sheet that changes them; Resolution states the guest's
-/// display, with Change opening its choices (`ResolutionRow`); on a screen that
-/// can show more than 60 frames a second, "120 Hz" below it (`HighRefreshRow`);
-/// Storage states what the guest holds of its capacity under a bar, with
-/// Resize; Snapshots states how many there are and the space they use, with
-/// Manage opening them.
+/// The guest's system in one section, as four rows of one shape: CPU and
+/// memory states the vCPUs and RAM, with Edit opening the sheet that changes
+/// them; Resolution states the guest's display, with Change opening its
+/// choices (`ResolutionRow`); Storage states what the guest holds of its
+/// capacity under a bar, with Resize; Snapshots states how many there are and
+/// the space they use, with Manage opening them.
 struct SystemSection: View {
     @Environment(AppModel.self) private var model
 
@@ -149,10 +145,6 @@ struct SystemSection: View {
                 RowDivider()
                 ResolutionRow()
                 RowDivider()
-                if model.highRefreshOffered {
-                    HighRefreshRow()
-                    RowDivider()
-                }
                 StorageRow(guest: guest, stops: model.capacityStopsGiB, resize: { model.sheet = .resize })
                 RowDivider()
                 SnapshotsRow()
@@ -313,16 +305,15 @@ struct SnapshotsRow: View {
 /// Whether the next start of Android asks for the 120 Hz display
 /// (`AppModel.highRefreshOn`, kept for the install, off at first). It is read
 /// when Android starts and never during a run, so it is on Home, which shows
-/// only while no guest runs; the row is drawn only where the screen can show it
-/// (`AppModel.highRefreshOffered`), below Resolution in Virtual machine.
+/// only while no guest runs; the row is drawn only where the screen can show
+/// it (`AppModel.highRefreshOffered`), in Performance (`HomePerformanceSection`).
 struct HighRefreshRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         OptionRow(
             title: String(localized: "120 Hz"), symbol: "speedometer",
-            detail: String(localized: "Smoother motion on this display, and more battery use."),
-            detailLines: nil
+            detail: String(localized: "Smoother motion on this display, and more battery use.")
         ) {
             Toggle("120 Hz", isOn: Binding(
                 get: { model.highRefreshOn },
@@ -557,30 +548,48 @@ extension View {
     func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
 }
 
-// MARK: JIT
+// MARK: Performance
+
+/// Performance: what the guest runs with, in one section. "120 Hz" is drawn
+/// where the screen can show it (`AppModel.highRefreshOffered`) and JIT where a
+/// build can have it (`AppModel.jitAvailable`); the section is drawn when at
+/// least one of them is, and neither draws it at all. JIT is the row next to
+/// the note beneath the panel, which says what JIT does at the next start
+/// (`JitStatus.footer`); with no JIT row there is no note.
+struct HomePerformanceSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.guest != nil, model.highRefreshOffered || model.jitAvailable {
+            HomeSection(title: "Performance") {
+                if model.highRefreshOffered {
+                    HighRefreshRow()
+                    if model.jitAvailable { RowDivider() }
+                }
+                if model.jitAvailable { JitRow() }
+            } footer: {
+                if model.jitAvailable { SectionNote(model.jitStatus.footer) }
+            }
+            .id("performance")
+        }
+    }
+}
 
 /// Whether the guest runs on the JIT engine, which a debugger the person
 /// attached (StikDebug) makes possible, and what the next start can do about
 /// it. It applies when the guest next starts.
-struct JitSection: View {
+struct JitRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.jitAvailable, model.guest != nil {
-            HomeSection(verbatim: "JIT") {
-                OptionRow(title: "JIT", symbol: "bolt.fill") {
-                    Toggle(isOn: Binding(
-                        get: { model.jitOn },
-                        set: { model.setJit($0) }
-                    )) { Text(verbatim: "JIT") }
-                    .labelsHidden()
-                }
-            } footer: {
-                SectionNote(model.jitStatus.footer)
-            }
-            .id("jit")
-            .task { model.refreshJit() }
+        OptionRow(title: "JIT", symbol: "bolt.fill") {
+            Toggle(isOn: Binding(
+                get: { model.jitOn },
+                set: { model.setJit($0) }
+            )) { Text(verbatim: "JIT") }
+            .labelsHidden()
         }
+        .task { model.refreshJit() }
     }
 }
 

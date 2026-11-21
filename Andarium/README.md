@@ -564,13 +564,14 @@ address space holds, so this is a fallback.
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
   the run ([Automation](#automation)).
-  Home's Virtual machine section has "120 Hz" (`HighRefreshPreference`, off by
-  default) directly below Resolution, drawn only where the screen shows at
-  least 100 frames a second (an iPhone Pro, an iPad Pro; a screen between 61
-  and 99 does not qualify), where the display size the next start would have
-  can carry the 120 Hz mode, and never on a Mac or Vision Pro; Settings has no
-  row of it, because Home, which shows only while no guest runs, is where the
-  guest's configuration is.
+  Home's Performance section has "120 Hz" (`HighRefreshPreference`, off by
+  default) above JIT, drawn only where the screen shows at least 100 frames a
+  second (an iPhone Pro, an iPad Pro; a screen between 61 and 99 does not
+  qualify), where the display size the next start would have can carry the 120
+  Hz mode, and never on a Mac or Vision Pro; Settings has no row of it,
+  because Home, which shows only while no guest runs, is where the guest's
+  configuration is. The section is drawn when one of its two rows is, and its
+  note beneath the panel is JIT's.
   Turned on, the next start of Android asks the runtime for the 120 Hz display
   ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
   change applies at that start. The runtime
@@ -755,8 +756,9 @@ address space holds, so this is a fallback.
   is stored as a scale and stays. Native's host allocations count against the
   same iOS process limit as guest RAM; neither the graphics-memory estimate
   nor the memory default counts the display's pixels.
-- **JIT.** A build on a device has a JIT row on Home, off until
-  the person turns it on and kept for the install (`JitPreference`). An iOS
+- **JIT.** A build on a device has a JIT row in Home's Performance section,
+  off until the person turns it on and kept for the install
+  (`JitPreference`). An iOS
   device gives the JIT its executable memory only through a debugger attached to
   the process ([`docs/architecture.md`](../docs/architecture.md#executable-code)):
   the person assigns StikDebug's universal script to Andarium once in StikDebug

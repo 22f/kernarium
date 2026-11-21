@@ -6,7 +6,7 @@ import Testing
 
 /// Home's "120 Hz" in the model, in what it keeps, in what a launch states
 /// of it, in the boot request and in what Low Power Mode does to the guest's
-/// render rate. The row is drawn by `ResolutionScreenTests`, and Settings has none
+/// render rate. The row is drawn by `HomePerformanceTests`, and Settings has none
 /// (`SettingsOrderTests`).
 @MainActor
 struct HighRefreshTests {

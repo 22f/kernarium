@@ -113,7 +113,8 @@ struct AppEntry {
         "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
         "home-camera-ask": "capabilities",
         "home-backup": "backup",
-        "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
+        "home-jit": "performance", "home-jit-no-debugger": "performance", "home-jit-fallback": "performance",
+        "home-performance": "performance", "home-performance-on": "performance",
     ]
 
     /// Where Settings scrolls to for a screen that shows a lower section.
@@ -275,7 +276,7 @@ struct AppEntry {
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit",
-             "home-location-ask", "home-camera-ask", "home-high-refresh", "home-high-refresh-on":
+             "home-location-ask", "home-camera-ask", "home-performance", "home-performance-on":
             break
         case "home-jit":
             model.jitOn = true

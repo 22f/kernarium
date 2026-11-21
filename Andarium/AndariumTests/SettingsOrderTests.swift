@@ -178,7 +178,7 @@ struct SettingsOrderTests {
         #expect(!unlimited.contains(hotLimited))
     }
 
-    /// "120 Hz" is on Home, in Virtual machine (`ResolutionScreenTests`), so that
+    /// "120 Hz" is on Home, in Performance (`HomePerformanceTests`), so that
     /// the guest's configuration is in one place: Settings, which a run opens,
     /// has no row of it on any screen, and its footnote is gone with it.
     @Test func settingsHasNoHundredAndTwentyHertzRowOnAnyScreen() async throws {
