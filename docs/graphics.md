@@ -271,14 +271,16 @@ object id 0 marks the context lost, a pipeline stage that names no shader is
 refused, and a host image copy, between memory and an image or between two
 images, is bounded by the images' mip levels, aspects, layers and extent and by
 the memory the guest gave it, and returns no host bytes the driver did not write
-(`gpu-venus-required-handles`). Nor can it hand a driver serialized pipeline
-data to parse: the renderer ignores the data a guest gives `vkCreatePipelineCache`,
-answers `vkGetPipelineCacheData` with the empty cache of its own (never the
-driver's serialized pipelines), and does not expose `VK_KHR_pipeline_binary`,
-so a pipeline create info or a command that names a pipeline binary marks the
-context lost (`gpu-venus-pipeline-cache-bytes`,
-`gpu-venus-pipeline-binary-requests`). The host driver keeps its own on-disk
-pipeline variants, which no guest byte reaches.
+(`gpu-venus-required-handles`). Nor can a guest hand the driver the serialized
+pipeline forms it parses: the renderer ignores the data a guest gives
+`vkCreatePipelineCache`, answers `vkGetPipelineCacheData` with the empty cache
+of its own (never the driver's serialized pipelines), and does not expose
+`VK_KHR_pipeline_binary`, so a pipeline create info or a command that names a
+pipeline binary marks the context lost (`gpu-venus-pipeline-cache-bytes`,
+`gpu-venus-pipeline-binary-requests`). The host driver's on-disk pipeline
+variants are written and read by the host driver alone; a guest has no way to
+hand it one. A guest's SPIR-V still reaches the driver's SPIR-V to NIR
+conversion.
 The guest binds image and buffer memory without
 waiting for the answer, so a bind the driver refused marks the context lost
 before the next command runs (`gpu-venus-bind-failure`), and a copy that names
