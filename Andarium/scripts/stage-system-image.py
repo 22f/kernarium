@@ -48,10 +48,11 @@ IMAGE_METADATA = ROOT / IMAGE_METADATA_RELATIVE
 KERNEL_DESCRIPTOR = ROOT / KERNEL_DESCRIPTOR_RELATIVE
 DISK_TOOL = ROOT / "android/lineage-24/tools/ubd-disk.py"
 ROOT_VERIFIER = ROOT / "android/lineage-24/tools/verify-magisk-boot.py"
-_ARTIFACTS = str(ROOT / "kernel/common/artifacts")
-if _ARTIFACTS not in sys.path:
-    sys.path.insert(0, _ARTIFACTS)
+for _tools in (ROOT / "kernel/common/artifacts", ROOT / "android/lineage-24/tools"):
+    if str(_tools) not in sys.path:
+        sys.path.insert(0, str(_tools))
 import contract_checks  # noqa: E402
+import magisk_image  # noqa: E402
 
 MANIFEST = "release-manifest.json"
 COMMAND_LINE = "boot/kernel-command-line.txt"
@@ -83,6 +84,36 @@ def fail(message: str) -> None:
 def read_strict_json(path: Path) -> dict:
     """Reads a JSON object, refusing a key repeated in any object."""
     return contract_checks.load_json_object(path, StageError)
+
+
+MAX_MANIFEST = 16 * 1024 * 1024
+
+
+def read_manifest(release: Path) -> bytes:
+    """The release manifest's bytes, read once through a regular file that is no link.
+    Everything the script checks, stages or derives is taken from these bytes."""
+    return magisk_image.read_file(release / MANIFEST, MAX_MANIFEST, "the release manifest", StageError)
+
+
+def parse_object(data: bytes, label: str, *, strict: bool = False) -> dict:
+    """A JSON object from bytes already read; with `strict`, a key repeated in any
+    object is refused."""
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"repeats the key {key}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=pairs if strict else None)
+    except (UnicodeError, ValueError) as error:
+        raise StageError(f"cannot read {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise StageError(f"{label} is not a JSON object")
+    return value
 
 
 def read_json(path: Path) -> dict:
@@ -162,20 +193,28 @@ def check_layout(release: Path, read=read_json) -> dict:
 
 
 def check_root(release: Path, manifest: dict) -> list[str]:
-    """Checks the release's Magisk root files; returns their paths, none for a
-    release without them.
+    """Checks the release's Magisk root files; returns the paths to stage, none for
+    a release without them.
 
-    A manifest with a root record has its files checked by
-    android/lineage-24/tools/verify-magisk-boot.py (the record, both files, and
-    the patched image against the release's own init_boot and the APK), the same
-    check the installer runs; the pinned Magisk release is the producer's rule,
-    not asked here. A root/ directory without a record is refused.
+    The manifest is the one the script read, and its root record is validated here,
+    in the process that goes on to use it: the paths it returns are the two canonical
+    ones. The files are then checked by android/lineage-24/tools/verify-magisk-boot.py
+    (the record, both files, and the patched image against the release's own
+    init_boot and the APK), the same check the installer runs, which stage() runs
+    again on the staged copy; the pinned Magisk release is the producer's rule, not
+    asked here. A root/ directory without a record is refused.
     """
     record = manifest.get(ROOT_RECORD)
     if record is None:
-        if (release / ROOT_DIRECTORY).exists() or (release / ROOT_DIRECTORY).is_symlink():
+        if os.path.lexists(release / ROOT_DIRECTORY):
             raise StageError("the release has a root/ its manifest does not declare a root record for")
         return []
+    magisk_image.validate_root_record(record, lambda message: StageError(f"the manifest's root record: {message}"))
+    verify_root_files(release)
+    return [record["boot_image"]["path"], record["apk"]["path"]]
+
+
+def verify_root_files(release: Path) -> None:
     verified = subprocess.run(
         [sys.executable, "-B", str(ROOT_VERIFIER), "--release", str(release)],
         capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
@@ -183,8 +222,15 @@ def check_root(release: Path, manifest: dict) -> list[str]:
     if verified.returncode != 0:
         detail = (verified.stderr.strip() or verified.stdout.strip()).splitlines()
         raise StageError(f"the release's root files do not verify: {detail[-1] if detail else 'no reason given'}")
-    # The verifier has fixed the shape of the record, so these are its two safe paths.
-    return [record["boot_image"]["path"], record["apk"]["path"]]
+
+
+def is_root_destination(relative: str) -> bool:
+    """One of the two paths a root file is staged at."""
+    prefix, suffix = f"{magisk_image.ROOT_DIRECTORY}/Magisk-", ".apk"
+    return relative == magisk_image.PATCHED_PATH or (
+        relative.startswith(prefix) and relative.endswith(suffix)
+        and magisk_image.VERSION_RE.fullmatch(relative[len(prefix):-len(suffix)]) is not None
+    )
 
 
 def tracked_line(acceptance: Path, image_metadata: Path, kernel_descriptor: Path) -> dict:
@@ -389,8 +435,12 @@ def copy(source: Path, destination: Path) -> None:
 
 
 def stage(release: Path, output: Path, manifest: bytes | None = None, extra: list[str] = ()) -> None:
-    """Stages the release's files and the `extra` ones (its root files);
-    `manifest` stands for the manifest's bytes."""
+    """Stages the release's files and the `extra` ones (its root files, only at their
+    two canonical paths); `manifest` stands for the manifest's bytes. The staged
+    copy is checked before it replaces the output."""
+    for relative in extra:
+        if not is_root_destination(relative):
+            raise StageError(f"{relative} is not a root file destination")
     output.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
@@ -399,7 +449,13 @@ def stage(release: Path, output: Path, manifest: bytes | None = None, extra: lis
             if relative == MANIFEST and manifest is not None:
                 (scratch / relative).write_bytes(manifest)
             else:
+                magisk_image.real_path_below(release, relative, StageError)
                 copy(release / relative, scratch / relative)
+        if extra:
+            try:
+                verify_root_files(scratch)
+            except StageError as error:
+                raise StageError(f"the staged root files do not verify: {error}") from error
         previous = None
         if output.exists():
             previous = Path(tempfile.mkdtemp(prefix=f".{output.name}.old.", dir=output.parent))
@@ -443,16 +499,17 @@ def main(argv: list[str] | None = None) -> int:
         release = release.resolve()
         if not release.is_dir():
             raise StageError(f"the Android release is not installed: {release}")
-        manifest = read_json(release / MANIFEST)
+        manifest_bytes = read_manifest(release)
+        manifest = parse_object(manifest_bytes, MANIFEST)
         is_proof = manifest.get("acceptance") == UNSIGNED_PROOF
-        staged_manifest = None
+        staged_manifest = manifest_bytes
         if arguments.unsigned_proof:
             if not is_proof:
                 raise StageError(
                     "--unsigned-proof stages an unsigned proof, and this release's acceptance is "
                     f"{manifest.get('acceptance')!r}: stage an accepted release without it")
             line = tracked_line(arguments.acceptance, IMAGE_METADATA, KERNEL_DESCRIPTOR)
-            manifest = read_strict_json(release / MANIFEST)
+            manifest = parse_object(manifest_bytes, MANIFEST, strict=True)
             staged = check_proof(release, manifest, line)
             staged_manifest = (json.dumps(staged, indent=2, sort_keys=True) + "\n").encode("utf-8")
             notes = proof_notes(manifest, staged)

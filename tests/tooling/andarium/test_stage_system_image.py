@@ -19,6 +19,7 @@ __import__("sys").dont_write_bytecode = True
 
 import atexit
 import hashlib
+import importlib.util
 import json
 import pathlib
 import shutil
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "tests/tooling/android"))
@@ -756,6 +758,62 @@ class RootFilesTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn(message, result.stderr)
                     self.assertFalse(self.output.exists())
+
+
+class StagedRootFilesTests(unittest.TestCase):
+    """What is staged is what was validated and what verifies: the record that names the
+    destinations is the one that was read, the destinations are the two canonical paths,
+    and the staged bytes are checked before they replace the output."""
+
+    def setUp(self):
+        self._scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self._scratch.cleanup)
+        self.root = pathlib.Path(self._scratch.name)
+        self.output = self.root / "out/andarium-system"
+        self.checkout = make_checkout(self.root / "checkout")
+        spec = importlib.util.spec_from_file_location("stage_under_test", self.checkout.script)
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_the_destinations_come_from_the_record_that_is_validated(self):
+        # The manifest read at the start names the files; the verifier reads the file
+        # again. A record that names anything but the two canonical paths is refused
+        # whatever the file now says.
+        release = rooted_release(self.root / "releases")
+        manifest = json.loads((release / "release-manifest.json").read_text())
+        self.assertEqual(
+            self.module.check_root(release, manifest),
+            ["root/init_boot-magisk.img", f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk"])
+        manifest["root"]["boot_image"]["path"] = "../../escape.bin"
+        with self.assertRaisesRegex(self.module.StageError, "root record"):
+            self.module.check_root(release, manifest)
+
+    def test_only_the_two_canonical_paths_are_staged(self):
+        release = rooted_release(self.root / "releases")
+        (release.parent / "escape.bin").write_bytes(b"outside")
+        with self.assertRaisesRegex(self.module.StageError, "not a root file"):
+            self.module.stage(release, self.output, None, ["root/../../escape.bin"])
+        self.assertFalse((self.output.parent / "escape.bin").exists())
+        self.assertFalse(self.output.exists())
+
+    def test_the_staged_bytes_are_checked_before_they_replace_the_output(self):
+        release = rooted_release(self.root / "releases")
+        manifest = json.loads((release / "release-manifest.json").read_text())
+        extra = self.module.check_root(release, manifest)
+        self.module.stage(release, self.output, None, extra)
+        before = {path: (self.output / path).read_bytes() for path in self.module.FILES}
+        real_copy = self.module.copy
+
+        def corrupting(source, destination):
+            real_copy(source, destination)
+            if destination.name == "init_boot-magisk.img":
+                destination.write_bytes(destination.read_bytes()[:-1] + b"\x01")
+
+        with mock.patch.object(self.module, "copy", corrupting), \
+                self.assertRaisesRegex(self.module.StageError, "staged root files do not verify"):
+            self.module.stage(release, self.output, None, extra)
+        self.assertEqual({path: (self.output / path).read_bytes() for path in self.module.FILES}, before)
+        self.assertEqual(sorted(path.name for path in self.output.parent.iterdir()), ["andarium-system"])
 
 
 class PackageOptionTests(unittest.TestCase):
