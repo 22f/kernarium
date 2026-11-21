@@ -2017,7 +2017,13 @@ private:
 			    "--vsock-forward", "Virtio vsock"))
 			return false;
 		if (vsock_forwarder_) {
-			vsock_forwarder_->attach(std::move(endpoint));
+			try {
+				vsock_forwarder_->attach(std::move(endpoint));
+			} catch (const std::exception &error) {
+				std::fprintf(stderr, "Unable to attach the vsock forward: %s\n",
+					error.what());
+				return false;
+			}
 			return true;
 		}
 		try {

@@ -63,7 +63,9 @@ public:
 
     /* Reaches the guest behind `endpoint` from now on, after detaching the
      * guest it reached before. A connection that had reached a listener
-     * before the call is closed, not offered to the new guest. */
+     * before the call is closed, not offered to the new guest. Throws
+     * std::runtime_error, and stays detached, when the connections queued on a
+     * listener cannot all be taken: the new guest must not be offered them. */
     void attach(std::shared_ptr<Endpoint> endpoint);
 
     /* Reaches no guest. A connection that arrives while none is attached is
@@ -80,7 +82,8 @@ private:
     void run();
     void serve(Worker& worker, int accepted, std::uint32_t guestPort);
     void reap();
-    void replace(std::shared_ptr<Endpoint> endpoint) noexcept;
+    bool acceptOne(std::size_t index);
+    std::unique_lock<std::mutex> lockForTransition();
     static void end(std::list<std::unique_ptr<Worker>>& workers) noexcept;
 
     /* Guards `endpoint_` and the membership of `workers_`, and is held while
@@ -89,6 +92,8 @@ private:
     std::mutex mutex_;
     std::shared_ptr<Endpoint> endpoint_;
     std::list<std::unique_ptr<Worker>> workers_;
+    /* The attach or detach calls that wait for `mutex_`. */
+    std::atomic_uint waiting_ {};
     std::vector<std::unique_ptr<Listener>> listeners_;
     std::unique_ptr<uml::platform::WakeSocket> wake_;
     std::atomic_bool stopping_ {};

@@ -35,18 +35,37 @@ bool parseNumber(std::string_view text, std::uint64_t maximum, std::uint64_t& va
     return true;
 }
 
-/* The next connection queued on `listener`, or an invalid descriptor when none
- * is. The listener does not block. */
-uml::gpu::UniqueDescriptor acceptQueued(int listener)
+/* The backlog of every listener. The kernel queues no more connections than
+ * this on one, so a replacement that takes twice as many has taken all that
+ * were queued when it began, however fast others arrive meanwhile. */
+constexpr int listenBacklog = 16;
+constexpr unsigned queuedLimit = 2U * listenBacklog;
+
+/* What taking a connection from a listener found. */
+enum class Taken : std::uint8_t {
+    connection,
+    /* Nothing is queued: the only answer that says so. */
+    none,
+    /* A connection reset in the queue, or a signal: look again. */
+    again,
+    failed,
+};
+
+/* Takes the next connection queued on `listener` into `accepted`. The
+ * listener does not block. `error` is the errno of a failure. */
+Taken takeQueued(int listener, uml::gpu::UniqueDescriptor& accepted, int& error)
 {
-    for (;;) {
-        uml::gpu::UniqueDescriptor accepted {::accept(listener, nullptr, nullptr)};
-        if (accepted.get() >= 0)
-            return accepted;
-        /* A connection that was reset in the queue is not the end of it. */
-        if (errno != EINTR && errno != ECONNABORTED)
-            return accepted;
+    const int taken = ::accept(listener, nullptr, nullptr);
+    error = errno;
+    if (taken >= 0) {
+        accepted.reset(taken);
+        return Taken::connection;
     }
+    if (error == EAGAIN || error == EWOULDBLOCK)
+        return Taken::none;
+    if (error == EINTR || error == ECONNABORTED)
+        return Taken::again;
+    return Taken::failed;
 }
 
 } // namespace
@@ -140,7 +159,7 @@ Forwarder::Forwarder(
                 listener->descriptor.get(),
                 reinterpret_cast<const sockaddr*>(&address),
                 sizeof(address)) != 0 ||
-            ::listen(listener->descriptor.get(), 16) != 0) {
+            ::listen(listener->descriptor.get(), listenBacklog) != 0) {
             throw std::runtime_error(
                 "cannot listen on " + describe() + " for the vsock forward: " +
                 std::strerror(errno));
@@ -178,35 +197,68 @@ std::uint16_t Forwarder::port(std::size_t index) const
     return listeners_.at(index)->port;
 }
 
+std::unique_lock<std::mutex> Forwarder::lockForTransition()
+{
+    /* The accept thread lets a transition that waits go first. */
+    waiting_.fetch_add(1, std::memory_order_acq_rel);
+    std::unique_lock lock(mutex_);
+    waiting_.fetch_sub(1, std::memory_order_acq_rel);
+    return lock;
+}
+
 void Forwarder::attach(std::shared_ptr<Endpoint> endpoint)
 {
-    replace(std::move(endpoint));
+    std::shared_ptr<Endpoint> previous;
+    std::list<std::unique_ptr<Worker>> workers;
+    std::string failure;
+    {
+        auto lock = lockForTransition();
+        previous = std::move(endpoint_);
+        /* Every worker listed now was accepted for the endpoint just
+         * replaced: a later accept takes the new one under this lock. */
+        workers.swap(workers_);
+        /* A connection already queued on a listener arrived before this
+         * call, so it belongs to the guest replaced or to the gap between
+         * guests, and the next guest is not offered it. The accept thread
+         * takes a connection and chooses its endpoint under this lock, so
+         * none is in hand between the two. An empty queue is told by
+         * nothing but EAGAIN; any other answer leaves the forwarder
+         * detached, whose accept thread closes what is left. */
+        for (const auto& listener : listeners_) {
+            uml::gpu::UniqueDescriptor queued;
+            int error = 0;
+            for (unsigned taken = 0; taken < queuedLimit; ++taken) {
+                const auto result =
+                    takeQueued(listener->descriptor.get(), queued, error);
+                if (result == Taken::none)
+                    break;
+                if (result == Taken::failed) {
+                    failure = "cannot take the connections queued on " +
+                        listener->specification.hostAddress + ":" +
+                        std::to_string(listener->port) +
+                        " before attaching the vsock forward: " +
+                        std::strerror(error);
+                    break;
+                }
+            }
+            if (!failure.empty())
+                break;
+        }
+        if (failure.empty())
+            endpoint_ = std::move(endpoint);
+    }
+    end(workers);
+    if (!failure.empty())
+        throw std::runtime_error(failure);
 }
 
 void Forwarder::detach() noexcept
 {
-    replace(nullptr);
-}
-
-void Forwarder::replace(std::shared_ptr<Endpoint> endpoint) noexcept
-{
     std::shared_ptr<Endpoint> previous;
     std::list<std::unique_ptr<Worker>> workers;
     {
-        std::lock_guard lock(mutex_);
-        /* A connection already queued on a listener arrived before this
-         * replacement, so it belongs to the guest replaced or to the gap
-         * between guests, and the next guest is not offered it. The accept
-         * thread takes a connection and chooses its endpoint under this lock,
-         * so none is in hand between the two. */
-        for (const auto& listener : listeners_) {
-            while (acceptQueued(listener->descriptor.get()).get() >= 0) {
-            }
-        }
+        auto lock = lockForTransition();
         previous = std::move(endpoint_);
-        endpoint_ = std::move(endpoint);
-        /* Every worker listed now was accepted for the endpoint just
-         * replaced: a later accept takes the new one under this lock. */
         workers.swap(workers_);
     }
     end(workers);
@@ -251,33 +303,50 @@ void Forwarder::run()
         for (std::size_t index = 0; index < listeners_.size(); ++index) {
             if ((descriptors[index].revents & POLLIN) == 0)
                 continue;
-            /* A connection is taken from the listener, and the endpoint it
-             * is served through chosen, under the lock `replace` takes, so
-             * that a connection taken before a replacement is never handed to
-             * the endpoint it installs. The worker is listed with its
-             * endpoint, and its thread started, under the same lock, so that
-             * `replace` finds it and has a thread to join. */
-            std::lock_guard lock(mutex_);
-            for (;;) {
-                uml::gpu::UniqueDescriptor accepted =
-                    acceptQueued(listeners_[index]->descriptor.get());
-                if (accepted.get() < 0)
-                    break;
-                const auto guestPort = listeners_[index]->specification.guestPort;
-                /* No guest is attached: the connection is closed, quietly. */
-                if (!endpoint_)
-                    continue;
-                auto worker = std::make_unique<Worker>();
-                auto* raw = worker.get();
-                worker->endpoint = endpoint_;
-                workers_.push_back(std::move(worker));
-                raw->thread = std::thread(
-                    [this, raw, stream = accepted.release(), guestPort] {
-                        serve(*raw, stream, guestPort);
-                    });
+            while (acceptOne(index)) {
             }
         }
     }
+}
+
+/* Takes one connection from listener `index` and serves it, or closes it when
+ * no guest is attached. A connection is taken from the listener, and the
+ * endpoint it is served through chosen, under the lock a transition takes, so
+ * that a connection taken before a transition is never handed to the endpoint
+ * it installs. The worker is listed with its endpoint, and its thread started,
+ * under the same lock, so that a transition finds it and has a thread to join.
+ * The lock is held for one connection only, and not at all while a transition
+ * waits or the forwarder ends. False when there is nothing more to do now. */
+bool Forwarder::acceptOne(std::size_t index)
+{
+    std::lock_guard lock(mutex_);
+    if (waiting_.load(std::memory_order_acquire) != 0 ||
+        stopping_.load(std::memory_order_acquire))
+        return false;
+    uml::gpu::UniqueDescriptor accepted;
+    int error = 0;
+    switch (takeQueued(listeners_[index]->descriptor.get(), accepted, error)) {
+    case Taken::connection:
+        break;
+    case Taken::again:
+        return true;
+    case Taken::none:
+    case Taken::failed:
+        return false;
+    }
+    /* No guest is attached: the connection is closed, quietly. */
+    if (!endpoint_)
+        return true;
+    const auto guestPort = listeners_[index]->specification.guestPort;
+    auto worker = std::make_unique<Worker>();
+    auto* raw = worker.get();
+    worker->endpoint = endpoint_;
+    workers_.push_back(std::move(worker));
+    raw->thread = std::thread(
+        [this, raw, stream = accepted.release(), guestPort] {
+            serve(*raw, stream, guestPort);
+        });
+    return true;
 }
 
 void Forwarder::serve(Worker& worker, int accepted, std::uint32_t guestPort)
