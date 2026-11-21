@@ -127,6 +127,29 @@ class FormatTests(unittest.TestCase):
                 self.assertEqual(
                     magisk_image._lz4_block(lz4_matches(data), 1 << 20, SystemExit), data)
 
+    def test_lz4_blocks_end_as_the_kernels_decoder_requires(self) -> None:
+        # What the guest unpacks is what LZ4_decompress_safe accepts into an 8 MiB
+        # buffer. That decoder treats a sequence whose literals reach within 8 bytes
+        # of the end of the input as the last one, so a match followed by an empty
+        # final token is refused unless the fast path is taken (16 bytes of input and
+        # 32 of output remain): the sample below is the old positive fixture, which
+        # it refused.
+        literals = b"0123456789abcdefgh"
+        limit = 8 * 1024 * 1024
+        decode = lambda block, size=limit: magisk_image._lz4_block(block, size, SystemExit)  # noqa: E731
+        with self.assertRaisesRegex(SystemExit, "does not end with its literals"):
+            decode(bytes([0x48]) + b"abcd" + bytes([4, 0]) + b"\x00")
+        with self.assertRaisesRegex(SystemExit, "does not end with its literals"):
+            decode(bytes([0xD0]) + literals[:13] + bytes([8, 0]) + b"\x00")
+        self.assertEqual(
+            decode(bytes([0xE0]) + literals[:14] + bytes([8, 0]) + b"\x00"), literals[:14] + b"6789")
+        self.assertEqual(decode(bytes([0x50]) + b"hello"), b"hello")
+        data = b"abcd" * 10
+        block = lz4_matches(data)
+        self.assertEqual(decode(block, len(data)), data)
+        with self.assertRaisesRegex(SystemExit, "more than its limit|within the last 5 bytes"):
+            decode(block, len(data) - 1)
+
     def test_lz4_legacy_streams_decode_and_bad_ones_are_refused(self) -> None:
         data = b"hello ramdisk " * 5000
         stream = b"\x02\x21\x4c\x18"

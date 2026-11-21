@@ -315,60 +315,99 @@ def backup_config(preinit: str, stock_sha1: str, *, with_preinit: bool = True) -
 # ------------------------------------------------------------- the formats --
 
 
+# The kernel unpacks the ramdisk with LZ4_decompress_safe(block, 8 MiB) per block
+# (lib/decompress_unlz4.c, lib/lz4/lz4_decompress.c). _lz4_block accepts what that
+# function accepts, byte for byte, with one deliberate narrowing: it refuses a match
+# offset of zero, which the C code turns into zero bytes. What the C code leans on
+# is not "well-formed" in the format's own sense but its parsing restrictions, and
+# those are what a block must meet here too:
+#   - a sequence is the last one when its literals reach within 8 bytes of the end
+#     of the input (or within 12 of the end of the output buffer), and the last
+#     sequence must end exactly at the end of the input;
+#   - a match must end at least 5 bytes before the end of the output buffer;
+#   - the fast path for a sequence with up to 14 literals and a match of up to 18
+#     bytes skips the last-sequence test when 16 bytes of input and 32 of output
+#     remain, so such a block may end on an empty literal run after a match;
+#   - a literal length of 15 and more is read only while 15 bytes of input remain.
+LZ4_MIN_MATCH = 4
+LZ4_LAST_LITERALS = 5
+LZ4_MF_LIMIT = 12
+LZ4_SHORTCUT_INPUT = 16
+LZ4_SHORTCUT_OUTPUT = 32
+
+
 def _lz4_block(block: bytes, limit: int, error: Error) -> bytes:
-    """Decode one LZ4 block of at most `limit` bytes."""
+    """Decode one LZ4 block into a buffer of `limit` bytes, as the kernel does."""
     out = bytearray()
     index = 0
     end = len(block)
-    while index < end:
-        token = block[index]
-        index += 1
-        literals = token >> 4
-        if literals == 15:
-            while True:
-                if index >= end:
-                    raise error("truncated lz4 literal length")
-                extra = block[index]
-                index += 1
-                literals += extra
-                if extra != 255:
-                    break
-        if index + literals > end:
-            raise error("truncated lz4 literals")
-        out += block[index:index + literals]
-        index += literals
-        if index == end:
-            break
-        if index + 2 > end:
-            raise error("truncated lz4 match offset")
-        offset = block[index] | (block[index + 1] << 8)
-        index += 2
-        length = token & 15
-        if length == 15:
-            while True:
-                if index >= end:
-                    raise error("truncated lz4 match length")
-                extra = block[index]
-                index += 1
-                length += extra
-                if extra != 255:
-                    break
-        length += 4
-        if offset == 0 or offset > len(out):
-            raise error("lz4 match offset is outside the decoded data")
-        if len(out) + length > limit:
-            raise error("lz4 block decodes to more than its limit")
-        start = len(out) - offset
-        if offset >= length:
-            out += out[start:start + length]
-        else:
-            pattern = bytes(out[start:])
-            out += (pattern * (length // offset + 1))[:length]
-        if len(out) > limit:
-            raise error("lz4 block decodes to more than its limit")
-    if len(out) > limit:
-        raise error("lz4 block decodes to more than its limit")
-    return bytes(out)
+    if end == 0:
+        raise error("empty lz4 block")
+    try:
+        while True:
+            token = block[index]
+            index += 1
+            literals = token >> 4
+            matched = token & 15
+            if (
+                literals != 15 and index < end - LZ4_SHORTCUT_INPUT
+                and len(out) <= limit - LZ4_SHORTCUT_OUTPUT
+            ):
+                out += block[index:index + literals]
+                index += literals
+                offset = block[index] | (block[index + 1] << 8)
+                index += 2
+                if matched != 15 and 8 <= offset <= len(out):
+                    out += _lz4_match(out, offset, matched + LZ4_MIN_MATCH)
+                    continue
+            else:
+                if literals == 15:
+                    if index >= end - 15:
+                        raise error("truncated lz4 literal length")
+                    while True:
+                        extra = block[index]
+                        index += 1
+                        literals += extra
+                        if not (index < end - 15 and extra == 255):
+                            break
+                if len(out) + literals > limit - LZ4_MF_LIMIT or index + literals > end - 8:
+                    if index + literals != end or len(out) + literals > limit:
+                        raise error(
+                            "lz4 block does not end with its literals, or decodes to more "
+                            "than its limit"
+                        )
+                    out += block[index:end]
+                    return bytes(out)
+                out += block[index:index + literals]
+                index += literals
+                offset = block[index] | (block[index + 1] << 8)
+                index += 2
+            if offset == 0 or offset > len(out):
+                raise error("lz4 match offset is outside the decoded data")
+            if matched == 15:
+                while True:
+                    extra = block[index]
+                    index += 1
+                    if index > end - LZ4_LAST_LITERALS:
+                        raise error("truncated lz4 match length")
+                    matched += extra
+                    if extra != 255:
+                        break
+            length = matched + LZ4_MIN_MATCH
+            if len(out) + length > limit - LZ4_LAST_LITERALS:
+                raise error("lz4 match ends within the last 5 bytes of its buffer or past it")
+            out += _lz4_match(out, offset, length)
+    except IndexError:
+        raise error("truncated lz4 block") from None
+
+
+def _lz4_match(out: bytearray, offset: int, length: int) -> bytes:
+    """The `length` bytes an LZ4 match at `offset` copies, overlapping included."""
+    start = len(out) - offset
+    if offset >= length:
+        return bytes(out[start:start + length])
+    pattern = bytes(out[start:])
+    return (pattern * (length // offset + 1))[:length]
 
 
 def lz4_legacy_decode(data: bytes, error: Error, limit: int = MAX_RAMDISK) -> bytes:

@@ -80,7 +80,9 @@ def lz4_literals(data: bytes) -> bytes:
 
 def lz4_matches(data: bytes) -> bytes:
     """An LZ4 block with matches, by a naive greedy search: for small inputs, to
-    exercise the decoder's overlapping copies and extended lengths."""
+    exercise the decoder's overlapping copies and extended lengths. It keeps the
+    format's end rules, which the kernel's decoder enforces: the last match starts
+    at least 12 bytes before the end of the data and the last 5 bytes are literals."""
     out = bytearray()
 
     def extension(count: int) -> None:
@@ -103,11 +105,11 @@ def lz4_matches(data: bytes) -> bytes:
 
     position = 0
     literal_start = 0
-    while position + 4 <= len(data):
+    while position + 12 <= len(data):
         best = (0, 0)
         for start in range(max(0, position - 65535), position):
             length = 0
-            while position + length < len(data) and data[start + length] == data[position + length]:
+            while position + length < len(data) - 5 and data[start + length] == data[position + length]:
                 length += 1
             if length > best[0]:
                 best = (length, position - start)
