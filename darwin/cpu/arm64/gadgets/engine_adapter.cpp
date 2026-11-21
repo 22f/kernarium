@@ -95,4 +95,22 @@ void end_aot_session() noexcept
 #endif
 }
 
+int aot_choice() noexcept
+{
+#if UML_AOT
+	return arm64::aot::choice();
+#else
+	return 0;
+#endif
+}
+
+void restore_aot_choice(int choice) noexcept
+{
+#if UML_AOT
+	arm64::aot::restore_choice(choice);
+#else
+	(void)choice;
+#endif
+}
+
 } // namespace uml::cpu::arm64::detail

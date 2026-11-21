@@ -46,6 +46,11 @@ namespace uml::cpu {
  * process does. A restart inside a session is no end. */
 void end_aot_session() noexcept;
 
+/* The session's choice as it stands, and putting it back: a start that took
+ * the choice and failed before its guest ran leaves it as it was. */
+[[nodiscard]] int aot_choice() noexcept;
+void restore_aot_choice(int choice) noexcept;
+
 /* Serializes JIT-capable emulator runs before any guest vCPU can allocate an
  * executor slot. Other engine kinds do not take this process-wide session.
  */

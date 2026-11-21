@@ -545,6 +545,16 @@ void end_aot_session() noexcept
 	::uml::cpu::end_aot_session();
 }
 
+int aot_choice() noexcept
+{
+	return ::uml::cpu::aot_choice();
+}
+
+void restore_aot_choice(int choice) noexcept
+{
+	::uml::cpu::restore_aot_choice(choice);
+}
+
 bool acquire_translation_cache_run_session() noexcept
 {
 	return ::uml::cpu::acquire_translation_cache_run_session();

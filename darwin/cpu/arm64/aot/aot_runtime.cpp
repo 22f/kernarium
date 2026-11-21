@@ -1307,6 +1307,16 @@ void end_session() noexcept
 	g_state.store(-1, std::memory_order_relaxed);
 }
 
+int choice() noexcept
+{
+	return g_state.load(std::memory_order_relaxed);
+}
+
+void restore_choice(int choice) noexcept
+{
+	g_state.store(choice, std::memory_order_relaxed);
+}
+
 void note_refusal(Refusal reason) noexcept
 {
 #if UML_AOT_DIAGNOSTICS

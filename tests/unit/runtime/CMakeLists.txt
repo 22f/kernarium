@@ -206,7 +206,8 @@ if(TARGET uml_arm64_aot_framework)
     # other's choice; a restart is no session boundary.
     foreach(_uml_aot_mode IN ITEMS release-race-off-then-on
             release-race-on-then-off release-race-mismatched
-            restart-keeps-aot-on restart-keeps-aot-off)
+            restart-keeps-aot-on restart-keeps-aot-off
+            failed-start-keeps-aot-choice failed-restart-keeps-aot-choice)
         uml_add_unit_test(
             NAME runtime-${_uml_aot_mode}
             COMMAND uml_runtime_sequential_run_tests ${_uml_aot_mode})

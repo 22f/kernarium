@@ -407,6 +407,32 @@ std::atomic_bool test_native_kernel_window_by_the_host{false};
 	return layout;
 }
 
+/* The ahead-of-time choice a start takes, put back unless the run reaches its
+ * guest: every way a start can fail after the choice and before the guest
+ * runs leaves the session's choice as it was before the start. A run that
+ * restarts keeps its session's, whichever way its next start ends. It is
+ * held under the process admission, which the choice also belongs to. */
+class AotChoiceScope final {
+public:
+	AotChoiceScope() noexcept : before_{::uml::runtime::aot_choice()} {}
+
+	~AotChoiceScope()
+	{
+		if (!kept_)
+			::uml::runtime::restore_aot_choice(before_);
+	}
+
+	/* The guest runs: the choice is the session's now. */
+	void keep() noexcept { kept_ = true; }
+
+	AotChoiceScope(const AotChoiceScope &) = delete;
+	AotChoiceScope &operator=(const AotChoiceScope &) = delete;
+
+private:
+	int before_;
+	bool kept_{};
+};
+
 class ProcessAddressSpaceAdmission final {
 public:
 	ProcessAddressSpaceAdmission() noexcept = default;
@@ -647,7 +673,10 @@ public:
 		 * gets none. The choice belongs to the session of the run that owns
 		 * the process: it is taken once the run is admitted, after the
 		 * session before it has ended (release_guest ends it while it holds
-		 * the admission), and a run the process refuses never reaches it. */
+		 * the admission), and a run the process refuses never reaches it.
+		 * A start that fails after it and before its guest runs puts the
+		 * session's choice back (AotChoiceScope). */
+		AotChoiceScope choice_scope;
 		if (!prepared.informational) {
 			::uml::runtime::AotRelease release{
 				.id = prepared.aot_release_id,
@@ -775,6 +804,7 @@ public:
 			/* The kernel's own process state is the run's to restore, as
 			 * the loader restores it around a real kernel. */
 			const ::uml::runtime::KernelSignalScope kernel_signals{0, 0};
+			choice_scope.keep();
 			return entry(static_cast<int>(arguments.size()),
 				argument_pointers.data(), environment_pointers.data());
 		}
@@ -794,6 +824,7 @@ public:
 				&Emulator::trim_for_memory_pressure_of, this);
 #endif
 		}
+		choice_scope.keep();
 		const auto result = uml_elf_run(kernel_view_.data(),
 			kernel_view_.size(), native_layout.load_bias,
 			native_layout.reserved ? native_layout.window_start : 0U,

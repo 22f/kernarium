@@ -1147,6 +1147,60 @@ void a_start_waits_for_the_session_before_it_to_end(bool earlier_on,
 	(void)close(world.control);
 }
 
+/* A start that takes its AOT choice and then fails before its guest runs
+ * leaves the choice as it was: here the JIT cache budget is below the
+ * minimum, which fails the start after the choice and before any guest. */
+constexpr int refused_cache_arguments = 5;
+const char *const refused_cache[refused_cache_arguments]{
+	"uml-sequential-runs", "ncpus=1", "--execution-engine=jit",
+	"--jit-cache-budget=1K", "--aot=off"};
+
+void a_failed_start_leaves_the_aot_choice_alone()
+{
+	const auto release = uml::cpu::arm64::aot::embedded_release();
+	require(release.has_value(), "the framework names no release");
+	const std::string matching = release_argument(*release);
+	auto emulator = make_emulator(kernel);
+	require(uml_emulator_run(emulator.get(), refused_cache_arguments,
+		refused_cache, nullptr) == -UML_EMULATOR_RUNTIME_ERROR,
+		"a start with a budget below the minimum did not fail");
+	require(kernel_entries == 0, "a failed start entered its kernel");
+	/* Nothing ran, so the process has chosen nothing: the retry states the
+	 * release and takes the component. */
+	require(run_stating(emulator.get(), "--aot=on", matching) ==
+		kernel_booted,
+		"a start that failed before its guest held the next one off the component");
+	require(uml::cpu::arm64::aot::enabled(),
+		"the retry's choice of the component was not taken");
+}
+
+/* The same for a restart: the session's choice stays whichever way the
+ * start after it fails. */
+void a_failed_restart_keeps_the_choice_of_its_session()
+{
+	const HandBackHooks hooks;
+	const auto release = uml::cpu::arm64::aot::embedded_release();
+	require(release.has_value(), "the framework names no release");
+	const std::string matching = release_argument(*release);
+	auto emulator = make_emulator(boot);
+	begin_restarts(emulator.get(), 1, Ending::power_off);
+	require(run_stating(emulator.get(), "--aot=on", matching) ==
+		kernel_booted && run_end_kind(emulator.get()) ==
+			UML_EMULATOR_RUN_END_RESTART,
+		"the first boot did not take the component and restart");
+	require(uml_emulator_run(emulator.get(), refused_cache_arguments,
+		refused_cache, nullptr) == -UML_EMULATOR_RUNTIME_ERROR,
+		"a restart with a budget below the minimum did not fail");
+	require(run_stating(emulator.get(), "--aot=on", matching) ==
+		kernel_booted,
+		"a failed restart changed the session's choice");
+	require(uml::cpu::arm64::aot::enabled(),
+		"the restarted boot lost the component");
+	require(run_end_kind(emulator.get()) == UML_EMULATOR_RUN_END_POWER_OFF,
+		"the restarted boot did not power off");
+	(void)close(world.control);
+}
+
 /* A guest that restarts is one session: its choice stays through the
  * restart, which is not a session boundary. */
 void a_restart_keeps_the_choice_of_its_session(bool on)
@@ -1530,6 +1584,10 @@ int main(int argc, char **argv)
 		else if (mode == "release-race-mismatched")
 			a_start_waits_for_the_session_before_it_to_end(
 				false, NextStart::on_mismatched);
+		else if (mode == "failed-start-keeps-aot-choice")
+			a_failed_start_leaves_the_aot_choice_alone();
+		else if (mode == "failed-restart-keeps-aot-choice")
+			a_failed_restart_keeps_the_choice_of_its_session();
 		else if (mode == "restart-keeps-aot-on")
 			a_restart_keeps_the_choice_of_its_session(true);
 		else if (mode == "restart-keeps-aot-off")

@@ -54,6 +54,12 @@ namespace uml::cpu::arm64::aot {
  * is remembered: select() validates it at every boot. */
 void end_session() noexcept;
 
+/* The session's choice as it stands, and putting it back: a start that took
+ * the choice and then failed before its guest ran leaves the process as it
+ * was. The value means nothing but to restore_choice(). */
+[[nodiscard]] int choice() noexcept;
+void restore_choice(int choice) noexcept;
+
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {
 	tbi_disabled,
