@@ -22,6 +22,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -325,6 +326,23 @@ class InstallerPathTests(unittest.TestCase):
             "lib/arm64-v8a/libmagiskinit.so": b"another build"})
         self.replace(fixture, f"Magisk-{TEST_VERSION}.apk", other.read_bytes())
         self.refuses(fixture, "not the APK's arm64 magiskinit")
+
+    def test_a_manifest_that_repeats_a_key_is_not_installed(self) -> None:
+        # The installer, the standalone verifier and staging read a manifest by one
+        # rule. A key repeated with the same value collapses to the same object, so the
+        # descriptor still matches it: only the parse can tell.
+        fixture = ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)))
+        path = fixture.release / "release-manifest.json"
+        text = path.read_text()
+        start = text.index('"apk": {')
+        end = text.index("}", start)
+        repeated = re.sub(r'"size": (\d+)', r'"size": \1,\n      "size": \1', text[start:end])
+        self.assertNotEqual(repeated, text[start:end])
+        path.write_text(text[:start] + repeated + text[end:])
+        self.assertEqual(json.loads(path.read_text()), fixture.manifest)
+        self.refuses(fixture, "repeats the key")
+        with self.assertRaisesRegex(SystemExit, "repeats the key"):
+            magisk_image.verify_release_root(fixture.release, SystemExit)
 
     def test_stock_digests_that_are_not_the_disks_are_not_installed(self) -> None:
         fixture = ReleaseFixture(Path(tempfile.mkdtemp(dir=self.directory)))

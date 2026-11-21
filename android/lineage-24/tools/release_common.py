@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 _ARTIFACTS = str(Path(__file__).resolve().parents[3] / "kernel/common/artifacts")
 if _ARTIFACTS not in sys.path:
     sys.path.insert(0, _ARTIFACTS)
-from contract_checks import ContractChecks, parse_config, sha256_path  # noqa: E402
+from contract_checks import ContractChecks, parse_config, parse_json_object, sha256_path  # noqa: E402
 from kernel_artifact import verify_config_policy  # noqa: E402
 
 import magisk_image  # noqa: E402
@@ -255,11 +255,11 @@ def load_manifest(release_root: Path) -> dict:
     path = release_root / "release-manifest.json"
     if not path.is_file() or path.is_symlink():
         fail("release-manifest.json is missing or unsafe")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        fail(f"cannot read release manifest: {error}")
-    return validate_manifest(value)
+    # Read once, bounded, and parsed by the repository's duplicate-key policy: the
+    # object returned is the one the installer verifies, renders and hands on, and the
+    # standalone verifier and staging read a manifest by the same rule.
+    data = magisk_image.read_file(path, magisk_image.MAX_MANIFEST, "the release manifest", error)
+    return validate_manifest(parse_json_object(data, "the release manifest", error))
 
 
 def validate_manifest(value: object) -> dict:
