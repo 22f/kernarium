@@ -1063,6 +1063,13 @@ class Guest:
         text = result.stdout.strip().split()
         return int(text[0]) if result.returncode == 0 and text and text[0].isdigit() else None
 
+    def pids(self) -> set[int]:
+        """Every pid of the service's package: pidof lists them all, and a process that is being ended is listed
+        beside its successor until it is gone."""
+        result = self.adb_run("shell", f"pidof {PACKAGE}", timeout=30)
+        words = result.stdout.strip().split()
+        return {int(word) for word in words if word.isdigit()} if result.returncode == 0 else set()
+
     def strict_pid(self) -> int | None:
         """The service's pid, or None when it has no process. Output that is not pids is no answer (the shell or
         adb failed), and a row that says the process is gone must not take it for one."""
@@ -1187,14 +1194,18 @@ class Run:
         return exchange.outcome == "answered" and parse_answer(exchange.payload).kind == "refused-version"
 
     def wait_serving(self, previous: int | None, seconds: float = RESTART_SECONDS) -> None:
-        """Until the service answers from a process other than ``previous``. The service has a process only while a
-        session runs, so a request is what starts the next one, and the answer comes first."""
+        """Until the service answers from a process other than ``previous``, and ``previous`` is gone from the whole
+        set of pids (a successor that is listed beside the process that was ended has not seen it die). The service
+        has a process only while a session runs, so a request is what starts the next one, and the answer comes
+        first."""
         def check() -> str | None:
             if not self.ping():
                 return "the service does not answer"
-            pid = self.guest.pid()
-            if pid is None or pid == previous:
-                return f"the pid is {pid}, was {previous}"
+            pids = self.guest.pids()
+            if not pids:
+                return f"the service has no process, {previous} ran before"
+            if previous in pids:
+                return f"the process {previous} that ran before is still listed (pids {sorted(pids)})"
             return None
         wait_until("the service restarting", seconds, check, self.guest)
 

@@ -1028,6 +1028,10 @@ class SimulatedGuest:
     def pid(self) -> int | None:
         return self.sim.session()
 
+    def pids(self) -> set[int]:
+        pid = self.sim.session()
+        return set() if pid is None else {pid}
+
     @property
     def log(self) -> SimpleNamespace:
         return SimpleNamespace(read_text=lambda errors="strict": self.sim.console)
@@ -1567,13 +1571,47 @@ class OnDemandTests(unittest.TestCase):
             return True
 
         with mock.patch.object(SimulatedGuest, "kill_service", spared), mock.patch.object(runner, "KILL_ROUNDS", 3):
-            with self.assertRaisesRegex(runner.Failure, "the service restarting: the pid is"):
+            with self.assertRaisesRegex(runner.Failure, "the service restarting: the process .* that ran before is still "
+                                                        "listed"):
                 self.run_row(runner.row_i4, survives, RecordingHost)
         failing = Simulation()
         failing.kill_succeeds = False
         with mock.patch.object(runner, "KILL_ROUNDS", 3):
             with self.assertRaisesRegex(runner.Failure, "'am force-stop android.kernarium.sms' did not succeed"):
                 self.run_row(runner.row_i4, failing, RecordingHost)
+        # A successor that pidof lists beside the process that was ended has not seen that process die: the round
+        # counts only when the old pid is absent from the whole set. A listing that clears is waited out; one that
+        # does not clear fails the row.
+        class Lingering(SimulatedGuest):
+            polls_listing_the_old_one = 2
+
+            def kill_service(self) -> bool:
+                self.old = self.sim.pid
+                self.polls = 0
+                return super().kill_service()
+
+            def pids(self) -> set[int]:
+                found = super().pids()
+                self.polls += 1
+                if found and self.polls <= self.polls_listing_the_old_one:
+                    found = found | {self.old}
+                return found
+
+        for lingers, stays in ((2, False), (10 ** 6, True)):
+            simulation = Simulation()
+            guest = Lingering(simulation)
+            guest.polls_listing_the_old_one = lingers
+            run = runner.Run(SimpleNamespace(variant="messaging"), guest, {})
+            run.host = RecordingHost(simulation)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+                stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+                stack.enter_context(mock.patch.object(runner, "KILL_ROUNDS", 2))
+                if stays:
+                    with self.assertRaisesRegex(runner.Failure, "the process .* that ran before is still listed"):
+                        runner.row_i4(run)
+                else:
+                    runner.row_i4(run)
         # A round whose ping leaves no process (the service answered from none) has nothing to end.
         class NoProcess(SimulatedGuest):
             def pid(self) -> int | None:
