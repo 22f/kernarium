@@ -24,7 +24,7 @@ final class AccessibilityUITests: XCTestCase {
         ("session-graphics-notice", ""), ("settings", "Settings"),
         ("settings-accessibility", "settings-talkback"), ("settings-adb", "Settings"),
         ("install-done", ""), ("install-failed", ""), ("space-pause", "space-pause"),
-        ("space-pause-running", "space-pause"), ("recovery-open", "side-keys-power"), ("failed", ""),
+        ("space-pause-running", "space-pause"), ("recovery-open", "side-keys-power"), ("failed", ""), ("failed-memory", ""),
     ]
 
     override func setUp() {

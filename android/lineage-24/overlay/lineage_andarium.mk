@@ -535,13 +535,16 @@ PRODUCT_PACKAGES += KernariumPinnerOverlay
 
 # Text messages come from the host only: the Andarium application sends one
 # over its own vsock port to KernariumSms (sms/), which delivers it as the radio
-# stack delivers one from the network. Messaging is the SMS application and
+# stack delivers one from the network. The service runs only while messages are
+# in flight: a small native holder keeps the port from boot and never reads it,
+# and starts the service through a script (sms/listener) when a connection
+# waits. Messaging is the SMS application and
 # TelephonyProvider stores the messages. The product declares
 # android.hardware.telephony.messaging and config_sms_capable, which the SMS
 # role needs, and no telephony: nothing in the guest can send a message.
 # TelephonyProvider requests MANAGE_APP_OPS_MODES itself (route p0034), which
 # TeleService otherwise brings to their shared uid.
-PRODUCT_PACKAGES += KernariumSms messaging TelephonyProvider
+PRODUCT_PACKAGES += KernariumSms kernarium_sms_listener kernarium_sms_wake_script messaging TelephonyProvider
 
 # Once boot completes, a script saves the virtual Wi-Fi network (VirtWifi, open)
 # the first time, and saves it again on a boot before the station first joins it

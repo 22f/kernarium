@@ -17,10 +17,8 @@
 #include <mutex>
 #include <stdexcept>
 #include <utility>
-#ifndef UML_APP_STORE_RUNTIME
 #include <cstdio>
 #include <cstdlib>
-#endif
 
 namespace uml::gpu {
 namespace {
@@ -69,7 +67,6 @@ constexpr std::int64_t resizeSettleNanoseconds =
 #pragma clang diagnostic pop
 }
 
-#ifndef UML_APP_STORE_RUNTIME
 /* The display link's own report, on the frame statistics switch of the other
  * display reports (metal_presentation.mm): what rate it asked for and what iOS
  * gave. */
@@ -78,7 +75,6 @@ constexpr std::int64_t resizeSettleNanoseconds =
     static const bool enabled = std::getenv("UML_GPU_FRAME_STATS") != nullptr;
     return enabled;
 }
-#endif
 
 } // namespace
 
@@ -151,9 +147,7 @@ struct NativeDisplayState final :
      * drawable: one delay at a time, up to the pacer's limit for the frame
      * (which a frame that arrives renews and nothing else does). */
     void drawWithoutLink() noexcept;
-#ifndef UML_APP_STORE_RUNTIME
     void reportLink(double now) noexcept;
-#endif
 
     /* The rate the run was granted, once and for all before the guest booted
      * (NativeDisplay::grantedRefreshRate), and the rate of the mode the guest
@@ -176,14 +170,12 @@ struct NativeDisplayState final :
     LinkFrameRate requestedRange {};
     /* Set by the view's draw (the delegate): what the draw came to. */
     DrawOutcome drawResult;
-#ifndef UML_APP_STORE_RUNTIME
     double reportStart {};
     double grantedSum {};
     std::uint64_t reportTicks {};
     std::uint64_t reportDraws {};
     std::uint64_t reportWakes {};
     std::uint64_t reportSleeps {};
-#endif
 
     id<MTKViewDelegate> delegate;
     id resizeWillBeginObserver;
@@ -610,9 +602,7 @@ void NativeDisplayState::wakeLink() noexcept
         CACurrentMediaTime(), guestFramesOffered(), linkCeiling(scene)));
     linkAwake.store(true, std::memory_order_seq_cst);
     link.paused = NO;
-#ifndef UML_APP_STORE_RUNTIME
     ++reportWakes;
-#endif
 }
 
 UIWindowScene* NativeDisplayState::viewScene() const noexcept
@@ -737,15 +727,11 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
             pacer.drew(drawResult.result == DrawResult::unavailable,
                 drawResult.drawableWaitSeconds);
         }
-#ifndef UML_APP_STORE_RUNTIME
         ++reportDraws;
-#endif
     }
-#ifndef UML_APP_STORE_RUNTIME
     ++reportTicks;
     grantedSum += ticking.targetTimestamp - ticking.timestamp;
     reportLink(now);
-#endif
     if (!decision.sleep)
         return;
     linkAwake.store(false, std::memory_order_seq_cst);
@@ -756,9 +742,7 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
         return;
     }
     ticking.paused = YES;
-#ifndef UML_APP_STORE_RUNTIME
     ++reportSleeps;
-#endif
 }
 
 void NativeDisplayState::stopLink() noexcept
@@ -768,7 +752,6 @@ void NativeDisplayState::stopLink() noexcept
     linkTarget = nil;
 }
 
-#ifndef UML_APP_STORE_RUNTIME
 void NativeDisplayState::reportLink(double now) noexcept
 {
     if (!linkReportsEnabled())
@@ -800,7 +783,6 @@ void NativeDisplayState::reportLink(double now) noexcept
     reportSleeps = 0;
     grantedSum = 0.0;
 }
-#endif
 
 void NativeDisplayState::shutdown() noexcept
 {

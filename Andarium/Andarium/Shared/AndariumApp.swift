@@ -34,18 +34,23 @@ final class AndariumProcess {
     let entry: AppEntry
     let model: AppModel
 
+    /// What a process that ended left in the temporary directory is of no use: a
+    /// report staged for sharing, a file staged for an export, the copies of a
+    /// pick, and what an older build staged for a feedback draft. A test gives
+    /// a root of its own.
+    static func sweepLeftovers(in temporary: URL = FileManager.default.temporaryDirectory) {
+        BugReportStaging.sweep(in: temporary)
+        GuestFileStaging.sweep(in: temporary)
+        PickedFolder.sweep(in: PickedFolder.directory(in: temporary))
+        LegacyFeedbackFolder.sweep(in: temporary)
+    }
+
     private init() {
         entry = AppEntry.fromArguments()
         entry.configureTips()
-        // A report staged for sharing by a process that ended is of no use.
         // This is the process's launch: a test that builds a model does not
-        // sweep the folder a running test stages its files in.
-        BugReportStaging.sweep()
-        GuestFileStaging.sweep()
-        PickedFolder.sweep()
-        #if FEEDBACK_MAIL
-        SendFeedbackStaging().sweep()
-        #endif
+        // sweep the folders a running test stages its files in.
+        Self.sweepLeftovers()
         model = entry.makeModel()
         // An App Intent that runs in this process hands its request to this model.
         AndroidAppsHub.shared.attach(model)
@@ -59,20 +64,6 @@ final class AndariumProcess {
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
             Task { await AndroidAppsHub.shared.writer.reconcile() }
         }
-        #if TIP_JAR
-        // From launch: a purchase the store delivers outside the sheet (an
-        // approval, an interrupted purchase) is finished, whether or not the
-        // sheet is ever opened.
-        #if !APP_STORE
-        // A hosted test owns StoreKit's queue, and the launch's own listener
-        // would finish its transactions before the test looks.
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
-            TipJarUpdates.listen(model.tipJarServices.store)
-        }
-        #else
-        TipJarUpdates.listen(model.tipJarServices.store)
-        #endif
-        #endif
     }
 }
 
@@ -192,12 +183,6 @@ struct RootView: View {
             Text(alert.message.keepingTogether)
         }
         .legacyInstallAlert()
-        #if FEEDBACK_MAIL
-        // The sheet the boot screen's notice opens: over every phase, so a
-        // draft survives the boot that ends.
-        .sendFeedbackFromBootSheet(model)
-        #endif
-        #if !APP_STORE
         .task {
             // The launch's automation work happens once per model: a scene
             // that connects again must not create, erase or start the guest
@@ -206,7 +191,6 @@ struct RootView: View {
             model.launchApplied = true
             await entry.applyDeferred(to: model)
         }
-        #endif
     }
 }
 

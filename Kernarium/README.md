@@ -2,7 +2,8 @@
 
 Kernarium is the iOS application that runs one Linux or Android guest on the
 Darwin runtime. It targets the iOS device, whose slice also runs on an Apple
-silicon Mac in Designed for iPad mode, and the iOS Simulator, where the guest
+silicon Mac in Designed for iPad mode (macOS 27.0 and later:
+`LSMinimumSystemVersion`), and the iOS Simulator, where the guest
 renders on the CPU for UI tests
 ([`graphics.md`](../docs/graphics.md#ios-simulator-software-renderer)). Build,
 launch, and test commands are in
@@ -67,7 +68,11 @@ notice when the limit leaves the GPU less than its floor; nothing refuses a
 launch for lack of memory. Only a guest RAM the runtime does not admit
 (`kernarium_runtime_loader_guest_memory_admitted`, the runtime's own rule) ends
 a start, before the run and with a notice that says why; the settings never
-offer such a size. The settings ask the loader
+offer such a size, and where the loader's bound is zero (the process has no
+room for even the smallest window) they offer no RAM stepper and the notice
+gives the reason alone, and saving the settings keeps the stored size (a zero
+an earlier version stored counts as none: the default applies). The
+settings ask the loader
 (`kernarium_runtime_loader_maximum_guest_memory_mib`) for the RAM bound and a
 new configuration's guest RAM
 (`kernarium_runtime_loader_default_guest_memory_mib` at the loaded vCPU count,
@@ -138,10 +143,9 @@ unified `rootfs.erofs` carries none of it and boots to its own defaults.
 ## Automation runs
 
 The release runtime accepts no host payload and carries no test campaign.
-Test and benchmark drivers package one of two automation variants instead, and
-Andarium's App Store configuration a third runtime; the packaging script
-(`scripts/package-ios-frameworks.sh`) checks that a release runtime carries
-none of the settings below.
+Test and benchmark drivers package one of two automation variants instead; the
+packaging script (`scripts/package-ios-frameworks.sh`) checks that a release
+runtime carries none of the settings below.
 
 - **Linux automation**: the `kernarium-ios-device-automation` preset
   (`UML_KERNARIUM_AUTOMATION_HARNESS`), packaged with `--automation`. Only it
@@ -171,25 +175,6 @@ none of the settings below.
   `KERNARIUM_BACKGROUND_HOLD_DELAY_MS`, which start a background job with the
   guest and move the GPU hold for a measurement; the packaging script refuses a
   release runtime that contains their names.
-- **App Store runtime**: the `kernarium-ios-device-android-app-store` preset
-  (`UML_APP_STORE_RUNTIME`), packaged with `--app-store --runtimes android` for
-  Andarium's App Store configuration; it conflicts with the automation harness.
-  Every environment variable that tunes, observes or drives a run is read as
-  unset (the `KERNARIUM_` knobs and the `UML_` and `DARWIN_UML_` diagnostics;
-  `TMPDIR` stays). It also carries none of the debugging support, so a shipped
-  application cannot capture its screen, inject input, profile itself or log
-  its memory: the frame mirror, console input (the console output relay stays),
-  the guest sampler, the footprint log, the virtual Jetsam, the activity logs,
-  the frame statistics reports and the JIT (no engine, no executable-memory
-  owner; `prepare_jit` answers unsupported and `use_jit` is ignored). Configuring it with
-  `UML_GADGET_CACHE_CENSUS` or `UML_GADGET_EXECUTION_HISTOGRAM` fails. The
-  runtime API table keeps its layout and version, so `set_frame_sink` and
-  `send_console_input` answer `-ENOTSUP`; touch and key input, adb over vsock,
-  the statistics and motion channels and the lifecycle, trim and budget calls
-  are product features and stay. `Andarium/scripts/check-app-store-bundle.py
-  --runtime`, which packaging runs, refuses the symbols and log text of what is
-  left out. Switches that third-party libraries read from the environment stay
-  in the shipped libraries; nothing reaches them on an installed application.
 
 The launcher alone tells an Android guest how adbd is reached, on its kernel
 command line; a release's command-line file cannot set these arguments. The
@@ -266,7 +251,7 @@ Kernarium attaches:
   the host owns the guest's rotation: each boot derives every camera's sensor
   orientation from it, and a change after the boot turns the picture by the
   difference ([orientation](../darwin/device/camera/README.md#orientation)). A
-  runtime that is not an App Store build serves the synthetic camera when
+  runtime serves the synthetic camera when
   `KERNARIUM_CAMERA_SOURCE` names it, serves the host's cameras with only the
   back ones openable for `host:back` (the front camera is listed, so the
   layout is an image's, every request to open it is refused before the host,
@@ -436,11 +421,14 @@ decides what the lifecycle edges do and acts only through
   Picture in Picture window. The runtime mirrors the display to a sink the
   application sets (`kernarium_runtime_loader_set_frame_sink`,
   [`graphics.md`](../docs/graphics.md)), which feeds an
-  `AVSampleBufferDisplayLayer`. It needs the `audio` background mode in
+  `AVSampleBufferDisplayLayer`: through the receiver of a render synchronizer
+  on the host clock from iOS 27, and by enqueueing on the layer's renderer,
+  each frame marked to show at once, before it. It needs the `audio` background mode in
   `Info.plist` and a playback audio session that mixes with other audio.
 - `keepRunning` keeps a guest working without a window for a time its owner
   chose, through one `BGContinuedProcessingTask` (`BackgroundJob`) that the
-  user starts with a button tap. iOS grants that task no GPU, so the guest's GPU
+  user starts with a button tap (submitted through `submitTaskRequest` from
+  iOS 27 and `submit(_:)` before). iOS grants that task no GPU, so the guest's GPU
   requests stay held for the whole stay.
 - A guest kept running has its vCPU threads at background priority
   (`set_background_throttle`) and trims its page cache periodically

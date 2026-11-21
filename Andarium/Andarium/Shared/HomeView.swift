@@ -51,13 +51,12 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    #if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
-                    HomeToolbarMenu()
-                    #else
                     HomeInfoButton()
-                    #endif
                 }
             }
+            // Looks for a newer version of Andarium a few seconds after Home
+            // shows; a start cancels it, and it never stands before Start.
+            .task { await model.readAppUpdateWhenHomeShows() }
         }
         .sheet(item: $model.sheet) { kind in
             // On a Mac, SwiftUI reads a sheet's presentation preferences
@@ -74,17 +73,15 @@ struct HomeView: View {
                 case .whatsNew:
                     WhatsNewSheet(releases: model.whatsNew.pending)
                         .modifier(ZoomFrom(id: Self.ribbonID, namespace: whatsNewZoom, enabled: !reduceMotion))
+                case .appUpdate:
+                    if let notice = model.appUpdate {
+                        UpdateDetailSheet(notice: notice) { StackMark(lit: true, width: 62) }
+                    }
                 }
             }
             .environment(model)
             .foldSheet(model)
         }
-        #if FEEDBACK_MAIL
-        .sendFeedbackSheet(model)
-        #endif
-        #if TIP_JAR
-        .tipJarSheet(model)
-        #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
         .cameraAccessAlert()
@@ -215,13 +212,10 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// JIT, right below Virtual machine, in the builds that have it. An App Store
-    /// build has none and nothing takes its place.
+    /// JIT, right below Virtual machine.
     @ViewBuilder
     private var developmentSections: some View {
-        #if !APP_STORE
         JitSection()
-        #endif
     }
 
     /// Capabilities and Backup: what the guest may use.
@@ -234,19 +228,13 @@ struct HomeView: View {
     @ViewBuilder
     private var notices: some View {
         @Bindable var model = model
+        // A newer version of Andarium comes first among the notices.
+        AppUpdateCard()
         // An app an icon, Shortcuts, Search or Siri asked to open waits for the
         // answer the notices below ask: the card says which, above them.
         if let pending = model.androidApps.open.pending, case let .waiting(hold, _) = pending.stage, hold != .snapshot {
             AppOpenWaitingCard(request: pending.request, hold: hold)
         }
-        // The App Store notice of a TestFlight build comes first: it is
-        // dismissible and says nothing about the virtual machine, and the
-        // person has it before the notices that do.
-        #if TESTFLIGHT_STORE_LINK
-        if model.storeNoticeShown {
-            StoreNoticeCard()
-        }
-        #endif
         if !model.host.runsGuestGraphics {
             NoticeCard(
                 symbol: "cpu", color: .orange,
@@ -483,20 +471,11 @@ struct WelcomeView: View {
 
     var body: some View {
         // While the device is bent a half can be shorter than the column: it
-        // scrolls only then, and while the App Store notice is up, which makes
-        // the column taller than a short display.
+        // scrolls only then.
         column
-            .scrollsWhenTall(also: noticeIsUp)
+            .scrollsWhenTall()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onCardHalf(.welcome)
-    }
-
-    private var noticeIsUp: Bool {
-        #if TESTFLIGHT_STORE_LINK
-        model.storeNoticeShown
-        #else
-        false
-        #endif
     }
 
     private var column: some View {
@@ -507,15 +486,6 @@ struct WelcomeView: View {
             Text("No virtual machine yet")
                 .font(.title2.weight(.bold))
                 .accessibilityAddTraits(.isHeader)
-            #if TESTFLIGHT_STORE_LINK
-            // Before any virtual machine exists, the one moment when switching
-            // costs nothing.
-            if model.storeNoticeShown {
-                StoreNoticeCard()
-                    .frame(maxWidth: 400)
-                    .padding(.top, 20)
-            }
-            #endif
             if !model.host.runsGuestGraphics {
                 NoticeCard(
                     symbol: "cpu", color: .orange,
@@ -563,36 +533,20 @@ struct NoticeCard: View {
     /// What VoiceOver says for the close button.
     var closeLabel = String(localized: "Dismiss")
     var onClose: (() -> Void)?
-    #if TESTFLIGHT_STORE_LINK
-    /// The App Store notice's picture in place of the symbol, and its second
-    /// line under the text.
-    var picture: AnyView?
-    var note: String?
-    /// The button is an element of its own after the words, which are one.
-    var buttonIsOwnElement = false
-    #endif
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            leading
+            Image(systemName: symbol)
+                .font(.title3)
+                .foregroundStyle(color)
+                .frame(width: 28)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title.keepingTogether).font(.subheadline.weight(.semibold))
-                    Text(text.keepingTogether)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    #if TESTFLIGHT_STORE_LINK
-                    if let note {
-                        Text(note.keepingTogether)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 6)
-                    }
-                    #endif
-                }
-                .accessibilityElement(children: .combine)
+                Text(title.keepingTogether).font(.subheadline.weight(.semibold))
+                Text(text.keepingTogether)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let action {
                     Button(action.label, action: action.perform)
                         .buttonStyle(.glass)
@@ -602,9 +556,8 @@ struct NoticeCard: View {
                         .accessibilityIdentifier(action.identifier ?? "")
                 }
             }
-            // The title and its words are read as one, and so is a button after them
-            // unless it is an element of its own.
-            .accessibilityElement(children: textReading)
+            // The title and its words are read as one.
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
             if let onClose {
                 Button(action: onClose) {
@@ -623,35 +576,6 @@ struct NoticeCard: View {
         .padding(14)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .accessibilityElement(children: .contain)
-    }
-
-    private var textReading: AccessibilityChildBehavior {
-        #if TESTFLIGHT_STORE_LINK
-        buttonIsOwnElement ? .contain : .combine
-        #else
-        .combine
-        #endif
-    }
-
-    @ViewBuilder
-    private var leading: some View {
-        #if TESTFLIGHT_STORE_LINK
-        if let picture {
-            picture
-        } else {
-            symbolImage
-        }
-        #else
-        symbolImage
-        #endif
-    }
-
-    private var symbolImage: some View {
-        Image(systemName: symbol)
-            .font(.title3)
-            .foregroundStyle(color)
-            .frame(width: 28)
-            .accessibilityHidden(true)
     }
 }
 
@@ -672,7 +596,7 @@ struct UnfinishedUpdateCard: View {
                     .frame(width: 28)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Andarium’s update didn’t finish").font(.subheadline.weight(.semibold))
+                    Text("System image update didn’t finish").font(.subheadline.weight(.semibold))
                     Text(text)
                         .font(.footnote)
                         .foregroundStyle(.secondary)

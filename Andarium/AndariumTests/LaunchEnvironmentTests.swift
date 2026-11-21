@@ -4,10 +4,8 @@ import Testing
 
 @testable import Andarium
 
-#if !APP_STORE
-
-/// The environment names a harness launch uses are the application's, and an
-/// App Store build has none (`Andarium/README.md#automation`).
+/// The environment names a harness launch uses are the application's
+/// (`Andarium/README.md#automation`).
 struct LaunchEnvironmentTests {
     @Test func everySettingHasItsOwnName() {
         let names = LaunchOverrides.Setting.allCases.map { LaunchOverrides.environmentName($0) }
@@ -160,5 +158,3 @@ struct LaunchEnvironmentTests {
         #expect(LaunchOverrides(environment: [:], processorCount: 4).isEmpty)
     }
 }
-
-#endif

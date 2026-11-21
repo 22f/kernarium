@@ -4,9 +4,7 @@
 
 #include "display_activity_log.hpp"
 #include "display_geometry.hpp"
-#ifndef UML_APP_STORE_RUNTIME
 #include "frame_tap_registry.hpp"
-#endif
 #include "metal_scanout_shader.hpp"
 
 #import <CoreVideo/CoreVideo.h>
@@ -43,13 +41,6 @@ namespace {
     });
 }
 
-#ifdef UML_APP_STORE_RUNTIME
-/* An App Store runtime reports no frame statistics. */
-[[nodiscard]] constexpr double frameStatisticsInterval() noexcept
-{
-    return 0.0;
-}
-#else
 [[nodiscard]] double frameStatisticsInterval() noexcept
 {
     static const double interval = [] {
@@ -67,7 +58,6 @@ namespace {
     }();
     return interval;
 }
-#endif
 
 } // namespace
 
@@ -138,18 +128,14 @@ struct MetalPresentationState final :
             ++latestContentGeneration;
             ++latestPresentationGeneration;
         }
-#ifndef UML_APP_STORE_RUNTIME
         markTapDirty();
-#endif
         requestRedraw();
     }
 
-#ifndef UML_APP_STORE_RUNTIME
     /* The mirror (frame_tap.hpp): a second render of the latest guest
      * content into pool-backed IOSurface buffers, on its own thread, so that
      * it runs when there is no window to draw into. Nothing here runs while
-     * no sink is set, beyond the thread's wait. An App Store runtime has no
-     * mirror. */
+     * no sink is set, beyond the thread's wait. */
 
     void startTap()
     {
@@ -388,7 +374,6 @@ struct MetalPresentationState final :
             }
         }
     }
-#endif
 
     void drawableSizeChanged() noexcept
     {
@@ -523,9 +508,7 @@ struct MetalPresentationState final :
                     "Native display: direct Metal texture presentation\n",
                     stderr);
             }
-#ifndef UML_APP_STORE_RUNTIME
             markTapDirty();
-#endif
             /* An accepted scanout is one offered frame, counted before the
              * redraw that shows it can look. */
             offeredFrames.fetch_add(1, std::memory_order_release);
@@ -744,7 +727,7 @@ struct MetalPresentationState final :
                 }
                 [encoder endEncoding];
                 [buffer presentDrawable:drawable];
-#if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
+#if TARGET_OS_IOS
                 if (frameStatisticsInterval() > 0.0) {
                     auto shown = shared_from_this();
                     [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
@@ -774,7 +757,7 @@ struct MetalPresentationState final :
         return DrawResult::done;
     }
 
-#if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
+#if TARGET_OS_IOS
     /* The drawable's own presentation time says when iOS showed a frame, where
      * presentedFrames counts the end of the GPU work. The gaps between shown
      * frames fall in five bins: under 10 ms, 10-14, 14-20, 20-50, 50 or more.
@@ -903,7 +886,7 @@ struct MetalPresentationState final :
             static_cast<unsigned long long>(total.presentedFrames),
             static_cast<unsigned long long>(total.droppedFrames),
             static_cast<unsigned long long>(total.cpuFallbackFrames));
-#if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
+#if TARGET_OS_IOS
         reportOnscreen(seconds);
 #endif
     }
@@ -912,7 +895,6 @@ struct MetalPresentationState final :
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
     ScanoutPipelines pipelines;
-#ifndef UML_APP_STORE_RUNTIME
     std::thread tapThread;
     std::atomic_bool tapDirty {};
     std::atomic_int tapInFlight {};
@@ -921,7 +903,6 @@ struct MetalPresentationState final :
     std::uint32_t tapPoolWidth {};
     std::uint32_t tapPoolHeight {};
     std::uint64_t tapFrames {};
-#endif
     id<MTLTexture> fallbackTexture;
     id<MTLTexture> latestTexture;
     ScanoutSampling latestSampling;
@@ -958,9 +939,7 @@ MetalPresentation::MetalPresentation(
     std::uint32_t width, std::uint32_t height)
     : state_(std::make_shared<MetalPresentationState>(width, height))
 {
-#ifndef UML_APP_STORE_RUNTIME
     state_->startTap();
-#endif
 }
 
 MetalPresentation::~MetalPresentation()
@@ -1055,9 +1034,7 @@ void MetalPresentation::shutdown() noexcept
         return;
     }
     state_->reportFinal();
-#ifndef UML_APP_STORE_RUNTIME
     state_->stopTap();
-#endif
     std::lock_guard lock(state_->callbackMutex);
     state_->redrawCallback = {};
 }

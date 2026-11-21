@@ -85,7 +85,8 @@ REFUSALS: list[tuple[list[str], str]] = [
      CONFIGURE + "--camera-profile requires --camera=synthetic or "
      "--camera=blocked"),
     (["--camera=synthetic", "--camera-profile=watch"],
-     CONFIGURE + "--camera-profile must be phone, tablet or laptop"),
+     CONFIGURE + "--camera-profile must be phone, tablet, laptop or "
+     "phone-turned-front"),
     (["--camera-layout=auto"],
      CONFIGURE + "--camera-layout requires --camera"),
     (["--camera=synthetic", "--camera-layout=front"],

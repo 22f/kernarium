@@ -18,9 +18,7 @@ nonisolated enum ThermalSource {
     /// The state now: the launch's own in a development build that states one
     /// (`ThermalOverride`), else the system's.
     static func current() -> HostThermalState {
-        #if !APP_STORE
         if let stated = ThermalOverride.stated(in: ProcessInfo.processInfo.environment) { return stated }
-        #endif
         return HostThermalState(ProcessInfo.processInfo.thermalState)
     }
 }

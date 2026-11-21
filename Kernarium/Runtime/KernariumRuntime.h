@@ -248,7 +248,8 @@ typedef struct kernarium_runtime_gpu_budget {
  * call returns only when the guest powers off, the application stops it, a run
  * fails, or the restart-loop guard ends the loop. It returns the guest's own
  * status (0 for a power-off or a stop), a negated uml_emulator error constant
- * for a run or start-up that failed, or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
+ * for a run or start-up that failed, KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED
+ * or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
  * For Android, 0 means the guest powered off cleanly and all its resources have
  * been released: another run may start in this process. A host stop or an
  * unreported shutdown returns an error. */
@@ -257,6 +258,19 @@ typedef int (*kernarium_runtime_run_function)(
     const kernarium_runtime_boot* boot);
 
 enum {
+    /* The host could not give the guest what its size needs, the address space
+     * for its kernel window and heap or the memory limit for its RAM, and
+     * nothing was started: the run ended before its kernel began. The size can
+     * be lowered and the run tried again. The runtime returns it for a run
+     * that the library marked, on its handle, as refused for that reason
+     * (emulator/src/start_refusal.hpp), and for no other failure: the
+     * library's -UML_EMULATOR_OUT_OF_MEMORY also comes from a failed
+     * allocation of its own, and is returned as it is. A guest's own exit
+     * status is returned as it is too, so a guest whose user writes exactly
+     * this value as its status (root, through /proc/exitcode) returns it
+     * without any refusal. It is outside the range of the negated
+     * uml_emulator errors (-1 through -4). */
+    KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED = -101,
     /* The guest restarted itself five times in a row within 15 seconds of its
      * boot, or, for Android, eight times in a row each within 15 seconds or
      * before its boot had finished (init processed sys.boot_completed=1,
@@ -289,8 +303,8 @@ enum {
      * count, and the debugger, if one made it, has detached. A boot that sets
      * use_jit runs on the JIT. */
     KERNARIUM_RUNTIME_JIT_READY = 0,
-    /* This runtime has no JIT: an App Store runtime, or a build for the
-     * Simulator or a host that cannot make executable memory. */
+    /* This runtime has no JIT: a build for the Simulator or a host that cannot
+     * make executable memory. */
     KERNARIUM_RUNTIME_JIT_UNSUPPORTED = 1,
     /* No debugger is attached to the process, or the one that was left
      * before it served the request, so none prepared the memory. A boot
@@ -420,10 +434,7 @@ typedef void (*kernarium_runtime_console_output_callback)(
 typedef void (*kernarium_runtime_set_console_output_callback_function)(
     kernarium_runtime_console_output_callback callback,
     void* context);
-/* Writes to the guest's console. An App Store runtime (the
- * kernarium-ios-device-android-app-store preset) has no console input: its
- * entry stays in the table, so the table's layout and version are the same in
- * every runtime, and answers -ENOTSUP. */
+/* Writes to the guest's console. */
 typedef int (*kernarium_runtime_send_console_input_function)(
     const void* buffer,
     size_t length);
@@ -470,9 +481,7 @@ typedef void (*kernarium_runtime_frame_sink)(void* context, void* pixel_buffer);
  * A null sink stops the mirror, and returns only once no call to the previous
  * sink is running or will start, so its context may be released; the sink must
  * not call this. Returns 0, or a negative value for a width or rate of zero.
- * The setting applies to the guest's display whenever one exists. An App Store
- * runtime has no mirror: its entry stays in the table and answers -ENOTSUP for
- * any arguments. */
+ * The setting applies to the guest's display whenever one exists. */
 typedef int (*kernarium_runtime_set_frame_sink_function)(
     kernarium_runtime_frame_sink sink,
     void* context,

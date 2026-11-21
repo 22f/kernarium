@@ -34,9 +34,7 @@ final class PreferenceKeeper {
         if let on = model.pointerAsTouchToKeep { PointerPreference(defaults: defaults).keep(on) }
         if let on = model.heatLimitToKeep { HeatLimitPreference(defaults: defaults).keep(on) }
         if let on = model.highRefreshToKeep { HighRefreshPreference(defaults: defaults).keep(on) }
-        #if !APP_STORE
         if let on = model.jitToKeep { JitPreference(defaults: defaults).keep(on) }
-        #endif
     }
 
     private func observe() {
@@ -44,9 +42,7 @@ final class PreferenceKeeper {
         withObservationTracking {
             _ = (model.displayOptionsToKeep, model.showStatsToKeep, model.pointerAsTouchToKeep, model.heatLimitToKeep)
             _ = model.highRefreshToKeep
-            #if !APP_STORE
             _ = model.jitToKeep
-            #endif
         } onChange: { [weak self] in
             // The model belongs to the main actor, so the change begins there;
             // the write waits until it has been made.

@@ -10,7 +10,7 @@ script on it. The staged and the packaged system disk are tied to the accepted
 release as installed below .build/android/releases, not to a digest their own
 layout names, and a repeated JSON key is refused. An unsigned proof image, which a developer build may embed, is
 refused in the staged and the packaged system, and the Xcode build phase that
-runs the check does so for the AppStore and TestFlight configurations only.
+runs the check does so for an archive of the Release configuration only.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import gzip
 import importlib.util
 import json
 import os
+import plistlib
 import re
 import shutil
 import struct
@@ -238,7 +239,14 @@ class Fixture:
         framework = app / "Frameworks" / f"{FRAMEWORK}.framework"
         framework.mkdir(parents=True)
         (framework / FRAMEWORK).write_bytes(macho({"__uml_elf": kernel_image(release, config, **builders)}))
+        self.write_info(app)
         return app
+
+    @staticmethod
+    def write_info(app: Path, **info: object) -> None:
+        """The application's Info.plist, as the build writes it: no profile link."""
+        with (app / "Info.plist").open("wb") as handle:
+            plistlib.dump({"CFBundleName": "Andarium", **info}, handle)
 
     def run(self, *arguments: str, decision: str | None = None, app: bool = True, python: str = sys.executable):
         environment = {key: value for key, value in os.environ.items() if key != "PENDING_INPUTS_DECISION"}
@@ -958,16 +966,18 @@ def build_phase(name: str) -> dict:
 
 
 class BuildPhaseTests(unittest.TestCase):
-    """The AppStore and TestFlight configurations run the check; the others do not."""
+    """An archive of Release runs the check; no other build does."""
 
-    CONFIGURATIONS = ("Debug", "Release", "AppStore", "TestFlight")
+    # Each configuration and action (an archive is the install action).
+    BUILDS = (("Debug", "build"), ("Debug", "install"), ("Release", "build"), ("Release", "install"))
+    CHECKED = ("Release", "install")
 
     def setUp(self) -> None:
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         script = build_phase("Check embedded artifacts")["script"]
         self.script = script if isinstance(script, str) else "\n".join(script)
 
-    def run_phase(self, configuration: str, fixture: Fixture):
+    def run_phase(self, configuration: str, action: str, fixture: Fixture):
         # The phase's own text, with the checker named by path and the
         # repository the fixture's, as an archive's work tree is.
         command = self.script.replace(
@@ -975,7 +985,7 @@ class BuildPhaseTests(unittest.TestCase):
             f'"{SCRIPT}" --repository "{fixture.repo}"')
         self.assertIn(str(SCRIPT), command)
         environment = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CONFIGURATION": configuration,
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CONFIGURATION": configuration, "ACTION": action,
             "SRCROOT": str(REPOSITORY / "Andarium"), "TARGET_BUILD_DIR": str(fixture.app.parent),
             "WRAPPER_NAME": fixture.app.name,
         }
@@ -991,14 +1001,14 @@ class BuildPhaseTests(unittest.TestCase):
         # And that the application carries no AOT diagnostics build.
         self.assertIn("check-no-aot-diagnostics.py", self.script)
 
-    def test_a_staged_unsigned_proof_stops_an_appstore_and_a_testflight_build_only(self) -> None:
+    def test_a_staged_unsigned_proof_stops_a_release_archive_only(self) -> None:
         fixture = Fixture(self.root)
         staged = fixture.stage()
         (staged / "release-manifest.json").write_text(json.dumps(fixture.proof_manifest()))
         fixture.app = fixture.package()
-        self.assert_only_release_builds_refuse(fixture)
+        self.assert_only_a_release_archive_refuses(fixture)
 
-    def test_a_proof_the_staging_script_stages_stops_the_same_builds(self) -> None:
+    def test_a_proof_the_staging_script_stages_stops_the_same_build(self) -> None:
         # The staging script's own output, not a manifest written to look like it.
         import test_stage_system_image as staging
 
@@ -1011,40 +1021,96 @@ class BuildPhaseTests(unittest.TestCase):
             "--output", str(fixture.repo / ".build/andarium-system"))
         self.assertEqual(result.returncode, 0, result.stderr)
         fixture.app = fixture.package()
-        self.assert_only_release_builds_refuse(fixture)
+        self.assert_only_a_release_archive_refuses(fixture)
 
-    def assert_only_release_builds_refuse(self, fixture: Fixture) -> None:
-        for configuration in self.CONFIGURATIONS:
-            with self.subTest(configuration):
-                result = self.run_phase(configuration, fixture)
-                if configuration in ("AppStore", "TestFlight"):
+    def assert_only_a_release_archive_refuses(self, fixture: Fixture) -> None:
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
+                if build == self.CHECKED:
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("an unsigned proof image", result.stderr)
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stderr, "")
 
-    def test_an_aot_framework_stops_an_appstore_and_a_testflight_build_only(self) -> None:
+    def test_an_aot_framework_stops_a_release_archive_only(self) -> None:
         # No AOT artifact is accepted, so no archive may carry the component;
-        # a development build is not checked.
+        # a build that is not an archive is not checked.
         fixture = Fixture(self.root)
         framework = fixture.app / "Frameworks" / f"{AOT_FRAMEWORK}.framework"
         framework.mkdir(parents=True)
         (framework / AOT_FRAMEWORK).write_bytes(macho({"__text": b"x" * 64}))
-        for configuration in self.CONFIGURATIONS:
-            with self.subTest(configuration):
-                result = self.run_phase(configuration, fixture)
-                if configuration in ("AppStore", "TestFlight"):
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
+                if build == self.CHECKED:
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("no AOT artifact is accepted", result.stderr)
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_the_accepted_release_passes_the_phase_in_every_configuration(self) -> None:
+    def test_the_phase_also_runs_the_release_archive_check(self) -> None:
+        self.assertIn('"$SRCROOT/scripts/check-release-archive.py"', self.script)
+        # Joined to the checks before it: a refusal of any one stops the archive.
+        lines = [line for line in self.script.splitlines() if "check-" in line]
+        self.assertEqual(len(lines), 3, lines)
+        for line in lines[:-1]:
+            self.assertTrue(line.rstrip().endswith("&&"), line)
+
+    def test_the_example_follow_handle_stops_a_release_archive_only(self) -> None:
+        # Debug builds, the Preview and an ordinary Release build keep a fixture
+        # handle usable; the archive refuses it.
         fixture = Fixture(self.root)
-        for configuration in self.CONFIGURATIONS:
-            with self.subTest(configuration):
-                result = self.run_phase(configuration, fixture)
+        fixture.write_info(fixture.app, AndariumFollowXHandle="Example_Handle")
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
+                if build == self.CHECKED:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("example handle", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+
+    def test_a_build_host_path_stops_a_release_archive_only(self) -> None:
+        # The same phase holds the executable to the paths of the machine that built it.
+        fixture = Fixture(self.root)
+        fixture.write_info(fixture.app, CFBundleExecutable="Andarium")
+        (fixture.app / "Andarium").write_bytes(macho({"__text": b"/Users/NAME/work/file.c\0"}))
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
+                if build == self.CHECKED:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("names a path under a home directory", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_explicit_release_install_is_checked_like_an_archive(self) -> None:
+        # Xcode gives an archive and an explicit `xcodebuild install` of Release the
+        # same action, and both produce what is handed out: the phase checks both,
+        # so an explicit install refuses the example handle too (no archive
+        # variable is set here, as for an explicit install).
+        fixture = Fixture(self.root)
+        fixture.write_info(fixture.app, AndariumFollowXHandle="example_handle")
+        result = self.run_phase("Release", "install", fixture)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("example handle", result.stderr)
+
+    def test_an_archive_with_no_follow_handle_or_the_developers_own_passes(self) -> None:
+        fixture = Fixture(self.root)
+        for info in ({}, {"AndariumFollowXHandle": ""}, {"AndariumFollowXHandle": "a_developer"}):
+            fixture.write_info(fixture.app, **info)
+            with self.subTest(info):
+                result = self.run_phase(*self.CHECKED, fixture)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_accepted_release_passes_the_phase_in_every_build(self) -> None:
+        fixture = Fixture(self.root)
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
 

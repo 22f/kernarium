@@ -493,6 +493,10 @@ fi
 	fail "the overlay that releases the home app's memory pin is absent"
 [[ "$PRODUCT_PACKAGES" == *" KernariumSms "* ]] ||
 	fail "the service that delivers the host's text messages is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_sms_listener "* ]] ||
+	fail "the holder of the text message service's vsock port is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_sms_wake_script "* ]] ||
+	fail "the script that starts the text message service is absent"
 [[ "$PRODUCT_PACKAGES" == *" messaging "* ]] ||
 	fail "the SMS application that shows the host's text messages is absent"
 [[ "$PRODUCT_PACKAGES" == *" TelephonyProvider "* ]] ||

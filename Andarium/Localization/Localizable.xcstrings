@@ -1976,73 +1976,6 @@
         }
       }
     },
-    "Andarium’s unfinished update ends." : {
-      "comment" : "Added when restoring a snapshot ends the update that did not finish.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumの未完了のアップデートは中止されます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新将被终止。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新將被終止。"
-          }
-        }
-      }
-    },
-    "Andarium’s unfinished update keeps its own copy until it ends. Restoring a snapshot ends it." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumの未完了のアップデートは、終了するまで独自のコピーを保持します。スナップショットを復元すると、アップデートは中止されます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新会保留其自己的副本，直到更新结束。恢复快照会终止该更新。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新會保留自己的拷貝，直到更新結束。回復快照會終止該更新。"
-          }
-        }
-      }
-    },
-    "Andarium’s update didn’t finish" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumのアップデートが完了していません"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium的更新未完成"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium的更新未完成"
-          }
-        }
-      }
-    },
     "Android" : {
       "localizations" : {
         "ja" : {
@@ -7639,24 +7572,24 @@
         }
       }
     },
-    "Not while Andarium’s update is unfinished. Update and start tries it again, or use Restore on Home." : {
+    "Not while the system image update is unfinished. Update and start tries it again, or use Restore on Home." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andariumのアップデートが未完了の間は使用できません。“アップデートして起動”で再試行するか、“ホーム”で“復元”を使用してください。"
+            "value" : "システムイメージのアップデートが未完了の間は使用できません。“アップデートして起動”で再試行するか、“ホーム”で“復元”を使用してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium的更新未完成时不可用。使用“更新并启动”可重试，也可以在“主页”中使用“恢复”。"
+            "value" : "系统镜像更新未完成时不可用。使用“更新并启动”可重试，也可以在“主页”中使用“恢复”。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium的更新未完成時無法使用。使用「更新並啟動」可重試，也可以在「首頁」中使用「回復」。"
+            "value" : "系統映像檔更新未完成時無法使用。使用「更新並啟動」可重試，也可以在「首頁」中使用「回復」。"
           }
         }
       }
@@ -10395,6 +10328,28 @@
         }
       }
     },
+    "System image update didn’t finish" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "システムイメージのアップデートが完了していません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系统镜像更新未完成"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系統映像檔更新未完成"
+          }
+        }
+      }
+    },
     "System image updated" : {
       "localizations" : {
         "ja" : {
@@ -11100,6 +11055,51 @@
         }
       }
     },
+    "The unfinished system image update ends." : {
+      "comment" : "Added when restoring a snapshot ends the update that did not finish.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完了のシステムイメージのアップデートは中止されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系统镜像更新将被终止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系統映像檔更新將被終止。"
+          }
+        }
+      }
+    },
+    "The unfinished system image update keeps its own copy until it ends. Restoring a snapshot ends it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完了のシステムイメージのアップデートは、終了するまで独自のコピーを保持します。スナップショットを復元すると、アップデートは中止されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系统镜像更新会保留其自己的副本，直到更新结束。恢复快照会终止该更新。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系統映像檔更新會保留自己的拷貝，直到更新結束。回復快照會終止該更新。"
+          }
+        }
+      }
+    },
     "The update to %@ did not finish, and nothing from before it is left to put back. Erase the virtual machine to start over." : {
       "localizations" : {
         "ja" : {
@@ -11272,6 +11272,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法回復虛擬機器"
+          }
+        }
+      }
+    },
+    "The virtual machine could not start" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを起動できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法啟動"
           }
         }
       }
@@ -12510,6 +12532,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此Andarium拷貝不含可用的系統：%@"
+          }
+        }
+      }
+    },
+    "This device could not give it %@ of memory. Close Andarium in the App Switcher and open it again, then lower the memory with Edit under Virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスは仮想マシンに%@のメモリを割り当てられませんでした。AppスイッチャーでAndariumを終了してからもう一度開き、“仮想マシン”の“編集”でメモリを下げてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备无法为虚拟机提供%@内存。请在App切换器中关闭Andarium后重新打开，然后使用“虚拟机”下的“编辑”降低内存。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置無法為虛擬機器提供%@記憶體。請在App切換器中關閉Andarium後重新打開，然後使用「虛擬機器」下的「編輯」降低記憶體。"
           }
         }
       }

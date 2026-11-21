@@ -204,14 +204,12 @@ uml_add_unit_test(NAME kernarium-settle-plumbing
 # What an Android guest is told about the host's cameras: the camera fields of
 # the boot request, the layout composed from the host's cameras, the lens cover,
 # and the camera state and rotation the application and the device exchange.
-if(TARGET UML::SyntheticCamera)
-    add_executable(uml_kernarium_camera_tests camera_tests.cpp)
-    target_include_directories(uml_kernarium_camera_tests PRIVATE
-        ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
-        ${PROJECT_SOURCE_DIR}/darwin/device)
-    target_link_libraries(uml_kernarium_camera_tests PRIVATE
-        UML::CameraSource)
-    uml_add_unit_test(NAME kernarium-camera
-        COMMAND uml_kernarium_camera_tests
-        LABELS "kernarium;camera")
-endif()
+add_executable(uml_kernarium_camera_tests camera_tests.cpp)
+target_include_directories(uml_kernarium_camera_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin/device)
+target_link_libraries(uml_kernarium_camera_tests PRIVATE
+    UML::CameraSource)
+uml_add_unit_test(NAME kernarium-camera
+    COMMAND uml_kernarium_camera_tests
+    LABELS "kernarium;camera")

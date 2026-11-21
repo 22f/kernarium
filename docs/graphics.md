@@ -281,7 +281,17 @@ object id 0 marks the context lost, a pipeline stage that names no shader is
 refused, and a host image copy, between memory and an image or between two
 images, is bounded by the images' mip levels, aspects, layers and extent and by
 the memory the guest gave it, and returns no host bytes the driver did not write
-(`gpu-venus-required-handles`). The guest binds image and buffer memory without
+(`gpu-venus-required-handles`). Nor can a guest hand the driver the serialized
+pipeline forms it parses: the renderer ignores the data a guest gives
+`vkCreatePipelineCache`, answers `vkGetPipelineCacheData` with the empty cache
+of its own (never the driver's serialized pipelines), and does not expose
+`VK_KHR_pipeline_binary`, so a pipeline create info or a command that names a
+pipeline binary marks the context lost (`gpu-venus-pipeline-cache-bytes`,
+`gpu-venus-pipeline-binary-requests`). The host driver's on-disk pipeline
+variants are written and read by the host driver alone; a guest has no way to
+hand it one. A guest's SPIR-V still reaches the driver's SPIR-V to NIR
+conversion.
+The guest binds image and buffer memory without
 waiting for the answer, so a bind the driver refused marks the context lost
 before the next command runs (`gpu-venus-bind-failure`), and a copy that names
 an image or buffer the driver never bound is refused by the driver
@@ -306,8 +316,7 @@ can fail at `vkMapMemory` with `VK_ERROR_OUT_OF_DEVICE_MEMORY` until the guest's
 released nodes retire.
 
 The aperture also holds every Venus shared-memory region of the guest: the ring
-and the command and reply pools. A reply larger than 16 MiB, such as the data of
-`vkGetPipelineCacheData` for a large cache, gets a region of its own that is
+and the command and reply pools. A reply larger than 16 MiB gets a region of its own that is
 unmapped when the reply is consumed; the Android guest's Venus port carries
 that rule, and a guest without it keeps the oversized pool region mapped, so the
 heap the application is shown is larger than the room it has left.
@@ -531,7 +540,7 @@ OpenGL ES 3.2 claim, lives in
 [`../android/lineage-24/README.md`](../android/lineage-24/README.md#graphics).
 
 The Linux Venus guest meets the API version, limits, formats and capability
-groups of Khronos's `VP_ANDROID_17_requirements` profile except for three
+groups of Khronos's `VP_ANDROID_17_requirements` profile except for four
 standing limits of this stack:
 
 - `protectedMemory` has no Metal equivalent.
@@ -540,6 +549,9 @@ standing limits of this stack:
 - `shaderFloat16` is withheld on purpose, because native half arithmetic can
   time out Apple GPUs when NaN-heavy graphics shaders run concurrently. The
   16-bit storage classes are supported.
+- `VK_KHR_pipeline_binary` is not exposed, because the renderer takes no
+  pipeline binary from a guest (see the
+  [guest memory boundary](#guest-memory-boundary)).
 
 The renderer owns the window-system prerequisites.
 `VK_EXT_image_drm_format_modifier` offers `DRM_FORMAT_MOD_LINEAR` only, because
