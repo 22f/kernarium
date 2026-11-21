@@ -94,6 +94,21 @@ struct AdbStreamBudgetTests {
         #expect(first.count == 4096)
     }
 
+    /// The sync stream of an upload (an `.xapk` data file, an import) has
+    /// the budget too: a device that talks before the file is sent ends the
+    /// upload before a byte of the file is read.
+    @Test func anUploadOverASyncStreamThatFloodsEndsBeforeTheFileIsRead() throws {
+        let connection = AdbConnection(transport: FloodingAdbd(flood: 256 * 1024, chunk: 4096))
+        let source = CountingSource()
+        let path = GuestFilePath.root + "/Download/a.obb"
+        #expect(throws: AdbError.self) {
+            try GuestFiles.upload(
+                source, modified: .now, to: path, temporary: GuestFilePath.root + "/Download/.andarium-1.part",
+                replacing: true, on: connection, progress: { _ in })
+        }
+        #expect(source.reads == 0)
+    }
+
     @Test func aStreamWithNoBudgetKeepsWhatAnOrdinaryServiceSays() throws {
         // The shell and sync paths bound their own readers.
         let (connection, stream) = try stream(flood: 200 * 1024, limit: nil)
@@ -101,5 +116,19 @@ struct AdbStreamBudgetTests {
         try stream.write(Data(repeating: 0x42, count: 100))
         let first = try #require(try stream.read())
         #expect(first.count == 4096)
+    }
+}
+
+/// A source of ten bytes that counts how often it was asked for them.
+private final class CountingSource: AdbSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var reads: Int { lock.withLock { count } }
+
+    func read(limit: Int) throws -> Data? {
+        lock.withLock {
+            count += 1
+            return count == 1 ? Data(count: 10) : nil
+        }
     }
 }
