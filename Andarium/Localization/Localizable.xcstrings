@@ -1953,51 +1953,6 @@
         }
       }
     },
-    "Andarium’s unfinished update ends." : {
-      "comment" : "Added when restoring a snapshot ends the update that did not finish.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumの未完了のアップデートは中止されます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新将被终止。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新將被終止。"
-          }
-        }
-      }
-    },
-    "Andarium’s unfinished update keeps its own copy until it ends. Restoring a snapshot ends it." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumの未完了のアップデートは、終了するまで独自のコピーを保持します。スナップショットを復元すると、アップデートは中止されます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新会保留其自己的副本，直到更新结束。恢复快照会终止该更新。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium未完成的更新會保留自己的拷貝，直到更新結束。回復快照會終止該更新。"
-          }
-        }
-      }
-    },
     "Android" : {
       "localizations" : {
         "ja" : {
@@ -7594,24 +7549,24 @@
         }
       }
     },
-    "Not while Andarium’s update is unfinished. Update and start tries it again, or use Restore on Home." : {
+    "Not while the system image update is unfinished. Update and start tries it again, or use Restore on Home." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andariumのアップデートが未完了の間は使用できません。“アップデートして起動”で再試行するか、“ホーム”で“復元”を使用してください。"
+            "value" : "システムイメージのアップデートが未完了の間は使用できません。“アップデートして起動”で再試行するか、“ホーム”で“復元”を使用してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium的更新未完成时不可用。使用“更新并启动”可重试，也可以在“主页”中使用“恢复”。"
+            "value" : "系统镜像更新未完成时不可用。使用“更新并启动”可重试，也可以在“主页”中使用“恢复”。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium的更新未完成時無法使用。使用「更新並啟動」可重試，也可以在「首頁」中使用「回復」。"
+            "value" : "系統映像檔更新未完成時無法使用。使用「更新並啟動」可重試，也可以在「首頁」中使用「回復」。"
           }
         }
       }
@@ -11050,6 +11005,51 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法建立快照"
+          }
+        }
+      }
+    },
+    "The unfinished system image update ends." : {
+      "comment" : "Added when restoring a snapshot ends the update that did not finish.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完了のシステムイメージのアップデートは中止されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系统镜像更新将被终止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系統映像檔更新將被終止。"
+          }
+        }
+      }
+    },
+    "The unfinished system image update keeps its own copy until it ends. Restoring a snapshot ends it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完了のシステムイメージのアップデートは、終了するまで独自のコピーを保持します。スナップショットを復元すると、アップデートは中止されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系统镜像更新会保留其自己的副本，直到更新结束。恢复快照会终止该更新。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成的系統映像檔更新會保留自己的拷貝，直到更新結束。回復快照會終止該更新。"
           }
         }
       }
