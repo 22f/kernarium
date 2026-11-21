@@ -512,25 +512,79 @@ and expects the same cameras).
 
 ### Text messages
 
-The guest receives text messages from the host and sends none. `KernariumSms`
-(`overlay/sms/`) is a persistent system application in an SELinux domain of its
-own that listens on vsock port 5560 and takes a request only from host CID 2.
-It has no other entry point, so neither an adb shell, adb over the network
-included, nor an application can deliver a message. `HostFrame.java` and
+The guest receives text messages from the host and sends none. Port 5560 on
+vsock is held from boot by `kernarium_sms_listener` (`overlay/sms/listener/`), a
+small native daemon in an SELinux domain of its own that creates, binds and
+listens on the socket and never accepts, reads, writes or connects it, so that
+the host's connections queue and no other guest domain can take the port. When a
+connection waits and no session runs, it sets the control property that starts
+`kernarium_sms_wake`, a script in a second domain that asks the activity manager
+to start the service as the system user (again after 20 s if no session attached,
+and after a session that ended early with a connection still waiting, after a wait
+that doubles from half a second to 2 s for the first seventeen such sessions, which
+outlast the host's 30 s window, and to 20 s after them); the service then takes the listening
+socket from the holder over its unix socket (`/dev/socket/kernarium_sms`), which
+only the service's domain may connect to; init makes and binds that socket and
+does not listen on it, so the holder listens on it itself. `KernariumSms` (`overlay/sms/`) is a
+system application with one non-exported, non-persistent service in a third
+domain. It serves the connections from the host's CID 2 alone, ends 30 s after
+the last message, and with it its process: nothing of it is resident in between.
+The waker starts it, and the system uid can, as the service is not exported; it
+serves the connections from CID 2 alone, so neither an adb shell, adb over the
+network included, nor an application can deliver a message. The end of the service loses no
+connection that it had not accepted, as the holder keeps the listening socket; a request it had
+accepted ends with it, and the record answers the host's retry as uncertain or as handed over
+earlier. If the holder ends while a
+connection waits that nothing has accepted (or while a session runs, and that session ends with
+one waiting), the kernel closes the connection: a request the host had already written gets no
+answer, a connection that arrives while no holder listens is refused and asked for again within
+the host's deadline, and the host's retry for the lost request is answered as uncertain and never
+handed over. That message is lost and never delivered twice. While the service keeps ending
+early with a request waiting (the holder runs, and the request stays queued), the request may get
+no answer within the host's 30 s: when the fault clears in about the last 2.5 s of it, or when the
+request arrives after the 2 s phase (the next try is up to 20 s later). The app then reports it as
+not confirmed, and the next send asks again with the same identifier, so that request is neither
+lost nor handed over twice. `HostFrame.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
 frame. A message is a sender (a number or a short name), a text of limited
 length and an identifier the host chooses for it. `Message.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own what is
 accepted and refused, each limit stated once.
 
-The target-files verifier holds that boundary. Only the reviewed types may
-create, bind or listen on a vsock socket, and no domain but the service holds a
-permission on its vsock sockets, except the platform's own `getattr` for
-`dumpstate`, which stats a socket and carries no data. Of the data, only the
-platform's managers of application data reach it. For the services it may find,
-`system_app_data_file` and the vsock sockets of other types, the service holds
-only what every ordinary application domain holds through one platform rule,
-plus the activity, package and role services.
+The target-files verifier holds that boundary. Only the reviewed types and the
+holder may create, bind or listen on a vsock socket; no domain but the holder
+and the service holds a permission on the holder's vsock sockets, the service
+only accept, read, write and shutdown, and the holder only the creation of its
+socket, none on the service's own. The waker holds no vsock socket, and neither it
+nor the holder holds a right in the network, capability or hardware service
+classes, however an attribute grants it. The holder has no rule of its own for
+binder, a service lookup or a file; the platform's grants to every domain still
+reach it (the binder device nodes, a binder call to `system_server` and the lookup
+of the binder statistics service), the verifier pins that set, and it can obtain
+no binder handle with it, as no rule gives it a call permission to the service
+manager. The waker's binder rights are call and transfer to the service manager and
+to `system_server` and no others, and neither daemon holds more than the platform's
+rights on the binder and hardware binder device nodes or any on the vendor's (a
+debuggable build adds the platform's call and transfer on the root shell). Init
+alone enters their domains and controls them: of the keys of the control properties
+that init checks for either service (`ctl.<service>`, which it checks first for
+start, stop and restart, and `ctl.<action>$<service>`), init alone may set every
+one but the key that starts the waker, which the holder sets too.
+The holder's start of the waker is denied on the legacy key, which init checks first
+and allows on the qualified one; the policy silences that denial, and the verifier
+requires it.
+The platform labels the directories of the user (`/data/data`, and `/data/user_de/<id>` from the
+second boot of a data image) with the user's categories, which the service's level lacks, so
+the service alone is an `mlstrustedsubject`, as every system application is: otherwise it could
+not search the path of its record, and every message after the first restart would be refused.
+Neither daemon is, and the verifier requires both. The compiled manifest of the
+service names SDK levels in a `uses-sdk` element, which the build adds, and no
+activity, receiver, provider, filter or permission request. The
+platform's own `getattr` for `dumpstate` stats a socket and carries no data. Of
+the data, only the platform's managers of application data reach it. For the
+services it may find, `system_app_data_file` and the vsock sockets of other types,
+the service holds only what every ordinary application domain holds through one
+platform rule, plus the activity, package and role services.
 
 The service hands Android the message as SMS-DELIVER PDUs, concatenated when
 the text needs more than one part: an `SMS_DELIVER` broadcast to the SMS role
