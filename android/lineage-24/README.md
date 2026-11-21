@@ -526,8 +526,9 @@ does not listen on it, so the holder listens on it itself. `KernariumSms` (`over
 system application with one non-exported, non-persistent service in a third
 domain. It serves the connections from the host's CID 2 alone, ends 30 s after
 the last message, and with it its process: nothing of it is resident in between.
-Nothing but the holder starts it, so neither an adb shell, adb over the network
-included, nor an application can deliver a message. `HostFrame.java` and
+The waker starts it, and the system uid can, as the service is not exported; it
+serves the connections from CID 2 alone, so neither an adb shell, adb over the
+network included, nor an application can deliver a message. `HostFrame.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
 frame. A message is a sender (a number or a short name), a text of limited
 length and an identifier the host chooses for it. `Message.java` and
@@ -538,10 +539,18 @@ The target-files verifier holds that boundary. Only the reviewed types and the
 holder may create, bind or listen on a vsock socket; no domain but the holder
 and the service holds a permission on the holder's vsock sockets, the service
 only accept, read, write and shutdown, and the holder only the creation of its
-socket, none on the service's own. The waker holds no vsock socket and the holder
-no binder, service lookup or file; init alone enters their domains, and the
-control property that starts the waker is set by the holder and by init, which
-owns the property service, and by nothing else. The compiled manifest of the
+socket, none on the service's own. The waker holds no vsock socket, and neither it
+nor the holder holds a right in the network, capability or hardware service
+classes, however an attribute grants it. The holder has no rule of its own for
+binder, a service lookup or a file; the platform's grants to every domain still
+reach it (the binder device nodes, a binder call to `system_server` and the lookup
+of the binder statistics service), the verifier pins that set, and it can obtain
+no binder handle with it, as no rule gives it a call permission to the service
+manager. Init alone enters their domains and controls them: of the keys of the
+control properties that init checks for either service (`ctl.<service>`, which it
+checks first for start, stop and restart, and `ctl.<action>$<service>`), init alone
+may set every one but the key that starts the waker, which the holder sets too.
+The compiled manifest of the
 service names SDK levels in a `uses-sdk` element, which the build adds, and no
 activity, receiver, provider, filter or permission request. The
 platform's own `getattr` for `dumpstate` stats a socket and carries no data. Of

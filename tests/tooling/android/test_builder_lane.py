@@ -489,11 +489,23 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         left_out = " ".join(["isolated_app", "ephemeral_app", "sdk_sandbox_34", "sdk_sandbox_audit", "sdk_sandbox_next"]
                             + ([gap[1]] if gap[0] == attribute else []))
         plat += f"(typeattributeset {attribute} (and (appdomain ) (not ({left_out} ))))\n{rule}"
+    # What the platform grants every domain in the binder family (the rules over the attribute domain with a few
+    # exclusions, as the compiler writes them): a binder call to system_server and the lookup of the binder statistics
+    # service. The holder and the waker hold them in effect; the group lists the ordinary application domains, as
+    # for the service above. The platform's control property rules: system_app and system_server may set
+    # ctl_default_prop, the label of every control key that has no entry of its own.
+    plat += ("(typeattributeset base_typeattr_291 (kernarium_sms kernarium_sms_listener kernarium_sms_wake "
+             "untrusted_app platform_app priv_app system_app))\n"
+             f"(allow base_typeattr_291 system_server (binder ({'call transfer' if variant == 'holder-binder-grant-widened' else 'call'})))\n"
+             "(allow base_typeattr_291 binder_stats_consumer_service (service_manager (find)))\n"
+             "(allow system_app ctl_default_prop (property_service (set)))\n"
+             "(allow system_server ctl_default_prop (property_service (set)))\n")
     ext = (
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(type kernarium_sms_listener)\n(type kernarium_sms_listener_exec)\n(type kernarium_sms_socket)\n"
         "(type kernarium_sms_wake)\n(type kernarium_sms_wake_exec)\n(type ctl_kernarium_sms_wake_prop)\n"
-        "(typeattributeset property_type (ctl_kernarium_sms_wake_prop))\n"
+        "(type ctl_kernarium_sms_locked_prop)\n"
+        "(typeattributeset property_type (ctl_kernarium_sms_wake_prop ctl_kernarium_sms_locked_prop))\n"
         "(typeattributeset domain (kernarium_sms kernarium_sms_listener kernarium_sms_wake))\n"
         "(typeattributeset data_file_type (kernarium_sms_data_file))\n"
         "(typeattributeset core_data_file_type (kernarium_sms_data_file))\n"
@@ -559,10 +571,31 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
     )
     property_context = "" if variant == "no-property-label" else (
         "service.adb.listen_addrs  u:object_r:system_prop:s0 exact string\n")
-    # The control property that starts the waker: the platform's generic ctl.start$ entry and the product's own.
-    property_context += "ctl.start$  u:object_r:ctl_start_prop:s0\n"
+    # The control properties: the platform's generic entries (the default of every ctl. key, and the qualified keys of
+    # start, stop, restart and sigstop) and the product's own, which label the key that starts the waker, the legacy
+    # ctl.<service> key init checks first, and the oneshot keys the platform leaves to the default.
+    property_context += (
+        "ctl.  u:object_r:ctl_default_prop:s0\n"
+        "ctl.sigstop_on$  u:object_r:ctl_sigstop_prop:s0\n"
+        "ctl.sigstop_off$  u:object_r:ctl_sigstop_prop:s0\n"
+        "ctl.start$  u:object_r:ctl_start_prop:s0\n"
+        "ctl.stop$  u:object_r:ctl_stop_prop:s0\n"
+        "ctl.restart$  u:object_r:ctl_restart_prop:s0\n"
+    )
     if variant != "wake-property-generic":
-        property_context += "ctl.start$kernarium_sms_wake  u:object_r:ctl_kernarium_sms_wake_prop:s0\n"
+        property_context += ("ctl.start$kernarium_sms_wake  u:object_r:ctl_kernarium_sms_wake_prop:s0"
+                             + ("" if variant == "wake-property-not-exact" else " exact") + "\n")
+    locked, generic = "u:object_r:ctl_kernarium_sms_locked_prop:s0", "u:object_r:ctl_default_prop:s0"
+    for service in ("kernarium_sms_listener", "kernarium_sms_wake"):
+        if variant != "control-legacy-unlabelled":
+            as_generic = variant == "control-legacy-generic" or (
+                variant == "control-legacy-waker-generic" and service == "kernarium_sms_wake")
+            property_context += (f"ctl.{service}  {generic if as_generic else locked}"
+                                 + ("" if variant == "control-legacy-not-exact" else " exact") + "\n")
+        if variant != "control-oneshot-unlabelled":
+            for state in ("on", "off"):
+                property_context += (f"ctl.oneshot_{state}${service}  "
+                                     f"{generic if variant == 'control-oneshot-generic' else locked} exact\n")
     labels = {
         "holder-unlabelled": "kernarium_sms_listener_exec", "waker-unlabelled": "kernarium_sms_wake_exec",
         "socket-unlabelled": "kernarium_sms_socket",
@@ -605,6 +638,33 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         ext += "(allow kernarium_sms_wake window_service (service_manager (find)))\n"
     elif variant == "waker-finds-nothing":
         ext = ext.replace("(allow kernarium_sms_wake activity_service (service_manager (find)))\n", "")
+    elif variant in ("holder-binder-through-a-group", "holder-finds-a-service-through-a-group",
+                     "holder-capability-through-a-group", "holder-vendor-binder-device"):
+        # The holder in a group of the policy's own, which an allow rule names in place of the holder.
+        ext += "(typeattributeset base_typeattr_93 (kernarium_sms_listener))\n" + {
+            "holder-binder-through-a-group": "(allow base_typeattr_93 servicemanager (binder (call)))\n",
+            "holder-finds-a-service-through-a-group": "(allow base_typeattr_93 activity_service (service_manager (find)))\n",
+            "holder-capability-through-a-group": "(allow base_typeattr_93 self (capability (net_admin)))\n",
+            "holder-vendor-binder-device": "(allow base_typeattr_93 vndbinder_device (chr_file (read write open)))\n",
+        }[variant]
+    elif variant == "holder-hwservice-through-domain":
+        plat += "(allow domain hal_foo_hwservice (hwservice_manager (find)))\n"
+    elif variant in ("waker-finds-another-service-through-a-group", "waker-hwservice-through-a-group"):
+        ext += "(typeattributeset base_typeattr_94 (kernarium_sms_wake))\n" + {
+            "waker-finds-another-service-through-a-group": "(allow base_typeattr_94 window_service (service_manager (find)))\n",
+            "waker-hwservice-through-a-group": "(allow base_typeattr_94 hal_foo_hwservice (hwservice_manager (find)))\n",
+        }[variant]
+    elif variant in ("control-stop-by-another", "control-start-by-another", "control-sigstop-by-another"):
+        plat += "(allow system_app ctl_" + variant.split("-")[1] + "_prop (property_service (set)))\n"
+    elif variant == "control-restart-through-attribute":
+        plat += ("(typeattributeset base_typeattr_92 (shell))\n"
+                 "(allow base_typeattr_92 ctl_restart_prop (property_service (set)))\n")
+    elif variant == "control-locked-set-by-another":
+        ext += "(allow system_app ctl_kernarium_sms_locked_prop (property_service (set)))\n"
+    elif variant == "control-locked-set-by-the-holder":
+        ext += "(allow kernarium_sms_listener ctl_kernarium_sms_locked_prop (property_service (set)))\n"
+    elif variant == "control-stop-by-the-holder":
+        ext += "(allow kernarium_sms_listener ctl_stop_prop (property_service (set)))\n"
     elif variant == "holder-calls-binder":
         ext += "(allow kernarium_sms_listener servicemanager (binder (call)))\n"
     elif variant == "holder-finds-a-service":
@@ -6594,6 +6654,61 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("sms-holder-calls-binder", {"sms_policy_variant": "holder-calls-binder"},
              "kernarium_sms_listener holds rights of \\['binder'\\] classes"),
             ("sms-holder-finds-a-service", {"sms_policy_variant": "holder-finds-a-service"},
+            # What each holds in effect, through any group: the platform's grants to every domain are the reviewed
+            # set and nothing more is accepted.
+            ("sms-holder-binder-through-a-group", {"sms_policy_variant": "holder-binder-through-a-group"},
+             "kernarium_sms_listener holds \\['call'\\] on servicemanager of the binder class in effect"),
+            ("sms-holder-binder-grant-widened", {"sms_policy_variant": "holder-binder-grant-widened"},
+             "kernarium_sms_listener holds \\['transfer'\\] on system_server of the binder class in effect"),
+            ("sms-holder-finds-a-service-through-a-group", {"sms_policy_variant": "holder-finds-a-service-through-a-group"},
+             "kernarium_sms_listener holds \\['find'\\] on activity_service of the service_manager class in effect"),
+            ("sms-holder-hwservice-through-domain", {"sms_policy_variant": "holder-hwservice-through-domain"},
+             "kernarium_sms_listener holds rights of the hwservice_manager class in effect"),
+            ("sms-holder-capability-through-a-group", {"sms_policy_variant": "holder-capability-through-a-group"},
+             "kernarium_sms_listener holds rights of the capability class in effect"),
+            ("sms-holder-vendor-binder-device", {"sms_policy_variant": "holder-vendor-binder-device"},
+             "kernarium_sms_listener may use the vendor binder device in effect"),
+            ("sms-waker-finds-another-service-through-a-group",
+             {"sms_policy_variant": "waker-finds-another-service-through-a-group"},
+             "kernarium_sms_wake holds \\['find'\\] on window_service of the service_manager class in effect"),
+            ("sms-waker-hwservice-through-a-group", {"sms_policy_variant": "waker-hwservice-through-a-group"},
+             "kernarium_sms_wake holds rights of the hwservice_manager class in effect"),
+            # The control keys: init authorises start, stop and restart through the legacy ctl.<service> key as well
+            # as the qualified one, and every message through the qualified one.
+            ("sms-control-legacy-unlabelled", {"sms_policy_variant": "control-legacy-unlabelled"},
+             "no exact entry for ctl.kernarium_sms_listener"),
+            ("sms-control-legacy-not-exact", {"sms_policy_variant": "control-legacy-not-exact"},
+             "no exact entry for ctl.kernarium_sms_listener"),
+            ("sms-control-legacy-generic", {"sms_policy_variant": "control-legacy-generic"},
+             "\\['system_app', 'system_server'\\] may start kernarium_sms_listener through ctl.kernarium_sms_listener, "
+             "labelled ctl_default_prop: only \\['init'\\] may"),
+            ("sms-control-legacy-waker-generic", {"sms_policy_variant": "control-legacy-waker-generic"},
+             "\\['system_app', 'system_server'\\] may start kernarium_sms_wake through ctl.kernarium_sms_wake, "
+             "labelled ctl_default_prop: only \\['init', 'kernarium_sms_listener'\\] may"),
+            ("sms-wake-property-not-exact", {"sms_policy_variant": "wake-property-not-exact"},
+             "no exact entry for ctl.start\\$kernarium_sms_wake"),
+            ("sms-control-oneshot-unlabelled", {"sms_policy_variant": "control-oneshot-unlabelled"},
+             "no exact entry for ctl.oneshot_on\\$kernarium_sms_listener"),
+            ("sms-control-oneshot-generic", {"sms_policy_variant": "control-oneshot-generic"},
+             "\\['system_app', 'system_server'\\] may oneshot_on kernarium_sms_listener through "
+             "ctl.oneshot_on\\$kernarium_sms_listener, labelled ctl_default_prop"),
+            ("sms-control-stop-by-another", {"sms_policy_variant": "control-stop-by-another"},
+             "\\['system_app'\\] may stop kernarium_sms_listener through ctl.stop\\$kernarium_sms_listener, "
+             "labelled ctl_stop_prop"),
+            ("sms-control-start-by-another", {"sms_policy_variant": "control-start-by-another"},
+             "\\['system_app'\\] may start kernarium_sms_listener through ctl.start\\$kernarium_sms_listener, "
+             "labelled ctl_start_prop"),
+            ("sms-control-sigstop-by-another", {"sms_policy_variant": "control-sigstop-by-another"},
+             "\\['system_app'\\] may sigstop_on kernarium_sms_listener through ctl.sigstop_on\\$kernarium_sms_listener"),
+            ("sms-control-restart-through-attribute", {"sms_policy_variant": "control-restart-through-attribute"},
+             "\\['shell'\\] may restart kernarium_sms_listener through ctl.restart\\$kernarium_sms_listener"),
+            ("sms-control-locked-set-by-another", {"sms_policy_variant": "control-locked-set-by-another"},
+             "\\['system_app'\\] may start kernarium_sms_listener through ctl.kernarium_sms_listener, "
+             "labelled ctl_kernarium_sms_locked_prop"),
+            ("sms-control-locked-set-by-the-holder", {"sms_policy_variant": "control-locked-set-by-the-holder"},
+             "\\['kernarium_sms_listener'\\] may start kernarium_sms_listener through ctl.kernarium_sms_listener"),
+            ("sms-control-stop-by-the-holder", {"sms_policy_variant": "control-stop-by-the-holder"},
+             "\\['kernarium_sms_listener'\\] may stop kernarium_sms_listener through ctl.stop\\$kernarium_sms_listener"),
              "kernarium_sms_listener holds rights of \\['service_manager'\\] classes"),
             ("sms-holder-owns-files", {"sms_policy_variant": "holder-owns-files"},
              "kernarium_sms_listener holds rights of \\['dir'\\] classes"),
@@ -8274,6 +8389,7 @@ def verify_sms_holder(android_root: Path) -> None:
     for line in holder.splitlines():
         if not line.startswith("#") and "vsock_socket" in line and "self:vsock_socket { create bind listen };" not in line:
             fail(f"the holder's policy has a vsock rule beyond the socket's creation: {line}")
+        "system_internal_prop(ctl_kernarium_sms_locked_prop)",
     for needle in ("binder", "appdomain", "service_manager"):
         if re.search(rf"^[^#\n]*{needle}", holder, re.M):
             fail(f"the holder's policy has {needle}: it is a plain daemon and not the framework's client")
@@ -8317,6 +8433,18 @@ def verify_sms_holder(android_root: Path) -> None:
         'name: "kernarium_sms_listener"',
         'init_rc: ["kernarium_sms_listener.rc"]',
         "system_ext_specific: true,",
+    # Every control key of the two services that the product labels carries an exact entry; all but the one the holder
+    # sets are the locked type, which nothing in the policy sources lets any domain set but init.
+    for key in verifier.SMS_CONTROL_OWN_KEYS:
+        if not verifier.property_entry_is_exact(key, properties.splitlines()):
+            fail(f"the system_ext property contexts have no exact entry for {key}")
+        wanted = verifier.SMS_WAKE_PROPERTY_TYPE if key == verifier.SMS_WAKE_PROPERTY else "ctl_kernarium_sms_locked_prop"
+        if verifier.property_label(key, properties.splitlines()) != wanted:
+            fail(f"the system_ext property contexts do not label {key} as {wanted}")
+    if re.search(r"ctl_kernarium_sms_locked_prop", "\n".join(
+            line for line in (holder + waker + service).splitlines() if not line.lstrip().startswith("#")
+            and "system_internal_prop(ctl_kernarium_sms_locked_prop)" not in line)):
+        fail("a policy source names ctl_kernarium_sms_locked_prop beyond its declaration: nothing sets it but init")
         'name: "kernarium_sms_wake_script"',
         'src: "kernarium_sms_wake.sh"',
     ):

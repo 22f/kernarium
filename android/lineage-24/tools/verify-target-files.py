@@ -5397,6 +5397,15 @@ def property_label(name: str, contexts: list[str]) -> str | None:
     return best[1] if best else None
 
 
+def property_entry_is_exact(name: str, contexts: list[str]) -> bool:
+    """Whether the property contexts have an entry for exactly this name that is marked exact: without the marker
+    the entry is a prefix and labels every longer name too."""
+    return any(
+        len(fields) >= 3 and fields[0] == name and "exact" in fields[2:]
+        for fields in (line.split() for line in contexts if not line.lstrip().startswith("#"))
+    )
+
+
 @functools.lru_cache(maxsize=16)
 def cil_attribute_sets(
     policy: bytes, exact: bool = False
@@ -5548,6 +5557,38 @@ SMS_WAKE_COMMAND = "exec cmd activity start-service --user 0 -n android.kernariu
 SMS_WAKE_PROPERTY = "ctl.start$kernarium_sms_wake"
 SMS_WAKE_PROPERTY_TYPE = "ctl_kernarium_sms_wake_prop"
 # What the service holds on the holder's vsock sockets: it accepts, and reads and writes the connections that
+# The control messages init accepts for a service (its control message table; the interface_ forms look a service up
+# by an interface name, which neither service declares). init authorises a request through the property key
+# ctl.<message>$<service>; for start, stop and restart it checks the legacy key ctl.<service> first and acts when
+# the requester may set either.
+SMS_CONTROL_MESSAGES = ("start", "stop", "restart", "sigstop_on", "sigstop_off", "oneshot_on", "oneshot_off")
+SMS_LEGACY_CONTROL_MESSAGES = frozenset({"start", "stop", "restart"})
+# The keys of both init services that the product's own property contexts label, each with an exact entry: the
+# legacy key of each service and the oneshot keys, which the platform leaves to the default label, and the one key
+# the holder sets.
+SMS_CONTROL_OWN_KEYS = tuple(
+    [f"ctl.{service}" for service in (SMS_LISTENER, SMS_WAKE)]
+    + [f"ctl.oneshot_{state}${service}" for service in (SMS_LISTENER, SMS_WAKE) for state in ("on", "off")]
+    + [SMS_WAKE_PROPERTY]
+)
+# The holder and the waker are plain daemons: they hold no right in these classes, whatever attribute or set
+# expression grants it, and the platform grants none of them to every domain.
+SMS_DAEMON_NO_GRANT_CLASSES = frozenset({
+    "capability", "capability2", "blk_file", "tcp_socket", "udp_socket", "rawip_socket", "packet_socket",
+    "netlink_socket", "netlink_route_socket", "hwservice_manager", "vndservice_manager",
+})
+# What the platform grants every domain in the binder family and the holder and the waker therefore hold in effect
+# (the rules over the attribute domain with its few exclusions): a binder call permission to system_server and the
+# lookup of binder_stats_consumer_service. The holder's rights in these classes are these and no more: it never
+# opens the binder device, and without the call permission to the service manager, which no domain-wide rule
+# gives, it can obtain no handle to call. The waker is the framework's client for one call: it also finds the
+# activity manager, and its own binder rules are the service manager's and system_server's. A platform update
+# that adds a grant fails the image build here until someone has looked at it.
+SMS_PLATFORM_DOMAIN_GRANTS: dict[str, dict[str, frozenset[str]]] = {
+    "binder": {"system_server": frozenset({"call"})},
+    "service_manager": {"binder_stats_consumer_service": frozenset({"find"})},
+}
+SMS_WAKE_REVIEWED_LOOKUPS = {"activity_service": frozenset({"find"}), **SMS_PLATFORM_DOMAIN_GRANTS["service_manager"]}
 # inherit the holder's label, and shuts them down.
 SMS_SERVICE_VSOCK_PERMISSIONS = frozenset({"accept", "read", "write", "shutdown", "getattr", "getopt"})
 # What the holder holds on its own: it makes the socket, binds it and listens, and never accepts, reads, writes,
@@ -5784,6 +5825,34 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
         fail(f"{SMS_WAKE} may find {sorted(found)}; it needs only ['activity_service']")
 
     # The handoff socket: init makes it and binds it and does not listen on it, so the holder listens and accepts on it
+    # In effect, whatever attribute grants it: what each of the two holds in the classes that reach the framework or
+    # the network. The rules above judge the rules that name them; these judge every rule that stands for them,
+    # among them the platform's grants to every domain.
+    def held(domain: str, object_class: str) -> dict[str, set[str]]:
+        rights: dict[str, set[str]] = {}
+        for rule in rules_of(object_class):
+            if domain in rule.sources:
+                for target in (rule.targets if rule.targets is not None else {domain}):
+                    rights.setdefault(target, set()).update(rule.permissions)
+        return rights
+
+    for domain, reviewed in ((SMS_LISTENER, SMS_PLATFORM_DOMAIN_GRANTS),
+                             (SMS_WAKE, {"service_manager": SMS_WAKE_REVIEWED_LOOKUPS})):
+        for object_class in sorted(SMS_DAEMON_NO_GRANT_CLASSES):
+            rights = held(domain, object_class)
+            if rights:
+                fail(f"{domain} holds rights of the {object_class} class in effect ({sorted(rights)}): it is a plain "
+                     "daemon, and no attribute or set expression may give it any")
+        if "vndbinder_device" in held(domain, "chr_file"):
+            fail(f"{domain} may use the vendor binder device in effect: it is a plain daemon")
+        for object_class, accepted in reviewed.items():
+            for target, permissions in sorted(held(domain, object_class).items()):
+                extra = permissions - accepted.get(target, frozenset())
+                if extra:
+                    fail(f"{domain} holds {sorted(extra)} on {target} of the {object_class} class in effect: only "
+                         f"the platform's grants to every domain ({sorted(accepted)}) are accepted"
+                         + (", and the lookup of the activity manager" if domain == SMS_WAKE else ""))
+
     # itself (a socket that is only bound polls as hung up and takes no connection).
     own: set[str] = set()
     for rule in rules_of("unix_stream_socket"):
@@ -5835,6 +5904,39 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
         fail(f"{sorted(setters - {SMS_LISTENER, 'init'})} may set {SMS_WAKE_PROPERTY}, labelled {label}: only "
              f"{SMS_LISTENER} does, and init, which owns the property service")
 
+    check_sms_control_properties(contexts, policies, sets)
+
+
+def check_sms_control_properties(contexts: list[str], policies: tuple[bytes, ...], sets: "CilSets") -> None:
+    """Only init controls the holder and the waker, and the holder starts the waker: of every control message init
+    accepts for either service, the domains that may set the property keys that authorise it are init, and for
+    starting the waker the holder as well. init checks the legacy ctl.<service> key first for start, stop and
+    restart, and the property ctl.<message>$<service> for every message, and acts when the requester may set
+    either; a key without an entry of its own gets the platform's label, and ctl.<service> is ctl_default_prop,
+    which system_app and others may set."""
+    for key in SMS_CONTROL_OWN_KEYS:
+        if not property_entry_is_exact(key, contexts):
+            fail(f"the property contexts have no exact entry for {key}: the platform's label would decide who may "
+                 "control the text message services")
+
+    def setters_of(label: str) -> set[str]:
+        found: set[str] = set()
+        for policy in policies:
+            for source, target, _object_class, permissions in cil_rules(policy, CIL_PROPERTY_SET_RULE):
+                if b"set" in permissions and label in sets.members(cil_type_name(target)):
+                    found |= sets.members(cil_type_name(source))
+        return found
+
+    for service in (SMS_LISTENER, SMS_WAKE):
+        for message in SMS_CONTROL_MESSAGES:
+            keys = ([f"ctl.{service}"] if message in SMS_LEGACY_CONTROL_MESSAGES else []) + [f"ctl.{message}${service}"]
+            allowed = {SMS_LISTENER, "init"} if (service, message) == (SMS_WAKE, "start") else {"init"}
+            for key in keys:
+                label = property_label(key, contexts) or "default_prop"
+                extra = setters_of(label) - allowed
+                if extra:
+                    fail(f"{sorted(extra)} may {message} {service} through {key}, labelled {label}: only "
+                         f"{sorted(allowed)} may")
 
 class SmsRule(NamedTuple):
     """An allow rule as the text-message check reads it: the types its source and target stand for (a target of
