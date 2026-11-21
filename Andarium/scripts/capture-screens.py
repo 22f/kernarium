@@ -309,7 +309,7 @@ SHOTS: list[Shot] = [
     s("settings-performance-hot", "Settings", "settings-performance-hot", "Performance while the device is held hot and the limit is on: an orange tile, a thermometer line that the frame rate is limited until it cools, and Frame rate at 30 fps."),
     s("settings-performance-hot-off", "Settings", "settings-performance-hot-off", "Performance while the device is held hot and the limit is off: the thermometer line says the frame rate is not limited, with the warning under it."),
     s("settings-performance-120", "Settings", "settings-performance-120", "Settings' Performance on a screen that shows 120 frames a second: When hot alone, with no 120 Hz switch (it is on Home)."),
-    s("home-performance", "Home", "home-performance", "Home on a screen that shows 120 frames a second: Performance holds the 120 Hz switch (off), with its one-line footnote, above JIT, whose note is beneath the panel."),
+    s("home-performance", "Home", "home-performance", "Home on a screen that shows 120 frames a second: Performance holds the 120 Hz switch (off), with its short footnote, above JIT, whose note is beneath the panel."),
     s("home-performance-on", "Home", "home-performance-on", "The 120 Hz switch on."),
     system_mic("home-mic-system-prompt", "Capabilities", "home-mic-alert", "The system's own question when Microphone is turned on for the first time (the Simulator's alert).", "reset"),
     system_mic("home-mic-system-allowed", "Capabilities", "home-mic-on", "Microphone on after iOS allowed it.", "grant"),
