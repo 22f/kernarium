@@ -149,6 +149,24 @@ final class RootUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Paused after a failed start"].exists)
     }
 
+    /// The card shows its text and both buttons as one block; the second
+    /// button must still be a control of its own that an assistive technology
+    /// can reach and activate, with its own name.
+    @MainActor
+    func testThePausedCardsSecondButtonIsAControlOfItsOwnWithItsOwnLabel() {
+        let app = launch("home-root-notice-paused")
+        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForExistence(timeout: 20), "no paused card")
+        let tryAgain = app.buttons["Try with root again"].firstMatch
+        let turnOff = app.buttons["Turn off root"].firstMatch
+        XCTAssertTrue(tryAgain.exists, "no Try with root again button")
+        XCTAssertTrue(turnOff.exists, "no Turn off root button")
+        XCTAssertTrue(tryAgain.isHittable, "Try with root again cannot be reached")
+        XCTAssertTrue(turnOff.isHittable, "Turn off root cannot be reached")
+        XCTAssertEqual(turnOff.label, "Turn off root")
+        XCTAssertNotEqual(tryAgain.label, turnOff.label, "the two buttons share one name")
+        XCTAssertNotEqual(tryAgain.frame, turnOff.frame, "the two buttons are one control")
+    }
+
     @MainActor
     func testTurnOffRootOnThePausedCardTurnsTheSwitchOff() {
         let app = launch("home-root-notice-paused")
