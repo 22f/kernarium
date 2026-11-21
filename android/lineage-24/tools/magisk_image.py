@@ -180,6 +180,12 @@ def read_pin(path: Path, error: Error) -> Pin:
     return Pin(MAGISK_NAME, version, code, digest, size)
 
 
+# How a file is opened to be read: not through a link, and without waiting. open() of
+# a pipe blocks until a writer comes, so what a file is has to be told by its
+# descriptor (fstat), after an open that cannot block.
+OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+
 def read_pinned_apk(apk: Path, pin: Pin, error: Error) -> bytes:
     """The bytes of the APK, read once through one descriptor, after checking that
     they are the pinned Magisk release by size and SHA-256. A caller uses these
@@ -190,7 +196,7 @@ def read_pinned_apk(apk: Path, pin: Pin, error: Error) -> bytes:
         "(its size or SHA-256 differs from metadata/magisk.env)"
     )
     try:
-        descriptor = os.open(apk, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(apk, OPEN_FLAGS)
     except OSError as failure:
         raise error(f"the Magisk APK must be a regular non-symlink file: {apk} ({failure})") from failure
     with os.fdopen(descriptor, "rb") as handle:
@@ -378,7 +384,7 @@ def read_file(path: Path, limit: int, label: str, error: Error) -> bytes:
     """A regular file of at most `limit` bytes, whose size is checked before it is
     read, opened without following a link."""
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(path, OPEN_FLAGS)
     except OSError as failure:
         raise error(f"{label} must be a regular non-symlink file: {path} ({failure})") from failure
     with os.fdopen(descriptor, "rb") as handle:

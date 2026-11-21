@@ -53,10 +53,10 @@ PIN_KEYS = {
 }
 
 
-def run_tool(script: str, *arguments: object) -> subprocess.CompletedProcess:
+def run_tool(script: str, *arguments: object, timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-B", str(TOOLS / script), *map(str, arguments)],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False,
     )
 
 
@@ -620,6 +620,37 @@ class PatcherTests(unittest.TestCase):
         link = self.directory / "link.apk"
         link.symlink_to(apk)
         self.assert_refused(self.patch(link, pin=self.fixture.pin(apk)), "regular non-symlink file")
+
+    def test_a_pipe_is_refused_and_never_waited_for(self) -> None:
+        # open() on a pipe blocks until a writer comes, so a file must be refused by what
+        # its descriptor is, and the open must not wait. The bound is what fails a
+        # regression instead of hanging it.
+        apk = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(apk)
+        pipe = self.directory / "pipe"
+        os.mkfifo(pipe)
+        record = self.directory / "record"
+        record.mkdir()
+        os.mkfifo(record / f"Magisk-{TEST_VERSION}.apk")
+        (record / "init_boot-magisk.img").write_bytes(b"x")
+        verify = ("verify-magisk-boot.py", "--image", apk, "--apk", apk, "--layout", self.fixture.layout,
+                  "--stock-image", pipe)
+        for name, arguments in {
+            "the APK of the patcher": (
+                "magisk-boot.py", "patch", "--magisk-apk", pipe, "--disk", self.fixture.disk,
+                "--layout", self.fixture.layout, "--output-dir", self.output, "--pin", pin),
+            "the APK of a record": (
+                "magisk-boot.py", "record", "--root-dir", record, "--disk", self.fixture.disk,
+                "--layout", self.fixture.layout, "--pin", pin),
+            "the stock image of the verifier": verify,
+        }.items():
+            with self.subTest(name):
+                try:
+                    result = run_tool(*arguments, timeout=20)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"{name} given as a pipe was waited for")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertRegex(result.stderr, "regular non-symlink file")
 
     def test_a_script_that_hangs_is_stopped(self) -> None:
         spec = importlib.util.spec_from_file_location("magisk_boot_tool", TOOLS / "magisk-boot.py")
