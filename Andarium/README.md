@@ -693,7 +693,9 @@ address space holds, so this is a fallback.
   says from it which ramdisk the last boot used. The previous session's record
   stays where the runtime wrote it until the pause decided from it is saved,
   no run begins while that save is owed, and a start with root whose settings
-  cannot be saved begins without root. Restoring a snapshot forgets what the application
+  cannot be saved begins without root. The record of a run is moved aside as
+  the next run is asked for (`RunRecord`), so the one at its place is always
+  the current run's and no time has to tell them apart. Restoring a snapshot forgets what the application
   remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
   snapshot's disk may not have it; the switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release

@@ -626,3 +626,47 @@ struct SessionRecordTests {
         #expect(redacted.contains("mac /Users/<user>/Library/Containers/app/Data/x"))
     }
 }
+
+struct RunRecordTests {
+    private func directory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("run-record-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func state(_ ramdisk: String, ended: Bool, started: Int) -> Data {
+        var slot = "uml-session 8\nmemory at 1794114290 footprint 2147483648 peak 2415919104\n"
+        slot += String(repeating: " ", count: 255 - slot.utf8.count) + "\n"
+        let text = ended
+            ? "state ended\nend guest-panic\nstatus 0\npid 7\nstarted \(started)\nended \(started + 3)\nboot unobserved\nrestarts 0\nramdisk \(ramdisk)\n"
+            : "state running\nend running\nstatus 0\npid 7\nstarted \(started)\nboot unobserved\nrestarts 0\nramdisk \(ramdisk)\n"
+        return Data((slot + text).utf8)
+    }
+
+    @Test func aNewRunsRecordIsTheOneAtItsPlaceWhateverTheClockSaysOfTheOneBefore() throws {
+        let diagnostics = try directory()
+        defer { try? FileManager.default.removeItem(at: diagnostics) }
+        let file = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let run = RunRecord(in: diagnostics)
+        // None yet.
+        #expect(run.read() == nil)
+        // A run of this process ended a moment ago: its record says it was the Magisk ramdisk's, and it
+        // began in the same whole second as the next run's begin, or after the clock stepped back.
+        let second = Int(Date().timeIntervalSince1970)
+        try state("root", ended: true, started: second + 5).write(to: file)
+        #expect(run.read()?.ramdisk == .root)
+        // The next run is asked for: nothing of the earlier one stays at the place.
+        run.retireEarlierRuns()
+        #expect(run.read() == nil, "the record of the run before was taken for the next run's")
+        #expect(SessionRecord.read(at: kept)?.ramdisk == .root)
+        // The runtime begins its record; that one is the run's.
+        try state("stock", ended: false, started: second).write(to: file)
+        let current = try #require(run.read())
+        #expect(current.running && current.ramdisk == .stock)
+        // And at the next run it goes the same way.
+        run.retireEarlierRuns()
+        #expect(run.read() == nil)
+        #expect(SessionRecord.read(at: kept)?.ramdisk == .stock)
+    }
+}

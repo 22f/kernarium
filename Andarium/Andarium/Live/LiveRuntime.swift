@@ -408,7 +408,9 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
-        runAskedAt = Date()
+        // The record of the run before moves aside, so that the one at its
+        // place from here on is this run's (`RunRecord`).
+        runRecord?.retireEarlierRuns()
         // The previous display is removed on return to Home. Wait for the
         // new boot's view to lay out before starting another runtime.
         view = nil
@@ -887,21 +889,13 @@ final class LiveRuntime: RuntimeDriver {
 
     var guestShell: (any GuestShell)? { AdbGuestShell(operations: operations) }
 
-    /// When the last `begin` asked for a run: the runtime's record of that run
-    /// started no earlier, which tells it from the record of one before.
-    private var runAskedAt = Date.distantFuture
-
-    func currentSessionRecord() -> SessionRecord? {
-        guard let sessionRecord else { return nil }
-        // The runtime rewrites the state in one write; a read that lands in
-        // the middle of one is read again.
-        for _ in 0..<3 {
-            guard let record = SessionRecord.read(at: sessionRecord) else { continue }
-            guard let started = record.started, started >= runAskedAt.addingTimeInterval(-1) else { return nil }
-            return record
-        }
-        return nil
+    /// The records of this process's runs, where the runtime writes them.
+    private var runRecord: RunRecord? {
+        guard let sessionRecord, sessionRecord.lastPathComponent == BugReportAttachments.sessionRecord else { return nil }
+        return RunRecord(in: sessionRecord.deletingLastPathComponent())
     }
+
+    func currentSessionRecord() -> SessionRecord? { runRecord?.read() }
 
     func installRootApp() async throws {
         guard let release = rootRelease else { throw CancellationError() }

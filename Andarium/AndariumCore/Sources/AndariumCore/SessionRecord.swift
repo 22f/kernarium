@@ -389,3 +389,35 @@ public enum PreviousSession {
         return previous
     }
 }
+
+/// The runtime's record of the runs of this process, in the diagnostics
+/// directory. A run's record is the file that is there once the run began: the
+/// record of an earlier run is moved aside as the new run is asked for
+/// (`retireEarlierRuns`), so that no time or counter has to tell them apart. A
+/// decision made from the earlier record is made and saved by then: a start
+/// is not begun while one is owed (`AppModel.start`).
+public struct RunRecord: Sendable {
+    private let directory: URL
+
+    public init(in diagnostics: URL) {
+        directory = diagnostics
+    }
+
+    /// Keeps the record of the run before as `previous-session.txt` for the
+    /// bug report, so that the next run writes its own at its place.
+    public func retireEarlierRuns() {
+        PreviousSession.keep(in: directory)
+    }
+
+    /// The record as it stands; nil while the runtime has written none. The
+    /// runtime rewrites the state in one write, and a read that lands in the
+    /// middle of one is read again.
+    public func read() -> SessionRecord? {
+        let file = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
+        for _ in 0..<3 {
+            if let record = SessionRecord.read(at: file) { return record }
+        }
+        return nil
+    }
+}
+

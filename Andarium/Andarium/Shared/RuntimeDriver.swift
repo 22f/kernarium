@@ -271,8 +271,9 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     func installRootApp() async throws
     /// The runtime's record of the run the last `begin` asked for, as it stands:
     /// which ramdisk the boot used (`SessionRecord.ramdisk`), how far it got
-    /// and how it ended. Nil until the runtime has begun that run's session,
-    /// so that the record of an earlier run is never taken for it.
+    /// and how it ended. Nil until the runtime has begun that run's session:
+    /// the record of an earlier run is moved aside as the run is asked for
+    /// (`RunRecord`), so none is ever taken for it.
     func currentSessionRecord() -> SessionRecord?
     /// The guest's shell, for the short questions about the Magisk app; nil
     /// when there is none to ask.
