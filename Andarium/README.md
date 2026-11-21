@@ -648,6 +648,22 @@ address space holds, so this is a fallback.
   `CameraGuestTests` boots one through this runtime on the synthetic camera and
   reads the vendor SKU, the camera IDs and the lens cover of a live and a
   blocked session.
+- **Root.** Root is a per-guest switch in a section of its own on Home, after
+  Capabilities (`RootSection`; the guest's `RootState`, off for a new guest and
+  for one stored before). Home shows only while Android is stopped, so a change
+  applies at the next start. Turning it on asks first (what an app allowed in
+  Magisk can do); turning it off applies at once. The row exists only where the
+  release this copy carries holds root (`RootRelease`: the manifest's `root`
+  object and the files in the release's `root/`, which the
+  [Android release](../android/lineage-24/README.md) makes and
+  `stage-system-image.py` stages); without it nothing of the feature shows and a
+  start boots the release's own ramdisk. A start with root asks the runtime for
+  the release's Magisk-patched ramdisk (`android_root`, runtime API 45;
+  [boot selection](../darwin/device/block/README.md#boot-selection)).
+  The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
+  when an absent Magisk app is installed again (`RootInstallRule`), what becomes
+  of the app when root is off (`RootOffRule`), and what a failed start with root
+  does to the switch (`RootFallbackRule`).
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches

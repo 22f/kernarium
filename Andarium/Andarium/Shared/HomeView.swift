@@ -85,6 +85,7 @@ struct HomeView: View {
         .microphoneAccessAlert()
         .locationAccessAlert()
         .cameraAccessAlert()
+        .rootWarningAlert()
         .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
             Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
@@ -218,10 +219,11 @@ struct HomeView: View {
         JitSection()
     }
 
-    /// Capabilities and Backup: what the guest may use.
+    /// Capabilities, Root and Backup: what the guest may use.
     @ViewBuilder
     private var guestSections: some View {
         CapabilitiesSection()
+        RootSection()
         BackupSection()
     }
 

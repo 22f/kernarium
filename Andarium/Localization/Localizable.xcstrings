@@ -2992,6 +2992,52 @@
         }
       }
     },
+    "Apps you allow in Magisk can read and change everything in the virtual machine, including other apps’ data. Some apps don’t run on a rooted device. The official Magisk app is installed at the next start. You can turn root off whenever the virtual machine is stopped." : {
+      "comment" : "Body of the alert that asks before root access is turned on.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskで許可したアプリは、ほかのアプリのデータを含め、仮想マシン内のすべてを読み取り、変更できます。root化された端末では動作しないアプリもあります。次回の起動時に公式のMagiskアプリがインストールされます。rootは仮想マシンの停止中にいつでもオフにできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允许的应用可以读取和更改虚拟机中的所有内容，包括其他应用的数据。有些应用无法在已Root的设备上运行。下次启动时会安装官方Magisk应用。虚拟机停止时，你可以随时关闭Root。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允許的應用程式可以讀取和更改虛擬機器中的所有內容，包括其他應用程式的資料。有些應用程式無法在已Root的裝置上執行。下次啟動時會安裝官方Magisk應用程式。虛擬機器停止時，你可以隨時關閉Root。"
+          }
+        }
+      }
+    },
+    "Apps you allow in Magisk can run as root. Takes effect at the next start." : {
+      "comment" : "Note under the Root section.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskで許可したアプリがrootで動作できます。次回の起動から有効です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允许的应用可以以Root身份运行。下次启动时生效。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允許的應用程式可以以Root身分執行。下次啟動時生效。"
+          }
+        }
+      }
+    },
     "Architecture" : {
       "comment" : "CPU architecture of the virtual machine.",
       "localizations" : {
@@ -8061,6 +8107,29 @@
         }
       }
     },
+    "Paused after a failed start" : {
+      "comment" : "Line under the Root access switch while a start with root that failed has paused root until the person chooses.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動に失敗したため一時停止中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动失败后已暂停"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動失敗後已暫停"
+          }
+        }
+      }
+    },
     "Pausing %@" : {
       "localizations" : {
         "ja" : {
@@ -8857,6 +8926,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在繼續…"
+          }
+        }
+      }
+    },
+    "Root" : {
+      "comment" : "Home section title: the virtual machine's root access (Magisk).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root"
+          }
+        }
+      }
+    },
+    "Root access" : {
+      "comment" : "Row title under Root: the switch that starts Android with Magisk, so apps the person allows in Magisk can run as root.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootアクセス"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root权限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root權限"
           }
         }
       }
@@ -13387,6 +13502,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "要為「%@」開啟舊版應用程式相容性嗎？"
+          }
+        }
+      }
+    },
+    "Turn on root access?" : {
+      "comment" : "Title of the alert that asks before root access is turned on.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootアクセスをオンにしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要开启Root权限吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要開啟Root權限嗎？"
           }
         }
       }

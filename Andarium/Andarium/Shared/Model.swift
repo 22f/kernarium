@@ -528,6 +528,13 @@ final class AppModel {
     /// play on. The runtime states it; an iPad, a Mac and the Simulator have
     /// none, and Capabilities then has no Haptics row.
     var hapticsAvailable = false
+    /// The Android release this copy carries holds root (`RootRelease`): Home
+    /// shows the Root section only then, and a start boots Magisk only then.
+    /// The device application reads it from the staged release; nothing else
+    /// sets it.
+    var rootAvailable = false
+    /// The alert that asks before root is turned on is up (`Model+Root.swift`).
+    var rootWarningShowing = false
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
