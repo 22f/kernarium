@@ -594,7 +594,7 @@ index 2844d37d6d5524d5b12c540b704633cd6e54b9a2..5ec55ea67116efe05ffcf9a797a98dfe
      return FILE_HEADER_TEMPL.format(script=script, guard=guard,
              protocol_includes=protocol_includes).lstrip()
 diff --git a/src/venus/vkr_host_copy.c b/src/venus/vkr_host_copy.c
-index ba87badd1ed8636b7172f9850090b9a7c569bd7e..684778357b8ded360b4ad03a410b66b66f1921e8 100644
+index a505fdfc06c97cd373db8a56789f686c61b18bcc..d5a00868150800f909cdbb97f7270b2f8655cb85 100644
 --- a/src/venus/vkr_host_copy.c
 +++ b/src/venus/vkr_host_copy.c
 @@ -9,7 +9,7 @@

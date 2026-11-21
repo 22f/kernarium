@@ -39,7 +39,11 @@ texels of a padded row and leaves the padding between them, so the staging
 starts zeroed: the reply must not carry what the allocator last held.  A
 chroma plane (the second and third plane of a multi-planar format) is as
 large as its subsampling leaves it, half the image across and down in a 4:2:0
-format and half across in 4:2:2, and a region is held to that.  And
+format and half across in 4:2:2, rounded down and halved per mip level to one
+texel as the driver lays the plane out, and a region is held to that: an image
+whose extent the subsampling does not divide has fewer texels in the plane
+than the rounded-up quotient, so the driver would reach past its texture and,
+in an image-to-image copy, past its temporary.  And
 vkCopyImageToImage, which the driver copies through one temporary the size of
 the source plane, refuses a null image, a region outside either image, layers
 that differ between the two sides, and a destination that takes more bytes
@@ -48,16 +52,16 @@ do.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/venus/vkr_host_copy.c | 950 ++++++++++++++++++++++++++++++++++++--
+ src/venus/vkr_host_copy.c | 953 ++++++++++++++++++++++++++++++++++++--
  src/venus/vkr_image.c     |  10 +-
  src/venus/vkr_image.h     |   4 +
- 3 files changed, 932 insertions(+), 32 deletions(-)
+ 3 files changed, 935 insertions(+), 32 deletions(-)
 
 diff --git a/src/venus/vkr_host_copy.c b/src/venus/vkr_host_copy.c
-index 95c4ee7ec47973f219d103bf09e6ee47a978a276..ba87badd1ed8636b7172f9850090b9a7c569bd7e 100644
+index 95c4ee7ec47973f219d103bf09e6ee47a978a276..a505fdfc06c97cd373db8a56789f686c61b18bcc 100644
 --- a/src/venus/vkr_host_copy.c
 +++ b/src/venus/vkr_host_copy.c
-@@ -5,47 +5,880 @@
+@@ -5,47 +5,883 @@
  
  #include "vkr_host_copy.h"
  
@@ -635,12 +639,15 @@ index 95c4ee7ec47973f219d103bf09e6ee47a978a276..ba87badd1ed8636b7172f9850090b9a7
 +   }
 +}
 +
-+/* An extent of the image at a mip level, and of the plane a chroma aspect names
-+ * within it. */
++/* An extent of the plane a region names, at a mip level, as the driver lays it
++ * out: the image's extent divided by the plane's subsampling and rounded down,
++ * then halved per level down to one texel.  The driver sizes the plane that way
++ * (kk_image_layout_init(), u_minify()), so an image whose extent a chroma
++ * plane does not divide evenly has fewer texels than the rounded-up quotient. */
 +static uint32_t
-+vkr_host_copy_level_extent(uint32_t extent, uint32_t level)
++vkr_host_copy_plane_extent(uint32_t extent, uint32_t subsampling, uint32_t level)
 +{
-+   return level < 32 ? MAX2(extent >> level, 1u) : 1u;
++   return level < 32 ? MAX2((extent / subsampling) >> level, 1u) : 1u;
 +}
 +
 +/* Whether a region of a host image copy lies in the image: in a mip level it
@@ -671,11 +678,11 @@ index 95c4ee7ec47973f219d103bf09e6ee47a978a276..ba87badd1ed8636b7172f9850090b9a7
 +   vkr_host_copy_chroma_subsampling(image->format, aspect, &across, &down);
 +   if (offset.x < 0 || offset.y < 0 || offset.z < 0 ||
 +       (uint64_t)offset.x + extent.width >
-+          DIV_ROUND_UP(vkr_host_copy_level_extent(image->extent.width, level), across) ||
++          vkr_host_copy_plane_extent(image->extent.width, across, level) ||
 +       (uint64_t)offset.y + extent.height >
-+          DIV_ROUND_UP(vkr_host_copy_level_extent(image->extent.height, level), down) ||
++          vkr_host_copy_plane_extent(image->extent.height, down, level) ||
 +       (uint64_t)offset.z + extent.depth >
-+          vkr_host_copy_level_extent(image->extent.depth, level)) {
++          vkr_host_copy_plane_extent(image->extent.depth, 1, level)) {
 +      vkr_log("host image copy: the region lies outside the image's extent at mip "
 +              "level %u", level);
 +      return false;
@@ -949,7 +956,7 @@ index 95c4ee7ec47973f219d103bf09e6ee47a978a276..ba87badd1ed8636b7172f9850090b9a7
        .memoryRowLength = info->memoryRowLength,
        .memoryImageHeight = info->memoryImageHeight,
        .imageSubresource = info->imageSubresource,
-@@ -61,26 +894,46 @@ vkr_dispatch_vkCopyImageToMemoryMESA(UNUSED struct vn_dispatch_context *dispatch
+@@ -61,26 +897,46 @@ vkr_dispatch_vkCopyImageToMemoryMESA(UNUSED struct vn_dispatch_context *dispatch
        .pRegions = &local_region,
     };
     args->ret = vk->CopyImageToMemory(args->device, &local_info);
@@ -1009,7 +1016,7 @@ index 95c4ee7ec47973f219d103bf09e6ee47a978a276..ba87badd1ed8636b7172f9850090b9a7
           .memoryRowLength = regions[i].memoryRowLength,
           .memoryImageHeight = regions[i].memoryImageHeight,
           .imageSubresource = regions[i].imageSubresource,
-@@ -88,17 +941,52 @@ vkr_dispatch_vkCopyMemoryToImageMESA(UNUSED struct vn_dispatch_context *dispatch
+@@ -88,17 +944,52 @@ vkr_dispatch_vkCopyMemoryToImageMESA(UNUSED struct vn_dispatch_context *dispatch
           .imageExtent = regions[i].imageExtent,
        };
     }
