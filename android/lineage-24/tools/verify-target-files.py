@@ -4318,6 +4318,7 @@ def check_kernel_policy(
             if name in infos
         ),
         read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
+        build_variant,
     )
 
 
@@ -5579,16 +5580,37 @@ SMS_DAEMON_NO_GRANT_CLASSES = frozenset({
 })
 # What the platform grants every domain in the binder family and the holder and the waker therefore hold in effect
 # (the rules over the attribute domain with its few exclusions): a binder call permission to system_server and the
-# lookup of binder_stats_consumer_service. The holder's rights in these classes are these and no more: it never
-# opens the binder device, and without the call permission to the service manager, which no domain-wide rule
-# gives, it can obtain no handle to call. The waker is the framework's client for one call: it also finds the
-# activity manager, and its own binder rules are the service manager's and system_server's. A platform update
-# that adds a grant fails the image build here until someone has looked at it.
+# lookup of binder_stats_consumer_service. The holder's rights in these classes are these and no more (and on the
+# binder device nodes, SMS_BINDER_DEVICES): it never opens a binder device, and without the call permission to the
+# service manager, which no domain-wide rule gives, it can obtain no handle to call. The waker is the framework's
+# client for one call: it also finds the activity manager, and its own binder rules are the service manager's and
+# system_server's (SMS_WAKE_BINDER_RIGHTS). A platform update that adds a grant fails the image build here until
+# someone has looked at it.
 SMS_PLATFORM_DOMAIN_GRANTS: dict[str, dict[str, frozenset[str]]] = {
     "binder": {"system_server": frozenset({"call"})},
     "service_manager": {"binder_stats_consumer_service": frozenset({"find"})},
 }
 SMS_WAKE_REVIEWED_LOOKUPS = {"activity_service": frozenset({"find"}), **SMS_PLATFORM_DOMAIN_GRANTS["service_manager"]}
+# The waker's binder rights in effect: it calls the service manager to find the activity manager and the activity
+# manager to start the service, and the replies and the calls transfer. They are its own rules (the platform's
+# call permission to system_server is among them), and no other target or permission is accepted.
+SMS_WAKE_BINDER_RIGHTS: dict[str, frozenset[str]] = {
+    "servicemanager": frozenset({"call", "transfer"}),
+    "system_server": frozenset({"call", "transfer"}),
+}
+# What the platform grants every domain on the binder device nodes, which the holder and the waker hold in effect
+# (the rules over the attribute domain), and the vendor binder device, which is no one's but the vendor's. A platform
+# update that adds a right fails the image build here until someone has looked at it.
+SMS_BINDER_DEVICE_RIGHTS = frozenset({
+    "append", "getattr", "ioctl", "lock", "map", "open", "read", "watch", "watch_reads", "write",
+})
+SMS_BINDER_DEVICES: dict[str, frozenset[str]] = {
+    "binder_device": SMS_BINDER_DEVICE_RIGHTS,
+    "hwbinder_device": SMS_BINDER_DEVICE_RIGHTS,
+    "vndbinder_device": frozenset(),
+}
+# A debuggable build's platform policy lets every domain call and transfer through binder to the root shell (su).
+SMS_DEBUGGABLE_SU_BINDER_RIGHTS = frozenset({"call", "transfer"})
 # What the service holds on the holder's vsock sockets: it accepts, and reads and writes the connections that
 # inherit the holder's label, and shuts them down.
 SMS_SERVICE_VSOCK_PERMISSIONS = frozenset({"accept", "read", "write", "shutdown", "getattr", "getopt"})
@@ -5783,7 +5805,8 @@ def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, nam
 
 
 def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], sets: "CilSets",
-                            rules_of: Callable[[str], list["SmsRule"]], file_contexts: bytes) -> None:
+                            rules_of: Callable[[str], list["SmsRule"]], file_contexts: bytes,
+                            build_variant: str) -> None:
     """The holder of port 5560 and the waker are the plain daemons that init starts, and the handoff between
     the holder and the service is the service's alone."""
     for domain, path in ((SMS_LISTENER, SMS_INIT_SERVICES[SMS_LISTENER][0]), (SMS_WAKE, SMS_INIT_SERVICES[SMS_WAKE][0])):
@@ -5837,14 +5860,22 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
         return rights
 
     for domain, reviewed in ((SMS_LISTENER, SMS_PLATFORM_DOMAIN_GRANTS),
-                             (SMS_WAKE, {"service_manager": SMS_WAKE_REVIEWED_LOOKUPS})):
+                             (SMS_WAKE, {"service_manager": SMS_WAKE_REVIEWED_LOOKUPS, "binder": SMS_WAKE_BINDER_RIGHTS})):
+        if build_variant != "user":
+            reviewed = {**reviewed, "binder": {**reviewed.get("binder", {}), "su": SMS_DEBUGGABLE_SU_BINDER_RIGHTS}}
         for object_class in sorted(SMS_DAEMON_NO_GRANT_CLASSES):
             rights = held(domain, object_class)
             if rights:
                 fail(f"{domain} holds rights of the {object_class} class in effect ({sorted(rights)}): it is a plain "
                      "daemon, and no attribute or set expression may give it any")
-        if "vndbinder_device" in held(domain, "chr_file"):
+        devices = held(domain, "chr_file")
+        if "vndbinder_device" in devices:
             fail(f"{domain} may use the vendor binder device in effect: it is a plain daemon")
+        for device, accepted_rights in SMS_BINDER_DEVICES.items():
+            extra = devices.get(device, set()) - accepted_rights
+            if extra:
+                fail(f"{domain} holds {sorted(extra)} on {device} of the chr_file class in effect: only the "
+                     f"platform's grants to every domain ({sorted(accepted_rights)}) are accepted")
         for object_class, accepted in reviewed.items():
             for target, permissions in sorted(held(domain, object_class).items()):
                 extra = permissions - accepted.get(target, frozenset())
@@ -5972,7 +6003,7 @@ class SmsRule(NamedTuple):
 
 
 def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str,
-                     file_contexts: bytes) -> None:
+                     file_contexts: bytes, build_variant: str) -> None:
     """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
     on a vsock socket exactly the reviewed ones and the holder of port 5560 may, whatever attribute grants it;
     nothing else holds the holder's sockets or the service's data, except the platform's own getattr for
@@ -6135,7 +6166,7 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         fail(f"{sorted(data_holders - {SMS_DOMAIN} - SMS_DATA_MANAGERS)} hold rights on {SMS_DATA_TYPE}: only "
              f"{SMS_DOMAIN} and the managers of application data may")
 
-    check_sms_holder_policy(contexts, policies, sets, rules_of, file_contexts)
+    check_sms_holder_policy(contexts, policies, sets, rules_of, file_contexts, build_variant)
 
     # service.adb.listen_addrs: who may set it.
     label = property_label(ADB_LISTEN_ADDRS_PROPERTY, contexts)

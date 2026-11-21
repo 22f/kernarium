@@ -437,7 +437,7 @@ def load_tool(path: Path):
 _SMS_TOOL = None
 
 
-def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
+def sms_policy_fixture(verifier: Path, variant: str | None, build_variant: str = "user") -> dict[str, str]:
     """The text message service's part of the policy a target-files fixture carries: the platform's vsock
     and property rules as the reviewed lists give them, the service's own domain, data type and rules (as
     overlay/sepolicy/system_ext/private/kernarium_sms.te makes them), the seapp_contexts lines and the property
@@ -499,7 +499,17 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
              f"(allow base_typeattr_291 system_server (binder ({'call transfer' if variant == 'holder-binder-grant-widened' else 'call'})))\n"
              "(allow base_typeattr_291 binder_stats_consumer_service (service_manager (find)))\n"
              "(allow system_app ctl_default_prop (property_service (set)))\n"
-             "(allow system_server ctl_default_prop (property_service (set)))\n")
+             "(allow system_server ctl_default_prop (property_service (set)))\n"
+             # The platform lets every domain open the binder and the hardware binder device nodes (the vendor's
+             # is the vendor's alone).
+             "(allow base_typeattr_291 binder_device (chr_file (append getattr ioctl lock map open read watch "
+             "watch_reads write)))\n"
+             "(allow base_typeattr_291 hwbinder_device (chr_file (append getattr ioctl lock map open read watch "
+             "watch_reads write)))\n")
+    # A debuggable build lets every domain call the root shell (the variant puts the rule in a user build, which has
+    # no such shell).
+    if build_variant != "user" or variant == "su-binder-in-a-user-build":
+        plat += "(allow domain su (binder (call transfer)))\n"
     ext = (
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(type kernarium_sms_listener)\n(type kernarium_sms_listener_exec)\n(type kernarium_sms_socket)\n"
@@ -682,6 +692,26 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         ext += "(allow kernarium_sms_listener servicemanager (binder (call)))\n"
     elif variant == "holder-finds-a-service":
         ext += "(allow kernarium_sms_listener activity_service (service_manager (find)))\n"
+    elif variant == "holder-binder-device-widened":
+        ext += ("(typeattributeset base_typeattr_93 (kernarium_sms_listener))\n"
+                "(allow base_typeattr_93 binder_device (chr_file (setattr)))\n")
+    elif variant == "holder-hwbinder-device-widened":
+        ext += ("(typeattributeset base_typeattr_93 (kernarium_sms_listener))\n"
+                "(allow base_typeattr_93 hwbinder_device (chr_file (execute)))\n")
+    elif variant == "waker-binder-device-widened":
+        ext += "(allow kernarium_sms_wake binder_device (chr_file (unlink)))\n"
+    elif variant == "waker-hwbinder-device-widened":
+        ext += "(allow kernarium_sms_wake hwbinder_device (chr_file (relabelto)))\n"
+    elif variant == "waker-binder-to-another":
+        ext += "(allow kernarium_sms_wake surfaceflinger (binder (call)))\n"
+    elif variant == "waker-binder-widened":
+        ext += "(allow kernarium_sms_wake servicemanager (binder (set_context_mgr)))\n"
+    elif variant == "waker-binder-through-a-group":
+        ext += ("(typeattributeset base_typeattr_94 (kernarium_sms_wake))\n"
+                "(allow base_typeattr_94 system_app (binder (call)))\n")
+    elif variant == "su-binder-widened":
+        ext += ("(typeattributeset base_typeattr_93 (kernarium_sms_listener))\n"
+                "(allow base_typeattr_93 su (binder (impersonate)))\n")
     elif variant == "holder-owns-files":
         ext += "(allow kernarium_sms_listener system_data_file (dir (search)))\n"
     elif variant == "holder-entered-by-another":
@@ -2717,7 +2747,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                     + sms_policy_fixture(verifier, sms_policy_variant)["file_context"],
                 )
-                sms_policy = sms_policy_fixture(verifier, sms_policy_variant)
+                sms_policy = sms_policy_fixture(verifier, sms_policy_variant, build_variant)
                 icons = icons_fixture(verifier, icons_variant)
                 archive.writestr("SYSTEM/etc/selinux/plat_seapp_contexts", sms_policy["seapp_plat"] + icons["seapp_plat"])
                 archive.writestr("SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts", sms_policy["seapp_ext"] + icons["seapp_ext"])
@@ -4289,6 +4319,17 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         f"a {variant} build verified as {requested}: "
                         f"{result.returncode} {result.stdout}"
                     )
+
+        # The root shell of a debuggable build is the platform's: it may be called through binder from every domain,
+        # the holder's and the waker's among them (call and transfer), and nothing more of it is accepted.
+        widened = root / "userdebug-su-binder-widened.zip"
+        write_fixture(widened, build_variant="userdebug", sms_policy_variant="su-binder-widened")
+        result = run_tool(verifier, "--target-files", widened, "--build-variant", "userdebug", *kernel_options)
+        if result.returncode == 0 or not re.search(
+            r"kernarium_sms_listener holds \['impersonate'\] on su of the binder class in effect", result.stdout
+        ):
+            fail(f"a userdebug build whose holder holds more than binder call and transfer on su verified: "
+                 f"{result.returncode} {result.stdout}")
 
         # Only a user build refuses a debuggable application: the diagnostics
         # variant is debuggable as a whole.
@@ -6687,6 +6728,22 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "kernarium_sms_listener holds rights of the capability class in effect"),
             ("sms-holder-vendor-binder-device", {"sms_policy_variant": "holder-vendor-binder-device"},
              "kernarium_sms_listener may use the vendor binder device in effect"),
+            ("sms-holder-binder-device-widened", {"sms_policy_variant": "holder-binder-device-widened"},
+             "kernarium_sms_listener holds \\['setattr'\\] on binder_device of the chr_file class in effect"),
+            ("sms-holder-hwbinder-device-widened", {"sms_policy_variant": "holder-hwbinder-device-widened"},
+             "kernarium_sms_listener holds \\['execute'\\] on hwbinder_device of the chr_file class in effect"),
+            ("sms-waker-binder-device-widened", {"sms_policy_variant": "waker-binder-device-widened"},
+             "kernarium_sms_wake holds \\['unlink'\\] on binder_device of the chr_file class in effect"),
+            ("sms-waker-hwbinder-device-widened", {"sms_policy_variant": "waker-hwbinder-device-widened"},
+             "kernarium_sms_wake holds \\['relabelto'\\] on hwbinder_device of the chr_file class in effect"),
+            ("sms-waker-binder-to-another", {"sms_policy_variant": "waker-binder-to-another"},
+             "kernarium_sms_wake holds \\['call'\\] on surfaceflinger of the binder class in effect"),
+            ("sms-waker-binder-widened", {"sms_policy_variant": "waker-binder-widened"},
+             "kernarium_sms_wake holds \\['set_context_mgr'\\] on servicemanager of the binder class in effect"),
+            ("sms-waker-binder-through-a-group", {"sms_policy_variant": "waker-binder-through-a-group"},
+             "kernarium_sms_wake holds \\['call'\\] on system_app of the binder class in effect"),
+            ("sms-su-binder-in-a-user-build", {"sms_policy_variant": "su-binder-in-a-user-build"},
+             "kernarium_sms_listener holds \\['call', 'transfer'\\] on su of the binder class in effect"),
             ("sms-waker-finds-another-service-through-a-group",
              {"sms_policy_variant": "waker-finds-another-service-through-a-group"},
              "kernarium_sms_wake holds \\['find'\\] on window_service of the service_manager class in effect"),
