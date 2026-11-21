@@ -71,6 +71,7 @@ struct TranslatedLibrariesRow: View {
         let detail = unused
             ? TranslatedLibrariesWords.notUsedWithJit
             : TranslatedLibrariesWords.text(for: model.translatedLibrariesNote)
+        let spoken: String = "\(title), \(detail)"
         OptionRow(title: title, symbol: "books.vertical.fill", detail: detail, dimmed: unused) {
             Toggle(isOn: Binding(
                 get: { model.translatedLibrariesOn },
@@ -82,8 +83,9 @@ struct TranslatedLibrariesRow: View {
         }
         // VoiceOver says the name first and then the line under it (the note, or
         // why the switch is dimmed), as a label, so that it is heard with hints
-        // off; the switch's own state follows.
-        .accessibilityLabel("\(title), \(detail)")
+        // off; the switch's own state follows. The label is a String, so that
+        // no catalog key is extracted from it.
+        .accessibilityLabel(spoken)
         .id("aot")
     }
 }
