@@ -65,6 +65,9 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
+    /// The most lines the line under the title shows: two, or all of it (nil)
+    /// for a row whose note must never be cut, in any language.
+    var detailLines: Int? = 2
     /// What the line under the title does when it is touched; the line then
     /// reads as a button. None leaves it plain text.
     var detailAction: (() -> Void)?
@@ -97,11 +100,10 @@ struct OptionRow<Control: View>: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("option-detail-button")
                     } else {
-                        // A long translation shows whole, up to three lines.
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(3)
+                            .lineLimit(detailLines)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -319,7 +321,8 @@ struct HighRefreshRow: View {
     var body: some View {
         OptionRow(
             title: String(localized: "120 Hz"), symbol: "speedometer",
-            detail: String(localized: "Smoother motion on this display, and more battery use.")
+            detail: String(localized: "Smoother motion on this display, and more battery use."),
+            detailLines: nil
         ) {
             Toggle("120 Hz", isOn: Binding(
                 get: { model.highRefreshOn },
