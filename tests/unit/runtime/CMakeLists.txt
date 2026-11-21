@@ -193,6 +193,17 @@ if(TARGET uml_arm64_aot_framework)
     uml_add_unit_test(
         NAME runtime-release-reselects-aot
         COMMAND uml_runtime_sequential_run_tests release-reselects-aot)
+    # A start decides only once it owns the process, so one that arrives while
+    # the session before it is ending waits for the end, and neither undoes the
+    # other's choice; a restart is no session boundary.
+    foreach(_uml_aot_mode IN ITEMS release-race-off-then-on
+            release-race-on-then-off release-race-mismatched
+            restart-keeps-aot-on restart-keeps-aot-off)
+        uml_add_unit_test(
+            NAME runtime-${_uml_aot_mode}
+            COMMAND uml_runtime_sequential_run_tests ${_uml_aot_mode})
+    endforeach()
+    unset(_uml_aot_mode)
 else()
     target_compile_definitions(uml_runtime_sequential_run_tests PRIVATE
         UML_TEST_AOT=0)

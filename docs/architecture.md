@@ -695,8 +695,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   in the environment, or `--aot=off` on the launch, runs the engine alone;
   `--aot=on` (or `--aot`) fails a launch whose build has none, and the launch's
   word beats the environment. Each run makes the choice before its first
-  executor and any per-thread table exist; a restart in the same process
-  decides again, and a release the blob no longer fits runs on the engine.
+  executor and any per-thread table exist, and only once it owns the process
+  (the address-space admission), so no other handle reads or changes the
+  choice between a session's end and the next one's; a restart in the same
+  process decides again, and a release the blob no longer fits runs on the
+  engine.
   A session that ran without the component does not turn it on later, but the
   release of its guest after Android's clean power-off ends the session, and
   the next boot in the process decides again, for the release it states. An
