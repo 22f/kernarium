@@ -220,6 +220,26 @@ struct TranslatedLibrariesRowTests {
         #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
     }
 
+    @Test func theBootRequestKeepsTheReleaseOutOnlyWhileTheSwitchIsOffInABuildThatCarriesIt() {
+        func field(_ model: AppModel?, jitInUse: Bool = false) -> UInt32 {
+            LiveRuntime.aotDisabled(for: LiveRuntime.translatedLibrariesStart(of: model, jitInUse: jitInUse))
+        }
+        let (carried, _) = fixture(carried: true)
+        #expect(field(carried) == 0)
+        carried.setTranslatedLibraries(false)
+        #expect(field(carried) == 1)
+        // The JIT engine does not use them; the choice reaches the request as it is.
+        #expect(field(carried, jitInUse: true) == 1)
+        carried.setTranslatedLibraries(true)
+        #expect(field(carried, jitInUse: true) == 0)
+        // A build without the framework launches as it always did, and so does
+        // a start with no model.
+        let (bare, _) = fixture(carried: false)
+        bare.setTranslatedLibraries(false)
+        #expect(field(bare) == 0)
+        #expect(field(nil) == 0)
+    }
+
     @Test func aBuildWithoutAJitNeverRunsOnIt() {
         let (model, _) = fixture(carried: true)
         // Not available: the person's wish for the JIT means nothing.
