@@ -37,14 +37,19 @@ struct ForwardSpecification final {
 /* Test tooling: listens on loopback for each forward and attaches every
  * accepted connection to the guest port through the endpoint, so a stock
  * client of a guest service (adb, a script) reaches it. Each connection is
- * served by the device alone; the forwarder moves no bytes. */
+ * served by the device alone; the forwarder moves no bytes.
+ *
+ * The listeners belong to the forwarder, not to a guest. They stay bound, with
+ * the ports a client learned, while the forwarder is detached from one guest
+ * and attached to the next. Every member may be called from any thread. */
 class Forwarder final {
 public:
     /* How long a connection waits for the guest to accept before it is
      * closed. */
     static constexpr std::chrono::milliseconds acceptTimeout {10000};
 
-    /* Throws std::runtime_error naming the forward that could not listen. */
+    /* Attached to `endpoint`, or detached when it is null. Throws
+     * std::runtime_error naming the forward that could not listen. */
     Forwarder(
         std::shared_ptr<Endpoint> endpoint,
         std::vector<ForwardSpecification> forwards);
@@ -53,8 +58,19 @@ public:
     Forwarder(const Forwarder&) = delete;
     Forwarder& operator=(const Forwarder&) = delete;
 
-    /* The port forward `index` listens on. */
+    /* The port forward `index` listens on. It never changes. */
     [[nodiscard]] std::uint16_t port(std::size_t index) const;
+
+    /* Reaches the guest behind `endpoint` from now on, after detaching the
+     * guest it reached before. */
+    void attach(std::shared_ptr<Endpoint> endpoint);
+
+    /* Reaches no guest. A connection that arrives while none is attached is
+     * closed at once and without a message. A connection still waiting for the
+     * guest to accept is given up, and the old endpoint is no longer used when
+     * this returns, so the guest behind it may end. A connection the guest
+     * accepted belongs to the device, which ends it with the guest. */
+    void detach() noexcept;
 
 private:
     struct Listener;
@@ -63,13 +79,17 @@ private:
     void run();
     void serve(Worker& worker, int accepted, std::uint32_t guestPort);
     void reap();
+    void replace(std::shared_ptr<Endpoint> endpoint) noexcept;
+    static void end(std::list<std::unique_ptr<Worker>>& workers) noexcept;
 
+    /* Guards `endpoint_` and the membership of `workers_`. It is never held
+     * while a worker's own mutex is. */
+    std::mutex mutex_;
     std::shared_ptr<Endpoint> endpoint_;
+    std::list<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Listener>> listeners_;
     std::unique_ptr<uml::platform::WakeSocket> wake_;
     std::atomic_bool stopping_ {};
-    std::mutex workersMutex_;
-    std::list<std::unique_ptr<Worker>> workers_;
     std::thread thread_;
 };
 

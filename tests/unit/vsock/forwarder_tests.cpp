@@ -5,6 +5,8 @@
 #include "vsock_test_guest.hpp"
 #include "watchdog.hpp"
 
+#include <optional>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -92,6 +94,44 @@ bool readable(int descriptor, int milliseconds)
     return ::poll(&waiting, 1, milliseconds) > 0;
 }
 
+/* Whether the forwarder ended the client's stream within `milliseconds`. */
+bool endsWithin(int descriptor, int milliseconds)
+{
+    if (!readable(descriptor, milliseconds))
+        return false;
+    char byte = 0;
+    return ::recv(descriptor, &byte, 1, 0) <= 0;
+}
+
+/* A connection the guest accepts, one request and its reply over it, and the
+ * client's close, which the guest hears as a shutdown. */
+void exchangeWith(Guest& guest, std::uint16_t hostPort, std::uint32_t guestPort)
+{
+    const int client = connectLoopback(hostPort);
+    const auto request = guest.expect();
+    require(request.header.op == protocol::opRequest);
+    require(request.header.destinationPort == guestPort);
+    guest.transmit(guestHeader(
+        protocol::opResponse, guestPort, request.header.sourcePort));
+    const char hello[] = "hello guest";
+    require(::send(client, hello, sizeof(hello), 0) == static_cast<ssize_t>(sizeof(hello)));
+    const auto data = guest.expect();
+    require(data.header.op == protocol::opReadWrite);
+    require(data.payload.size() == sizeof(hello));
+    const char reply[] = "hello host";
+    guest.transmit(
+        guestHeader(
+            protocol::opReadWrite, guestPort, request.header.sourcePort,
+            sizeof(reply)),
+        std::span(reinterpret_cast<const std::uint8_t*>(reply), sizeof(reply)));
+    char received[64] {};
+    require(readable(client, 5000));
+    require(::recv(client, received, sizeof(received), 0) == static_cast<ssize_t>(sizeof(reply)));
+    require(std::strcmp(received, reply) == 0);
+    ::close(client);
+    require(guest.expectNotCredit().header.op == protocol::opShutdown);
+}
+
 void forwardsAConnectionToTheGuestPort()
 {
     uml::testing::Watchdog watchdog("forwarder", std::chrono::seconds(60));
@@ -156,6 +196,65 @@ void stopsPromptlyWhileAConnectionWaitsForTheGuest()
     ::close(client);
 }
 
+void servesASecondGuestOnTheSamePortAfterDetach()
+{
+    uml::testing::Watchdog watchdog("forwarder reattach", std::chrono::seconds(60));
+    Guest first;
+    Forwarder forwarder(borrowed(first), {forward(0, 5555)});
+    const auto port = forwarder.port(0);
+    exchangeWith(first, port, 5555);
+    forwarder.detach();
+    Guest second;
+    forwarder.attach(borrowed(second));
+    require(forwarder.port(0) == port);
+    exchangeWith(second, port, 5555);
+}
+
+void closesAConnectionThatArrivesWhileNoGuestIsAttached()
+{
+    uml::testing::Watchdog watchdog("forwarder gap", std::chrono::seconds(60));
+    std::optional<Guest> first;
+    first.emplace();
+    Forwarder forwarder(borrowed(*first), {forward(0, 5555)});
+    const auto port = forwarder.port(0);
+    exchangeWith(*first, port, 5555);
+    forwarder.detach();
+    /* The listener stays bound, accepts, and closes the connection at once;
+     * nothing reaches the guest that was detached. */
+    int client = connectLoopback(port);
+    require(endsWithin(client, 5000));
+    ::close(client);
+    require(first->quiet());
+    /* The detached guest may go; nothing of it is kept. */
+    first.reset();
+    client = connectLoopback(port);
+    require(endsWithin(client, 5000));
+    ::close(client);
+    Guest second;
+    forwarder.attach(borrowed(second));
+    require(forwarder.port(0) == port);
+    exchangeWith(second, port, 5555);
+}
+
+void detachEndsAnOpeningTheGuestNeverAnswers()
+{
+    uml::testing::Watchdog watchdog("forwarder detach", std::chrono::seconds(60));
+    Guest guest;
+    Forwarder forwarder(borrowed(guest), {forward(0, 9)});
+    const int client = connectLoopback(forwarder.port(0));
+    /* The guest never answers. */
+    const auto request = guest.expect();
+    require(request.header.op == protocol::opRequest);
+    const auto started = std::chrono::steady_clock::now();
+    forwarder.detach();
+    require(std::chrono::steady_clock::now() - started < Forwarder::acceptTimeout / 2);
+    /* The device gives the open up, and the client reads its end. */
+    guest.pump();
+    require(endsWithin(client, 5000));
+    require(guest.expectNotCredit().header.op == protocol::opReset);
+    ::close(client);
+}
+
 void refusesAPortInUse()
 {
     Guest guest;
@@ -181,6 +280,12 @@ int main()
         {"closes-a-client-the-guest-refuses", closesAClientTheGuestRefuses},
         {"stops-promptly-while-a-connection-waits-for-the-guest",
          stopsPromptlyWhileAConnectionWaitsForTheGuest},
+        {"serves-a-second-guest-on-the-same-port-after-detach",
+         servesASecondGuestOnTheSamePortAfterDetach},
+        {"closes-a-connection-that-arrives-while-no-guest-is-attached",
+         closesAConnectionThatArrivesWhileNoGuestIsAttached},
+        {"detach-ends-an-opening-the-guest-never-answers",
+         detachEndsAnOpeningTheGuestNeverAnswers},
         {"refuses-a-port-in-use", refusesAPortInUse},
     };
     return uml::testing::runNamedTests(tests);

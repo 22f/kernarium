@@ -76,9 +76,14 @@ struct Forwarder::Listener final {
     std::uint16_t port {};
 };
 
+/* One accepted connection on its way to the guest. */
 struct Forwarder::Worker final {
+    /* The endpoint the connection was accepted for, set before `thread`
+     * starts and never changed. */
+    std::shared_ptr<Endpoint> endpoint;
     std::thread thread;
     std::atomic_bool done {};
+    /* Guards `opening` and `cancelled`, which the worker and `end` share. */
     std::mutex mutex;
     std::shared_ptr<Opening> opening;
     bool cancelled {};
@@ -148,9 +153,44 @@ Forwarder::~Forwarder()
     /* Connections still waiting for the guest are given up. */
     std::list<std::unique_ptr<Worker>> workers;
     {
-        std::lock_guard lock(workersMutex_);
+        std::lock_guard lock(mutex_);
         workers.swap(workers_);
     }
+    end(workers);
+}
+
+std::uint16_t Forwarder::port(std::size_t index) const
+{
+    return listeners_.at(index)->port;
+}
+
+void Forwarder::attach(std::shared_ptr<Endpoint> endpoint)
+{
+    replace(std::move(endpoint));
+}
+
+void Forwarder::detach() noexcept
+{
+    replace(nullptr);
+}
+
+void Forwarder::replace(std::shared_ptr<Endpoint> endpoint) noexcept
+{
+    std::shared_ptr<Endpoint> previous;
+    std::list<std::unique_ptr<Worker>> workers;
+    {
+        std::lock_guard lock(mutex_);
+        previous = std::move(endpoint_);
+        endpoint_ = std::move(endpoint);
+        /* Every worker listed now was accepted for the endpoint just
+         * replaced: a later accept takes the new one under this lock. */
+        workers.swap(workers_);
+    }
+    end(workers);
+}
+
+void Forwarder::end(std::list<std::unique_ptr<Worker>>& workers) noexcept
+{
     for (auto& worker : workers) {
         {
             std::lock_guard lock(worker->mutex);
@@ -161,11 +201,6 @@ Forwarder::~Forwarder()
         if (worker->thread.joinable())
             worker->thread.join();
     }
-}
-
-std::uint16_t Forwarder::port(std::size_t index) const
-{
-    return listeners_.at(index)->port;
 }
 
 void Forwarder::run()
@@ -194,19 +229,26 @@ void Forwarder::run()
             if ((descriptors[index].revents & POLLIN) == 0)
                 continue;
             for (;;) {
-                const int accepted =
-                    ::accept(listeners_[index]->descriptor.get(), nullptr, nullptr);
-                if (accepted < 0)
+                uml::gpu::UniqueDescriptor accepted {
+                    ::accept(listeners_[index]->descriptor.get(), nullptr, nullptr)};
+                if (accepted.get() < 0)
                     break;
+                const auto guestPort = listeners_[index]->specification.guestPort;
+                /* The worker is listed with its endpoint, and its thread
+                 * started, under the lock `replace` takes, so that `replace`
+                 * finds it and has a thread to join. */
+                std::lock_guard lock(mutex_);
+                /* No guest is attached: the connection is closed, quietly. */
+                if (!endpoint_)
+                    continue;
                 auto worker = std::make_unique<Worker>();
                 auto* raw = worker.get();
-                const auto guestPort = listeners_[index]->specification.guestPort;
-                {
-                    std::lock_guard lock(workersMutex_);
-                    workers_.push_back(std::move(worker));
-                }
+                worker->endpoint = endpoint_;
+                workers_.push_back(std::move(worker));
                 raw->thread = std::thread(
-                    [this, raw, accepted, guestPort] { serve(*raw, accepted, guestPort); });
+                    [this, raw, stream = accepted.release(), guestPort] {
+                        serve(*raw, stream, guestPort);
+                    });
             }
         }
     }
@@ -216,7 +258,8 @@ void Forwarder::serve(Worker& worker, int accepted, std::uint32_t guestPort)
 {
     uml::gpu::UniqueDescriptor stream {accepted};
     std::shared_ptr<Opening> opening;
-    const int started = endpoint_->beginAttach(std::move(stream), guestPort, opening);
+    const int started =
+        worker.endpoint->beginAttach(std::move(stream), guestPort, opening);
     if (started == 0) {
         {
             std::lock_guard lock(worker.mutex);
@@ -242,7 +285,7 @@ void Forwarder::reap()
 {
     std::list<std::unique_ptr<Worker>> finished;
     {
-        std::lock_guard lock(workersMutex_);
+        std::lock_guard lock(mutex_);
         for (auto it = workers_.begin(); it != workers_.end();) {
             if ((*it)->done.load(std::memory_order_acquire)) {
                 finished.push_back(std::move(*it));
