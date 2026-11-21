@@ -114,6 +114,7 @@ struct AppEntry {
         "home-camera-ask": "capabilities",
         "home-backup": "backup",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
+        "home-aot": "jit", "home-aot-off": "jit", "home-aot-jit": "jit",
     ]
 
     /// Where Settings scrolls to for a screen that shows a lower section.
@@ -177,6 +178,10 @@ struct AppEntry {
         model.fileBrowser = browser
         let freeze = !play
         model.jitAvailable = true
+        // The preview carries no translated-code framework, so Home has no AOT
+        // row unless a screen plays a build that does (`home-aot`,
+        // `home-aot-off`, `home-aot-jit`).
+        model.translatedLibrariesAvailable = screen.hasPrefix("home-aot")
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
         model.hapticsAvailable = host.hasHaptics
@@ -276,6 +281,13 @@ struct AppEntry {
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit",
              "home-location-ask", "home-camera-ask":
             break
+        case "home-aot":
+            break
+        case "home-aot-off":
+            model.translatedLibrariesOn = false
+        case "home-aot-jit":
+            // JIT is on and a debugger is attached, so the next start runs on it.
+            model.jitOn = true
         case "home-jit":
             model.jitOn = true
         case "home-jit-no-debugger":

@@ -509,6 +509,11 @@ final class LiveRuntime: RuntimeDriver {
         var extras = StartExtras()
         extras.jit = await prepareJit(for: run)
         if launchWasStopped(generation) { return }
+        // The row as it stands at this start: the runtime states the release for
+        // the translated libraries or leaves it out.
+        if let model {
+            extras.translatedLibraries = model.translatedLibrariesStart(jitInUse: extras.jit)
+        }
         guard let view, let geometry else {
             end(startFailure: "the display is not ready")
             return
@@ -570,6 +575,8 @@ final class LiveRuntime: RuntimeDriver {
     /// development build, whether the guest boots on the JIT engine.
     private struct StartExtras: Sendable {
         var jit = false
+        /// What the start does about the translated libraries.
+        var translatedLibraries = TranslatedLibrariesStart(buildCarries: false, optionOn: true)
     }
 
     private func launch(
@@ -652,6 +659,14 @@ final class LiveRuntime: RuntimeDriver {
         // it while its own automatic time zone is on.
         let timeZone = GuestTimeZone.current()
         let sessionRecordPath = sessionRecord?.path
+        // What this start chose, beside the runtime's record of the session, for
+        // a bug report to say.
+        if let sessionRecord {
+            StartRecord(translatedLibraries: extras.translatedLibraries.word)
+                .write(to: sessionRecord.deletingLastPathComponent().appendingPathComponent(BugReportAttachments.startRecord))
+        }
+        print("Andarium: AOT \(extras.translatedLibraries.word.rawValue)")
+        let aotDisabled = !extras.translatedLibraries.statesRelease
         // The run occupies its thread for the guest's whole life and the GPU
         // service reaches the main queue while it starts, so it must not be
         // the main thread. It owns a thread outright rather than a place on
@@ -669,7 +684,7 @@ final class LiveRuntime: RuntimeDriver {
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
                 processorCount: processorCount, adbKeyLine: adbKeyLine, timeZone: timeZone,
                 sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, cameraMode: cameraMode,
-                cameraPath: cameraPath, extras: extras
+                cameraPath: cameraPath, aotDisabled: aotDisabled, extras: extras
             )
             stop.end()
             Task { @MainActor in self.finished(result: result) }
@@ -682,7 +697,7 @@ final class LiveRuntime: RuntimeDriver {
         view: GuestMetalView, dataDiskPath: String, releasePath: String, dataGiB: UInt32, bootMode: UInt32,
         width: UInt32, height: UInt32, dotsPerInch: UInt32, memoryMiB: UInt32,
         processorCount: UInt32, adbKeyLine: String?, timeZone: String?, sessionRecordPath: String?,
-        hostFeatures: UInt32, cameraMode: UInt32, cameraPath: String?, extras: StartExtras
+        hostFeatures: UInt32, cameraMode: UInt32, cameraPath: String?, aotDisabled: Bool, extras: StartExtras
     ) -> Int32 {
         dataDiskPath.withCString { dataDisk in
             releasePath.withCString { release in
@@ -721,6 +736,9 @@ final class LiveRuntime: RuntimeDriver {
                                 // colour data a Bayer still teaches is kept.
                                 request.android_camera_mode = cameraMode
                                 request.android_camera_calibration_path = calibration
+                                // The translated libraries need the release stated to the
+                                // emulator; a person who turned them off keeps it out.
+                                request.android_aot_disabled = aotDisabled ? 1 : 0
                                 // The JIT engine, once its memory is prepared; gadgets otherwise.
                                 request.use_jit = extras.jit ? 1 : 0
                                 return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }

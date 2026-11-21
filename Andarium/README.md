@@ -763,6 +763,24 @@ address space holds, so this is a fallback.
   ([cold code](../darwin/cpu/arm64/jit/README.md#cold-code)), so an Android
   guest's boot, application launches and background work run several times
   slower than on gadgets, and a long single-process computation runs faster.
+- **AOT.** Android's system libraries and boot image run from machine code
+  translated ahead of time
+  ([`docs/architecture.md`](../docs/architecture.md#ahead-of-time-code)). A
+  build that embeds `UmlArm64Aot.framework` (what Acknowledgements reads) has an
+  AOT row on Home, below the JIT row in the same section: a switch, on by
+  default and kept for the install (`TranslatedLibrariesPreference`); a fresh
+  install and an update start on, and a harness launch starts on and keeps
+  nothing. The choice is read at each start. Off, the boot request keeps the
+  release out of the launch (`android_aot_disabled`,
+  [Kernarium](../Kernarium/README.md#automation-runs)) and Android runs on
+  the engine alone, as in a build without the framework; a running Android is
+  not changed. While the next start runs on the JIT, which does not use the
+  translated code, the row is dimmed, its switch cannot be changed and the line
+  under the title says so. Each start writes what it chose beside the session
+  record (`start.txt`, `StartRecord`), kept with it at the next launch, and a
+  bug report carries both as `andarium/start-current.txt` and
+  `andarium/start-previous.txt`: `translated-libraries` is `on`, `off`,
+  `not-used-with-jit` or `unavailable` (a build without the framework).
 - **Motion.** The guest has the device's accelerometer and gyroscope wherever
   the device has them, with no setting and no permission. An iPad app on a Mac
   and the Simulator have none, so nothing is read there, and Android still

@@ -65,6 +65,9 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
+    /// The most lines the line under the title shows: two, or all of it (nil)
+    /// for a row whose note must never be cut, in any language.
+    var detailLines: Int? = 2
     /// What the line under the title does when it is touched; the line then
     /// reads as a button. None leaves it plain text.
     var detailAction: (() -> Void)?
@@ -100,7 +103,7 @@ struct OptionRow<Control: View>: View {
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(detailLines)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -526,24 +529,31 @@ extension View {
 
 // MARK: JIT
 
-/// Whether the guest runs on the JIT engine, which a debugger the person
-/// attached (StikDebug) makes possible, and what the next start can do about
-/// it. It applies when the guest next starts.
+/// How Android runs, as rows of one section: whether the guest runs on the JIT
+/// engine, which a debugger the person attached (StikDebug) makes possible, and
+/// what the next start can do about it; and, below it, whether Android's system
+/// libraries run from the code translated from them ahead of time
+/// (`TranslatedLibrariesRow`), in a build that carries it. Both apply when the
+/// guest next starts.
 struct JitSection: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.jitAvailable, model.guest != nil {
-            HomeSection(verbatim: "JIT") {
-                OptionRow(title: "JIT", symbol: "bolt.fill") {
-                    Toggle(isOn: Binding(
-                        get: { model.jitOn },
-                        set: { model.setJit($0) }
-                    )) { Text(verbatim: "JIT") }
-                    .labelsHidden()
+        if model.jitAvailable || model.translatedLibrariesAvailable, model.guest != nil {
+            HomeSection(verbatim: model.jitAvailable ? "JIT" : String(localized: "Performance")) {
+                if model.jitAvailable {
+                    OptionRow(title: "JIT", symbol: "bolt.fill") {
+                        Toggle(isOn: Binding(
+                            get: { model.jitOn },
+                            set: { model.setJit($0) }
+                        )) { Text(verbatim: "JIT") }
+                        .labelsHidden()
+                    }
                 }
+                if model.jitAvailable, model.translatedLibrariesAvailable { RowDivider() }
+                if model.translatedLibrariesAvailable { TranslatedLibrariesRow() }
             } footer: {
-                SectionNote(model.jitStatus.footer)
+                if model.jitAvailable { SectionNote(model.jitStatus.footer) }
             }
             .id("jit")
             .task { model.refreshJit() }

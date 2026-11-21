@@ -171,6 +171,13 @@ struct AppEntry {
             stated: HeatLimitLaunch.stated(in: environment))
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = !heat.keepsChanges
+        // Home's AOT row exists where the build carries the translated-code
+        // framework (what Acknowledgements reads), and is the person's last
+        // choice unless the launch is a harness's.
+        model.translatedLibrariesAvailable = Acknowledgements.carries(Acknowledgements.aotFramework)
+        let translated = TranslatedLibrariesPreference().launch(automated: !launch.isEmpty)
+        model.translatedLibrariesOn = translated.isOn
+        model.translatedLibrariesDecidedByLaunch = !translated.keepsChanges
         model.printsStatistics = launch.statistics == true
         // The JIT row follows the person's last choice, unless the launch is a
         // harness's and decides for its run alone (`JitPreference.launch`).
@@ -273,6 +280,7 @@ struct AppEntry {
         let heat = HeatLimitPreference().launch(automated: true, stated: HeatLimitLaunch.stated(in: environment))
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = true
+        model.translatedLibrariesDecidedByLaunch = true
         // The side keys play their feedback here too: a launch that keeps the
         // phone silent does so on this path as on the ordinary one.
         model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)

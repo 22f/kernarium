@@ -13,6 +13,7 @@
   ],
   "english": [
     { "text": "JIT", "file": "Andarium/Andarium/Shared/HomeSections.swift", "reason": "A section only development builds have." },
+    { "text": "AOT", "file": "Andarium/Andarium/Shared/TranslatedLibrariesRow.swift", "reason": "A name every language keeps, as JIT; the note under it says what it is." },
     { "text": "Input probe", "file": "Andarium/Andarium/Shared/Settings.swift", "reason": "The field UI tests type into." },
     { "text": "adb connect", "file": "Andarium/Andarium/Shared/Settings.swift", "reason": "The command typed on a computer." },
     { "text": "The previous session ended in a guest kernel panic", "file": "Andarium/AndariumCore/Sources/AndariumCore/SessionRecord.swift", "reason": "Session record text: bug report data, English by decision." },
