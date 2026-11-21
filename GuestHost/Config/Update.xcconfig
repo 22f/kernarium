@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Where a sideloaded application looks for its updates, shared by Kernarium
-// and Andarium (each includes this file). The maker names the version file in
-// the ignored Update.local.xcconfig beside it (Update.local.xcconfig.example:
-// a host and a path, never a whole address, as `//` starts a comment here and
-// the code builds https://<host><path>). A Release build carries it; every
-// other build, a fork included, has no address, no read and no notice.
+// Where a sideloaded application looks for its updates. Andarium's own
+// xcconfig includes this file; Kernarium has no update notice yet and does
+// not. The maker names the version file in the ignored Update.local.xcconfig
+// beside it (Update.local.xcconfig.example: a host and a path, never a whole
+// address, as `//` starts a comment here and the code builds
+// https://<host><path>). A Release build carries it; every other build, a
+// fork included, has no address, no read and no notice.
 //
 // UPDATE_SOURCE_HOST, UPDATE_SOURCE_PATH and UPDATE_LINK_HOSTS are the local
 // values in Release and empty elsewhere. A non-empty host adds the
