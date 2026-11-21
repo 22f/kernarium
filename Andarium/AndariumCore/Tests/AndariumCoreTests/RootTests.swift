@@ -229,10 +229,12 @@ struct RootStateTests {
         guest.root.rooted = true
         guest.root.appVersionCode = 31_100
         guest.root.appEverHandled = true
+        guest.root.appInstall = .init(reason: .absent, installed: true)
         guest.root.attention = .failedStart
         let erased = guest.erased
         #expect(erased.root.on && erased.root.rooted)
         #expect(erased.root.attention == nil && erased.root.appVersionCode == nil && !erased.root.appEverHandled)
+        #expect(erased.root.appInstall == nil, "the last install's note outlived the data it was about")
     }
 }
 

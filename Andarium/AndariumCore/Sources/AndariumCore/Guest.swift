@@ -141,8 +141,7 @@ public struct Guest: Equatable, Codable, Sendable {
         // The data held the Magisk app and what it was given: the choice stays
         // and the application's memory of them goes.
         guest.root.attention = nil
-        guest.root.appVersionCode = nil
-        guest.root.appEverHandled = false
+        guest.root.dataDiskReplaced()
         return guest
     }
 
