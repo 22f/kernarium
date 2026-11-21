@@ -402,6 +402,38 @@ class VerifierTests(unittest.TestCase):
                 newc_dump(stock_entries(), order=list(stock_entries()), magics={"init": b"070702"}),
                 SystemExit)
 
+    def test_a_stock_archive_the_kernel_would_unpack_differently_is_refused(self) -> None:
+        # The stock side of the comparison is read as a guest reads it too. A stock
+        # archive that lists a file before its directory, or carries hard links, is
+        # not the filesystem its entries say: a patched archive of the same entries,
+        # parent first and link count one, would compare equal to it and be another
+        # filesystem in the guest.
+        stock = self.fixture.stock
+        names = list(stock)
+        first, second = "system/bin/toolbox", "first_stage_ramdisk/system/etc/fstab.uml"
+        child_first = [name for name in names if name != "system/bin"]
+        child_first.insert(child_first.index(first) + 1, "system/bin")
+        shared = 4242
+        for label, archive in (
+            ("a stock file before its directory", dict(order=child_first)),
+            ("stock files hard linked to each other",
+             dict(inodes={first: shared, second: shared}, links={first: 2, second: 2})),
+            ("a link count of two on a lone stock file", dict(links={first: 2})),
+            ("one inode on two stock files", dict(inodes={first: shared, second: shared})),
+            ("a CRC stock archive entry", dict(magics={first: b"070702"})),
+        ):
+            with self.subTest(label):
+                raw = newc_dump(stock, **({"order": names} | archive), tail=196)
+                image = magisk_fixture.boot_image(raw, size=len(self.fixture.stock_image))
+                entries = reference_patched(stock, self.fixture.preinit, hashlib.sha1(image).hexdigest())
+                header = bytearray(image[:4096])
+                ramdisk = lz4_legacy(newc_dump(entries))
+                struct.pack_into("<I", header, 12, len(ramdisk))
+                patched = bytes(header) + ramdisk + b"\0" * (-len(ramdisk) % 4096)
+                patched += b"\0" * max(0, len(image) - len(patched))
+                with zipfile.ZipFile(self.apk_path) as archive_apk, self.assertRaisesRegex(SystemExit, "stock"):
+                    magisk_image.verify_patched(patched, image, archive_apk, self.fixture.preinit, SystemExit)
+
     def test_header_and_ramdisk_departures_are_refused(self) -> None:
         good = self.patched()
         with_data = bytearray(good)

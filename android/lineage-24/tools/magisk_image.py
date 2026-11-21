@@ -714,9 +714,10 @@ def verify_patched(
     `patched` and `stock` are whole images. "Stock plus what the patch adds" is:
       - the 4 KiB header equal except the ramdisk size, and nothing but zeros after
         the ramdisk;
-      - a ramdisk of the patched image that is lz4 legacy and unpacks, in a guest's
-        kernel, to its entries as listed (070701, link count one, an inode of its
-        own, parents before children: `parse_newc` with `guest`);
+      - a ramdisk of the patched image that is lz4 legacy, and a ramdisk of the stock
+        image, that each unpack in a guest's kernel to their entries as listed
+        (070701, link count one, an inode of its own, parents before children:
+        `parse_newc` with `guest`);
       - exactly the entries of the stock archive plus .backup, .backup/.magisk,
         .backup/.rmlist, .backup/init.xz, overlay.d, overlay.d/sbin and
         overlay.d/sbin/{magisk,init-ld}.xz, which the stock archive does not hold;
@@ -738,8 +739,15 @@ def verify_patched(
     if patched_ramdisk[:4] != LZ4_LEGACY_MAGIC:
         raise error("the patched ramdisk is not lz4 legacy")
 
-    before = parse_newc(decode_ramdisk(stock_ramdisk, "stock", error), error)
-    after = parse_newc(decode_ramdisk(patched_ramdisk, "patched", error), error, guest=True)
+    # Both archives are read as a guest unpacks them: the comparison is of the
+    # filesystems the two make, and an archive the kernel would unpack otherwise
+    # than its entries say, on either side, has no such filesystem to compare.
+    before = parse_newc(
+        decode_ramdisk(stock_ramdisk, "stock", error),
+        lambda message: error(f"the stock ramdisk: {message}"), guest=True)
+    after = parse_newc(
+        decode_ramdisk(patched_ramdisk, "patched", error),
+        lambda message: error(f"the patched ramdisk: {message}"), guest=True)
     added = set(ADDED_DIRECTORIES) | set(ADDED_FILES) | {BACKUP_INIT}
     if set(before) & added:
         raise error("the stock ramdisk already holds entries the patch adds")
