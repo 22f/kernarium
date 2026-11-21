@@ -530,8 +530,10 @@ domain. It serves the connections from the host's CID 2 alone, ends 30 s after
 the last message, and with it its process: nothing of it is resident in between.
 The waker starts it, and the system uid can, as the service is not exported; it
 serves the connections from CID 2 alone, so neither an adb shell, adb over the
-network included, nor an application can deliver a message. The end of the service
-alone loses nothing, as the holder keeps the listening socket. If the holder ends while a
+network included, nor an application can deliver a message. The end of the service loses no
+connection that it had not accepted, as the holder keeps the listening socket; a request it had
+accepted ends with it, and the record answers the host's retry as uncertain or as handed over
+earlier. If the holder ends while a
 connection waits that nothing has accepted (or while a session runs, and that session ends with
 one waiting), the kernel closes the connection: a request the host had already written gets no
 answer, a connection that arrives while no holder listens is refused and asked for again within
