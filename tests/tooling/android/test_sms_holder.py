@@ -9,13 +9,16 @@ build does) against the stand-ins in tests/tooling/android/sms/holder for the bi
 with holder_test.cpp, and runs the scenarios there: the handoff socket as init makes it (bound, NOT listening),
 the vsock port as a unix socket at a path of the test, the property set, the peer's user and domain. What it
 holds that no review catches: the holder must listen on the handoff socket itself, and stays in its loop.
-Skipped (status 77) where the host has no C++ compiler.
+Whether the holder's idle window is the service's (a session that ends with a connection waiting before it lasted a
+window is an early end) is read from both sources and judged first, on every host. The scenarios are skipped
+(status 77) where the host has no C++ compiler.
 """
 
 from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -24,9 +27,24 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
 HOLDER = REPOSITORY / "android" / "lineage-24" / "overlay" / "sms" / "listener" / "main.cpp"
+SERVICE = (REPOSITORY / "android" / "lineage-24" / "overlay" / "sms" / "src" / "android" / "kernarium" / "sms"
+           / "HostService.java")
 SUPPORT = HERE / "sms" / "holder"
 SKIP = 77
 SCENARIOS = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12")
+
+
+def idle_window_problem() -> str | None:
+    """The holder tells an early end of a session from a full one by the service's idle window: the two are one
+    number, or the holder resets its back-off after sessions that did not last, or keeps it after ones that did."""
+    holder = re.search(r"constexpr int64_t kIdleWindowMillis = (\d+);", HOLDER.read_text())
+    service = re.search(r"static final long IDLE_MILLIS = ([\d_]+);", SERVICE.read_text())
+    if holder is None or service is None:
+        return "the idle window is not where this test reads it: kIdleWindowMillis in the holder, IDLE_MILLIS in the service"
+    if int(holder.group(1)) != int(service.group(1).replace("_", "")):
+        return (f"the holder's idle window is {holder.group(1)} ms and the service's is "
+                f"{service.group(1).replace('_', '')} ms: they must be one number")
+    return None
 
 
 def compiler() -> str | None:
@@ -44,6 +62,10 @@ def run(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
 
 
 def main() -> int:
+    problem = idle_window_problem()
+    if problem:
+        print(f"FAIL: {problem}", file=sys.stderr)
+        return 1
     clang = compiler()
     if clang is None:
         print("SKIP: no C++ compiler (clang++) on PATH")

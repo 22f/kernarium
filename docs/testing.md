@@ -1370,7 +1370,8 @@ connection during a session, the next wake after the session ends, and the wait
 before it, which doubles from half a second to 2 s for the first sixteen sessions that end
 early with a connection still waiting, and to 20 s after them, and a fault that clears at
 17 s is answered inside the host's 30 s window (on a clock and poll timeouts the test runs
-twenty times faster).
+twenty times faster). It first checks, on every host, that the holder's idle window is
+the service's.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
