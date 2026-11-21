@@ -193,6 +193,28 @@ final class RootStartTests {
         #expect(driver.rootInstalls == 0)
     }
 
+    @Test func aRestoreThatReplacedTheDiskAndCouldNotFinishForgetsTheAppBeforeTheNextInstallDecision() async {
+        let shell = Shell(listing: "")
+        let (model, driver) = model(rootOn: true, shell: shell)
+        model.guest?.root.appVersionCode = 31100
+        model.guest?.root.appEverHandled = true
+        let snapshot = SnapshotSummary(
+            id: SnapshotID(), name: "before root", created: Date(), releaseID: "20261109-los24-r20", buildNumber: 1,
+            diskGiB: 16, restore: .asIs, kept: SnapshotFigure(bytes: 4096), freesWhenDeleted: SnapshotFigure(bytes: 4096))
+        let fake = FakeSnapshotDriver(items: [snapshot])
+        fake.restoreLeavesUnfinished = true
+        model.snapshotDriver = fake
+        let result = await model.restoreSnapshot(snapshot.id)
+        #expect(result.refusal == .restoreUnfinished)
+        // The data is the snapshot's, which has no app: nothing is remembered of one, here or on disk.
+        #expect(model.guest?.root.appVersionCode == nil && model.guest?.root.appEverHandled == false)
+        #expect(driver.savedGuest?.root.appVersionCode == nil && driver.savedGuest?.root.on == true)
+        // The next start installs it.
+        model.start(.normal)
+        await model.runRootAppStep(kind: .normal) {}
+        #expect(driver.rootInstalls == 1)
+    }
+
     @Test func anInstallThatSucceededBeforeAStopDuringTheOpenWritesNothingAfterOffAndOn() async {
         let shell = OpenGatedShell()
         let (model, driver) = model(rootOn: true, shell: shell)

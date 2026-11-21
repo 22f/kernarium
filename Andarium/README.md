@@ -697,7 +697,9 @@ address space holds, so this is a fallback.
   the next run is asked for (`RunRecord`), so the one at its place is always
   the current run's and no time has to tell them apart. Restoring a snapshot forgets what the application
   remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
-  snapshot's disk may not have it; the switch stays. The bug report carries `andarium/root.txt` (the
+  snapshot's disk may not have it, and so does a restore that replaced the
+  disk and could not finish, at once and not at the recovery that ends it; the
+  switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release
   carries, and why the last install of the Magisk app was made). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
   when an absent Magisk app is installed again (`RootInstallRule`), what becomes
