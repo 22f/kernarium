@@ -1633,6 +1633,11 @@ public:
             ignoreBrokenPipes();
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
             chooseAndroidBoot(restarts);
+            /* The record says which ramdisk this boot starts with, so that an
+             * application reads from it, and not from what it asked for,
+             * whether a boot that did not finish was the root ramdisk's: a
+             * restart in place may have chosen recovery's. */
+            uml::runtime::set_session_boot_ramdisk(bootRamdisk(androidBoot_));
 #endif
             /* Ends the old guest's connection, which resets its device and
              * its renderer, and opens the next one. The hold on the request
@@ -2101,6 +2106,20 @@ private:
         if (next.bootloaderConsumed)
             sayBootloaderConsumed();
         androidBoot_ = next.boot;
+    }
+
+    static uml::runtime::BootRamdisk bootRamdisk(
+        const uml::android::BootSelection& boot) noexcept
+    {
+        switch (boot.kind()) {
+        case uml::android::RamdiskKind::root:
+            return uml::runtime::BootRamdisk::root;
+        case uml::android::RamdiskKind::recovery:
+            return uml::runtime::BootRamdisk::recovery;
+        case uml::android::RamdiskKind::stock:
+            break;
+        }
+        return uml::runtime::BootRamdisk::stock;
     }
 
     uml::android::BootSelection androidBoot_ {};

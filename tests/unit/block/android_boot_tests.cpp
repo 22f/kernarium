@@ -864,6 +864,7 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 
 	const auto taken = storage.selectBoot(android::BootMode::normal, android::RootMode::on);
 	require(taken.mode == android::BootMode::normal);
+	require(taken.kind() == android::RamdiskKind::root);
 	require(taken.ramdiskFile == image);
 	require(taken.ramdisk.offset == pageSize);
 	require(taken.ramdisk.size == normalRamdiskSize);
@@ -881,6 +882,7 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 			.ramdiskFile == image);
 	require(storage.selectRestartBoot(android::RootMode::on).boot.ramdiskFile == image);
 	const auto stock = storage.selectBoot(android::BootMode::normal);
+	require(stock.kind() == android::RamdiskKind::stock);
 	require(stock.ramdiskFile.empty());
 	require(stock.ramdisk.offset == initBoot.offset + pageSize);
 	require(storage.kernelArguments(stock)[2] == "initrd=" + system);
@@ -888,10 +890,15 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 
 	/* Recovery never takes it, and does not read it. */
 	const auto recovery = storage.selectBoot(android::BootMode::recovery, android::RootMode::on);
+	require(recovery.kind() == android::RamdiskKind::recovery);
 	require(recovery.ramdiskFile.empty());
 	require(recovery.ramdisk.offset == layout.systemPartition("recovery").offset + pageSize);
 	requestCommand(layout, data, "boot-recovery");
 	require(storage.selectRestartBoot(android::RootMode::on).boot.ramdiskFile.empty());
+	/* An automatic restart into recovery boots recovery's ramdisk, not the
+	 * root image the run asked for: the boot is recovery's. */
+	require(storage.selectRestartBoot(android::RootMode::on).boot.kind() ==
+		android::RamdiskKind::recovery);
 	requestCommand(layout, data, "");
 
 	const auto refuse = [&] {

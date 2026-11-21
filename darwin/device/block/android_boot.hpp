@@ -37,12 +37,28 @@ enum class RootMode : std::uint32_t {
 	on = 1,
 };
 
+/* Which of the release's ramdisks a selection boots. */
+enum class RamdiskKind : std::uint32_t {
+	stock = 0,
+	root = 1,
+	recovery = 2,
+};
+
 struct BootSelection {
 	BootMode mode;
 	FileRange ramdisk;
 	/* The boot image the ramdisk lies in, when it is not the system disk's
 	 * partition: the release's root image. Empty for the system disk. */
 	std::filesystem::path ramdiskFile;
+
+	/* What the boot that this selection starts runs: recovery's own
+	 * ramdisk, the root image's, or the system disk's `init_boot`. */
+	[[nodiscard]] RamdiskKind kind() const noexcept
+	{
+		if (mode == BootMode::recovery)
+			return RamdiskKind::recovery;
+		return ramdiskFile.empty() ? RamdiskKind::stock : RamdiskKind::root;
+	}
 };
 
 struct RestartBoot {
