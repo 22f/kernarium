@@ -271,8 +271,8 @@ object id 0 marks the context lost, a pipeline stage that names no shader is
 refused, and a host image copy, between memory and an image or between two
 images, is bounded by the images' mip levels, aspects, layers and extent and by
 the memory the guest gave it, and returns no host bytes the driver did not write
-(`gpu-venus-required-handles`). Nor can it hand a driver bytes the driver
-parses: the renderer ignores the data a guest gives `vkCreatePipelineCache`,
+(`gpu-venus-required-handles`). Nor can it hand a driver serialized pipeline
+data to parse: the renderer ignores the data a guest gives `vkCreatePipelineCache`,
 answers `vkGetPipelineCacheData` with the empty cache of its own (never the
 driver's serialized pipelines), and does not expose `VK_KHR_pipeline_binary`,
 so a pipeline create info or a command that names a pipeline binary marks the
