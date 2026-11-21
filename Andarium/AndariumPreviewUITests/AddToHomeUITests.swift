@@ -266,8 +266,8 @@ final class AddToHomeUITests: XCTestCase {
         let card = element(app, "app-open-waiting-card")
         XCTAssertTrue(card.waitForExistence(timeout: 20), "no waiting card for the update")
         XCTAssertTrue(app.staticTexts["\u{201C}Comet Hop\u{201D} is waiting"].exists)
-        XCTAssertTrue(app.staticTexts["Andarium\u{2019}s update didn\u{2019}t finish"].exists, "Home's notice is still there")
-        XCTAssertLessThan(card.frame.minY, app.staticTexts["Andarium\u{2019}s update didn\u{2019}t finish"].frame.minY)
+        XCTAssertTrue(app.staticTexts["System image update didn\u{2019}t finish"].exists, "Home's notice is still there")
+        XCTAssertLessThan(card.frame.minY, app.staticTexts["System image update didn\u{2019}t finish"].frame.minY)
         app.terminate()
 
         app = launch("add-home-wait-space")

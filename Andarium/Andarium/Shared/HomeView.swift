@@ -596,7 +596,7 @@ struct UnfinishedUpdateCard: View {
                     .frame(width: 28)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Andarium’s update didn’t finish").font(.subheadline.weight(.semibold))
+                    Text("System image update didn’t finish").font(.subheadline.weight(.semibold))
                     Text(text)
                         .font(.footnote)
                         .foregroundStyle(.secondary)

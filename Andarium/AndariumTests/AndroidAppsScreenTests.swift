@@ -114,7 +114,7 @@ final class AndroidAppsScreenTests {
         let card = try #require(labelled("\u{201C}Comet Hop\u{201D} is waiting", in: controller.view))
         #expect(card.accessibilityLabel?.contains("The app opens once Android has started.") == true)
         // The notice keeps its own buttons, and the card sits above it.
-        let notice = try #require(labelled("Andarium\u{2019}s update didn\u{2019}t finish", in: controller.view))
+        let notice = try #require(labelled("System image update didn\u{2019}t finish", in: controller.view))
         #expect(card.accessibilityFrame.maxY <= notice.accessibilityFrame.minY + 1, "the card is above the notice")
         let drop = try #require(button("Don\u{2019}t open", in: controller.view))
         #expect(drop.accessibilityActivate())

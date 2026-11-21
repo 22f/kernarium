@@ -1998,28 +1998,6 @@
         }
       }
     },
-    "Andarium’s update didn’t finish" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumのアップデートが完了していません"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium的更新未完成"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium的更新未完成"
-          }
-        }
-      }
-    },
     "Android" : {
       "localizations" : {
         "ja" : {
@@ -10345,6 +10323,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "系統映像檔"
+          }
+        }
+      }
+    },
+    "System image update didn’t finish" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "システムイメージのアップデートが完了していません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系统镜像更新未完成"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系統映像檔更新未完成"
           }
         }
       }
