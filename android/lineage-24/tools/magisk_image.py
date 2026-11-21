@@ -412,11 +412,20 @@ def read_layout(path: Path, error: Error) -> bytes:
 
 
 def read_partition(disk: Path, layout: bytes, name: str, error: Error) -> bytes:
-    """The bytes of a system disk partition, by the release's partition layout."""
-    start, size = android_image.partition_range(layout, disk, name, error)
-    if size > MAX_BOOT_IMAGE:
-        raise error(f"partition {name} is larger than {MAX_BOOT_IMAGE} bytes")
-    with disk.open("rb") as handle:
+    """The bytes of a system disk partition, by the release's partition layout. The
+    disk is opened once, without waiting for a writer, and its type and size are
+    those of that descriptor, which the partition is read from."""
+    try:
+        descriptor = os.open(disk, OPEN_FLAGS)
+    except OSError as failure:
+        raise error(f"the system disk must be a regular non-symlink file: {disk} ({failure})") from failure
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise error(f"the system disk must be a regular non-symlink file: {disk}")
+        start, size = android_image.partition_range_in(layout, info.st_size, name, error)
+        if size > MAX_BOOT_IMAGE:
+            raise error(f"partition {name} is larger than {MAX_BOOT_IMAGE} bytes")
         handle.seek(start)
         return android_image.read_exact(handle, size, f"partition {name}", error)
 

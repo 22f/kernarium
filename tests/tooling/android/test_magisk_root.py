@@ -13,6 +13,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -23,6 +24,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -246,6 +248,68 @@ class FormatTests(unittest.TestCase):
         }))
         with self.assertRaisesRegex(SystemExit, "larger than"):
             magisk_image.read_partition(disk, layout.read_bytes(), "init_boot", SystemExit)
+
+    def test_the_system_disk_is_typed_and_sized_on_the_descriptor_it_is_read_from(self) -> None:
+        # A regular disk replaced by a pipe between a size check by path and the open
+        # would wait for a writer. The disk is opened once, without waiting, and its
+        # type and size are those of that descriptor. The alarm fails a regression
+        # instead of hanging it.
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        fixture = Fixture(directory)
+        layout = fixture.layout.read_bytes()
+
+        class Stuck(Exception):
+            pass
+
+        def alarm(signum, frame):
+            raise Stuck()
+
+        previous = signal.signal(signal.SIGALRM, alarm)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        real_stat = os.stat
+        swapped = []
+
+        def stat_then_swap(path, *arguments, **keywords):
+            result = real_stat(path, *arguments, **keywords)
+            if str(path) == str(fixture.disk) and not swapped:
+                swapped.append(path)
+                os.unlink(fixture.disk)
+                os.mkfifo(fixture.disk)
+            return result
+
+        @contextlib.contextmanager
+        def replaced_after_a_size_check():
+            with mock.patch.object(os, "stat", stat_then_swap):
+                yield
+
+        @contextlib.contextmanager
+        def a_pipe_from_the_start():
+            os.unlink(fixture.disk)
+            os.mkfifo(fixture.disk)
+            yield
+
+        original = fixture.disk.read_bytes()
+        for label, scenario in (
+            ("replaced after a size check by path", replaced_after_a_size_check),
+            ("a pipe from the start", a_pipe_from_the_start),
+        ):
+            with self.subTest(label):
+                fixture.disk.unlink(missing_ok=True)
+                fixture.disk.write_bytes(original)
+                swapped.clear()
+                signal.alarm(10)
+                try:
+                    with scenario():
+                        try:
+                            stock = magisk_image.read_partition(fixture.disk, layout, "init_boot", SystemExit)
+                        except SystemExit as refused:
+                            self.assertRegex(str(refused), "regular non-symlink file")
+                        else:
+                            self.assertEqual(stock, fixture.stock_image)
+                except Stuck:
+                    self.fail("the system disk was waited for")
+                finally:
+                    signal.alarm(0)
 
     def test_xz_members_decode_and_bad_ones_are_refused(self) -> None:
         packed = lzma.compress(b"member", format=lzma.FORMAT_XZ)
