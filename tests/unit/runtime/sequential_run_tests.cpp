@@ -36,6 +36,7 @@
 #include "memory/shared_backing.hpp"
 #include "native_kernel_layout.hpp"
 #include "options.hpp"
+#include "platform/host_environment.hpp"
 #include "require.hpp"
 #include "testing.hpp"
 #include "uml_darwin_host.h"
@@ -850,6 +851,97 @@ void a_spent_end_stays_spent(Ending ending,
 	(void)close(world.control);
 }
 
+/* A start the process refuses publishes nothing the whole process keeps: the
+ * JIT cache budget, once published, is permanent, so a start refused for its
+ * AOT choice (here `on` with no release) must leave it unset for the valid
+ * start that follows with another budget. */
+void a_refused_start_leaves_no_cache_budget()
+{
+	auto emulator = make_emulator(kernel);
+	const char *refused[]{"uml-sequential-runs", "ncpus=1",
+		"--execution-engine=jit", "--jit-cache-budget=128M", "--aot=on"};
+	require(uml_emulator_run(emulator.get(), 5, refused, nullptr) ==
+		-UML_EMULATOR_UNSUPPORTED,
+		"a start for the component with no release was not refused");
+	require(kernel_entries == 0, "a refused start entered its kernel");
+	const char *valid[]{"uml-sequential-runs", "ncpus=1",
+		"--execution-engine=jit", "--jit-cache-budget=256M", "--aot=off"};
+	require(uml_emulator_run(emulator.get(), 5, valid, nullptr) ==
+		kernel_booted,
+		"a valid start was refused for the budget a refused start left");
+	require(kernel_entries == 1, "the valid start did not enter its kernel");
+}
+
+/* A start that arrives while another run owns the process waits for it, and
+ * neither it nor its refusal changes what that run is using: the memory limit
+ * the first run stated stays while the second handle's start (which states
+ * another and which the process refuses) waits. */
+struct LimitRace final {
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool waiting{};
+	bool returned{};
+	int status{};
+	uml_emulator *second{};
+	std::thread starting;
+} limit_race;
+
+constexpr std::uint64_t first_memory_limit = 4ULL << 30U;
+
+void note_the_second_start_waiting(void *) noexcept
+{
+	const std::lock_guard lock{limit_race.mutex};
+	limit_race.waiting = true;
+	limit_race.changed.notify_all();
+}
+
+/* The first run's kernel: while it runs, the second handle starts, and the
+ * limit the process holds is read once that start waits or has returned. */
+int kernel_while_another_starts(int, char *const[], char *const[])
+{
+	++kernel_entries;
+	limit_race.starting = std::thread{[] {
+		const char *arguments[]{"uml-sequential-runs", "--memory-limit=2G",
+			"--aot=on"};
+		const int status = uml_emulator_run(
+			limit_race.second, 3, arguments, nullptr);
+		const std::lock_guard lock{limit_race.mutex};
+		limit_race.status = status;
+		limit_race.returned = true;
+		limit_race.changed.notify_all();
+	}};
+	std::unique_lock lock{limit_race.mutex};
+	require(limit_race.changed.wait_for(lock, std::chrono::seconds(30),
+		[] { return limit_race.waiting || limit_race.returned; }),
+		"the second start neither waited nor returned");
+	require(!limit_race.returned,
+		"the second start was decided while the first run owned the process");
+	require(uml::platform::configured_process_memory_limit_bytes() ==
+		first_memory_limit,
+		"a start that did not own the process changed the memory limit");
+	return kernel_left_memory;
+}
+
+void a_waiting_start_leaves_the_memory_limit_alone()
+{
+	uml::emulator::testing::set_address_space_admission_hooks(
+		nullptr, note_the_second_start_waiting, nullptr, nullptr);
+	auto first = make_emulator(kernel_while_another_starts);
+	auto second = make_emulator(kernel);
+	limit_race.second = second.get();
+	const char *arguments[]{"uml-sequential-runs", "--memory-limit=4G"};
+	require(uml_emulator_run(first.get(), 2, arguments, nullptr) ==
+		kernel_left_memory, "the first run did not return its kernel's result");
+	limit_race.starting.join();
+	require(limit_race.status == -UML_EMULATOR_UNSUPPORTED,
+		"the second start for the component with no release was not refused");
+	require(uml::platform::configured_process_memory_limit_bytes() ==
+		first_memory_limit,
+		"the refused start changed the memory limit after the first run");
+	uml::emulator::testing::set_address_space_admission_hooks(
+		nullptr, nullptr, nullptr, nullptr);
+}
+
 #if UML_TEST_AOT
 /* The ahead-of-time component is chosen once per session: a guest that ran
  * without it (its launch stated no release) keeps it off until the session
@@ -1425,6 +1517,10 @@ int main(int argc, char **argv)
 #if UML_TEST_AOT
 		else if (mode == "release-reselects-aot")
 			a_release_lets_the_next_session_choose_its_aot_afresh();
+		else if (mode == "refused-start-no-cache-budget")
+			a_refused_start_leaves_no_cache_budget();
+		else if (mode == "waiting-start-memory-limit")
+			a_waiting_start_leaves_the_memory_limit_alone();
 		else if (mode == "release-race-off-then-on")
 			a_start_waits_for_the_session_before_it_to_end(
 				false, NextStart::on_matching);

@@ -612,36 +612,10 @@ public:
 		if (runtime_.set_execution_engine(prepared.engine) != 0)
 			return -UML_EMULATOR_UNSUPPORTED;
 		runtime_.set_top_byte_ignore(prepared.top_byte_ignore);
-		if (!prepared.informational)
-			prepare_guest_hibernation(prepared.guest_hibernation);
 		runtime_.set_x86_jit_tier(prepared.jit_tier_instructions);
-		const bool jit_run = !prepared.informational &&
-			runtime_.execution_engine() ==
-				::uml::runtime::ExecutionEngine::jit;
-		/* Before any JIT engine exists, so every executor derives its cache
-		 * geometry from the same budget. Data-only engines neither allocate
-		 * these resources nor claim the process-global configuration.
-		 */
-		if (jit_run &&
-		    !::uml::runtime::set_translation_cache_budget(
-				prepared.jit_cache_budget, prepared.guest_cpus,
-				prepared.jit_executor_cache_budget))
-			return -UML_EMULATOR_RUNTIME_ERROR;
-		/* Before any gadget executor exists, for the same reason; an
-		 * x86-64 address space starts on the gadget engine in a JIT run
-		 * too. The limit the launch states for a host that sets none comes
-		 * first, since the budget derives from it. */
-		std::size_t gadget_cache_budget{};
-		if (!prepared.informational) {
-			::uml::runtime::set_process_memory_limit(
-				prepared.memory_limit_bytes);
-			gadget_cache_budget = ::uml::runtime::set_gadget_cache_budget(
-				prepared.guest_memory_bytes,
-				prepared.gadget_cache_budget, prepared.guest_cpus);
-		}
-		/* A JIT run activates the managed multi-vCPU executor pool. */
-		if (!translation_cache_run.enter(jit_run))
-			return -UML_EMULATOR_RUNTIME_ERROR;
+		/* What this handle's own run keeps (the engine, the top-byte setting
+		 * and the tier belong to its context) is set here; what the whole
+		 * process keeps waits for the run to own the process. */
 		auto &arguments = prepared.arguments;
 		std::vector<char *> argument_pointers;
 		argument_pointers.reserve(arguments.size() + 1);
@@ -683,6 +657,40 @@ public:
 				    prepared.aot_release_stated ? &release : nullptr))
 				return -UML_EMULATOR_UNSUPPORTED;
 		}
+		/* The settings the whole process keeps, published only once the run owns
+		 * the process and its start is valid: a start the process refuses (the
+		 * guest spent, the component refused) leaves none of them behind, and a
+		 * start that waits for admission cannot change what the run before it
+		 * is using. */
+		if (!prepared.informational)
+			prepare_guest_hibernation(prepared.guest_hibernation);
+		const bool jit_run = !prepared.informational &&
+			runtime_.execution_engine() ==
+				::uml::runtime::ExecutionEngine::jit;
+		/* Before any JIT engine exists, so every executor derives its cache
+		 * geometry from the same budget. Data-only engines neither allocate
+		 * these resources nor claim the process-global configuration.
+		 */
+		if (jit_run &&
+		    !::uml::runtime::set_translation_cache_budget(
+				prepared.jit_cache_budget, prepared.guest_cpus,
+				prepared.jit_executor_cache_budget))
+			return -UML_EMULATOR_RUNTIME_ERROR;
+		/* Before any gadget executor exists, for the same reason; an
+		 * x86-64 address space starts on the gadget engine in a JIT run
+		 * too. The limit the launch states for a host that sets none comes
+		 * first, since the budget derives from it. */
+		std::size_t gadget_cache_budget{};
+		if (!prepared.informational) {
+			::uml::runtime::set_process_memory_limit(
+				prepared.memory_limit_bytes);
+			gadget_cache_budget = ::uml::runtime::set_gadget_cache_budget(
+				prepared.guest_memory_bytes,
+				prepared.gadget_cache_budget, prepared.guest_cpus);
+		}
+		/* A JIT run activates the managed multi-vCPU executor pool. */
+		if (!translation_cache_run.enter(jit_run))
+			return -UML_EMULATOR_RUNTIME_ERROR;
 		if (restartable_) {
 			if (const int refused = hand_back_guest(); refused != 0)
 				return refused;

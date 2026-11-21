@@ -184,6 +184,14 @@ foreach(_uml_restart_mode IN ITEMS restart power-off halt stopped failed
         COMMAND uml_runtime_sequential_run_tests ${_uml_restart_mode})
 endforeach()
 unset(_uml_restart_mode)
+# A start the process refuses, or that waits for the process, publishes no
+# setting the whole process keeps (the JIT cache budget, the memory limit).
+uml_add_unit_test(
+    NAME runtime-refused-start-no-cache-budget
+    COMMAND uml_runtime_sequential_run_tests refused-start-no-cache-budget)
+uml_add_unit_test(
+    NAME runtime-waiting-start-memory-limit
+    COMMAND uml_runtime_sequential_run_tests waiting-start-memory-limit)
 # Where the build has the ahead-of-time component: the release of a cleanly
 # powered-off guest ends its session, and the next one chooses the component
 # afresh, whatever the last one did.
