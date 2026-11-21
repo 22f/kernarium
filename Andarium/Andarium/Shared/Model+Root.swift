@@ -46,32 +46,46 @@ extension AppModel {
 
     /// A start with root ended before Android booted (`RootFallbackRule`):
     /// the switch's state follows the rule's behaviour, and the state is
-    /// saved as soon as a driver is there to save it.
+    /// saved as soon as a driver is there to save it. A save that fails stays
+    /// owed (`rootStateUnsaved`), and no run begins before it is paid.
     func applyRootFallback() {
         guard guest != nil else { return }
         var state = guest?.root ?? RootState()
         if RootFallbackRule.failed(&state) {
             guest?.root = state
-            if driver == nil { rootStateUnsaved = true } else { persistNow() }
+            if driver == nil || !persistNow() { rootStateUnsaved = true }
         } else {
             guest?.root.startRooted = false
         }
     }
 
-    /// After the driver is attached: saves a fallback decided at launch,
-    /// before there was one.
+    /// After the driver is attached, and before a start: saves a fallback
+    /// decided at launch, before there was a driver, or whose save failed.
     func saveRootStateIfPending() {
-        guard rootStateUnsaved, driver != nil else { return }
-        rootStateUnsaved = false
-        persistNow()
+        if rootStateUnsaved, driver != nil, persistNow() { rootStateUnsaved = false }
+        keepPreviousSessionIfDecided()
     }
 
+    /// Moves the previous session's record aside for the bug report once what
+    /// was decided from it is saved.
+    func keepPreviousSessionIfDecided() {
+        guard previousSessionHeld, !rootStateUnsaved, let diagnosticsDirectory else { return }
+        PreviousSession.keep(in: diagnosticsDirectory)
+        previousSessionHeld = false
+    }
+
+    /// The boot the run that is under way, or the last one, used: the runtime's
+    /// record of it, never the request that was made.
+    private var currentRootRecord: SessionRecord? { driver?.currentSessionRecord() }
+
     /// The run of a start with root ended: a restart loop before Android booted
-    /// is a failed start; a stop by the person before it is a stopped one.
+    /// is a failed start, and so is a kernel's error exit the record shows; a
+    /// stop by the person before it is a stopped one. Whether the boot used
+    /// the Magisk ramdisk is the record's word.
     func rootRunEnded(_ end: RunEnd) {
-        guard guest?.root.startRooted == true else { return }
+        guard let record = currentRootRecord, record.ramdisk == .root else { return }
         let booted = bootTracker.isReady
-        if RootFallbackRule.endedBeforeBoot(end, bootCompleted: booted) {
+        if RootFallbackRule.endedBeforeBoot(end, bootCompleted: booted) || RootFallbackRule.endedBeforeBoot(record) {
             applyRootFallback()
         } else if end.stoppedByUser, !booted {
             var state = guest?.root ?? RootState()
@@ -83,7 +97,7 @@ extension AppModel {
     /// Android booted with the Magisk ramdisk: a stopped start that waited for
     /// the person's decision is answered by it.
     func rootBootFinished(_ kind: BootKind) {
-        guard kind != .recovery, guest?.root.startRooted == true, guest?.root.attention == .stoppedStart else { return }
+        guard kind != .recovery, guest?.root.attention == .stoppedStart, currentRootRecord?.ramdisk == .root else { return }
         guest?.root.attention = nil
     }
 
@@ -101,21 +115,24 @@ extension AppModel {
         persistNow()
     }
 
-    /// The report entry for a bug report.
+    /// The report entry for a bug report. The ramdisk of the last boot is the
+    /// record's: this run's when one has begun, the previous session's before.
     func rootReportEntry() -> BugReportArchive.Entry? {
         guard rootAvailable || rootOn, let state = guest?.root else { return nil }
-        return RootReport.entry(state: state, release: driver?.rootRelease)
+        let lastBoot = currentRootRecord?.ramdisk ?? previousBootRamdisk
+        return RootReport.entry(state: state, release: driver?.rootRelease, lastBoot: lastBoot)
     }
 }
 
 
 /// The boot screen's Magisk app step.
 extension AppModel {
-    /// Whether the start under way booted the Magisk ramdisk and may need the
-    /// app: a normal boot (recovery has no root), the guest's `rooted` flag
-    /// and a release that holds both of root's files.
+    /// Whether the boot under way used the Magisk ramdisk and may need the
+    /// app: the runtime's record of that boot says so (a restart in place may
+    /// have booted recovery, and a request may never have begun), and the
+    /// release holds both of root's files.
     private var bootedRooted: Bool {
-        guard let guest, guest.root.startRooted, rootAvailable, let driver else { return false }
+        guard rootAvailable, let driver, currentRootRecord?.ramdisk == .root else { return false }
         return driver.rootRelease != nil && driver.rootApkURL != nil
     }
 

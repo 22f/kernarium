@@ -135,6 +135,27 @@ final class RootStartTests {
         #expect(!model.rootAppInstalling)
     }
 
+    @Test func aBootThatTheRecordSaysUsedRecoveryNeverInstalls() async {
+        let shell = Shell(listing: "")
+        let (model, driver) = model(rootOn: true, shell: shell)
+        model.start(.normal)
+        // Android restarted in place into recovery: what the start asked for is not what booted.
+        driver.sessionRecord = SessionRecord(text: record(end: "restarted", boot: "unfinished", ramdisk: "recovery"))
+        await model.runRootAppStep(kind: .normal) {}
+        #expect(driver.rootInstalls == 0)
+        #expect(shell.commands.isEmpty)
+    }
+
+    @Test func aStartThatNeverReachedTheRuntimeInstallsNothing() async {
+        let shell = Shell(listing: "")
+        let (model, driver) = model(rootOn: true, shell: shell)
+        driver.recordsTheBoot = false
+        model.start(.normal)
+        await model.runRootAppStep(kind: .normal) {}
+        #expect(driver.rootInstalls == 0)
+        #expect(shell.commands.isEmpty)
+    }
+
     @Test func anAnswerThatArrivesAfterTheSwitchWasTurnedOffDoesNotTurnItBackOn() async {
         let shell = GatedShell()
         let (model, driver) = model(rootOn: true, shell: shell)
@@ -238,9 +259,13 @@ final class RootStartTests {
         model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
         #expect(model.guest?.root.attention == .failedStart)
         #expect(driver.savedGuest == nil)
+        // The pause is not saved, so the record has not moved.
+        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        #expect(!FileManager.default.fileExists(atPath: kept.path))
         model.driver = driver
         model.saveRootStateIfPending()
         #expect(driver.savedGuest?.root.attention == .failedStart)
+        #expect(FileManager.default.fileExists(atPath: kept.path))
     }
 
     @Test func aPanicAfterAndroidBootedOrOfAnotherRamdiskChangesNothing() throws {
@@ -263,6 +288,33 @@ final class RootStartTests {
         model.runEnded(RunEnd(result: -100, restartedInALoop: true), uptimeSeconds: 4)
         #expect(model.guest?.root.attention == .failedStart)
         #expect(driver.savedGuest?.root.attention == .failedStart)
+    }
+
+    @Test func aKernelThatExitedWithAnErrorBeforeBootPausesRootAtTheEndOfTheRun() {
+        let (model, driver) = model(rootOn: true)
+        model.start(.normal)
+        // The process goes on after the kernel's exit, and the record of the run says how the boot ended.
+        driver.sessionRecord = SessionRecord(text: record(end: "kernel-exit", status: 2, boot: "unobserved"))
+        model.runEnded(RunEnd(result: 2), uptimeSeconds: 3)
+        #expect(model.guest?.root.attention == .failedStart)
+        #expect(driver.savedGuest?.root.attention == .failedStart)
+    }
+
+    @Test func aRestartLoopOfRecoveryBootsIsNoFailedStartWithRoot() {
+        let (model, driver) = model(rootOn: true)
+        model.start(.normal)
+        // The start asked for root, but the boot that ended used recovery's ramdisk.
+        driver.sessionRecord = SessionRecord(text: record(end: "restarted", boot: "unfinished", ramdisk: "recovery"))
+        model.runEnded(RunEnd(result: -100, restartedInALoop: true), uptimeSeconds: 4)
+        #expect(model.guest?.root.attention == nil)
+    }
+
+    @Test func aStopOfAStartThatNeverReachedTheRuntimeOffersNothing() {
+        let (model, driver) = model(rootOn: true)
+        driver.recordsTheBoot = false
+        model.start(.normal)
+        model.runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 1)
+        #expect(model.guest?.root.attention == nil)
     }
 
     @Test func aStopBeforeAndroidBootedOffersAStartWithoutRoot() {
@@ -306,6 +358,51 @@ final class RootStartTests {
         #expect(model.guest?.root.on == false)
         #expect(model.guest?.root.attention == nil)
         #expect(driver.savedGuest?.root.on == false)
+    }
+
+    @Test func thePreviousRecordStaysReadableUntilThePauseIsSaved() throws {
+        let (model, driver) = model(rootOn: true)
+        driver.saveError = InstanceError.refused("The disk is full.")
+        let directory = try diagnostics(record: record(end: "guest-panic", boot: "unobserved"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let current = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
+        // The pause stands in memory and was not saved: the evidence has not moved.
+        #expect(model.guest?.root.attention == .failedStart)
+        #expect(driver.savedGuest == nil)
+        #expect(FileManager.default.fileExists(atPath: current.path) && !FileManager.default.fileExists(atPath: kept.path))
+        #expect(model.alert?.title == "Settings not saved")
+        // A launch that ends here reads the same record again; and no run begins meanwhile.
+        #expect(PreviousSession.read(in: directory, endedOutOfForeground: false)?.record.ramdisk == .root)
+        model.alert = nil
+        model.start(.normal)
+        #expect(driver.begunGuests.isEmpty)
+        // Once the pause can be saved the next start saves it, keeps the record, and boots without root.
+        driver.saveError = nil
+        model.start(.normal)
+        #expect(driver.savedGuest?.root.attention == .failedStart)
+        #expect(!FileManager.default.fileExists(atPath: current.path) && FileManager.default.fileExists(atPath: kept.path))
+        #expect(driver.begunGuests.last?.root.startRooted == false)
+    }
+
+    @Test func aStartWithRootWhoseSettingsCannotBeSavedBeginsWithoutRoot() {
+        let (model, driver) = model(rootOn: true)
+        driver.saveError = InstanceError.refused("The disk is full.")
+        model.start(.normal)
+        #expect(driver.begunGuests.first?.root.startRooted == false)
+        #expect(model.alert?.title == "Settings not saved")
+    }
+
+    @Test func theBugReportStillSaysTheFailedBootUsedTheMagiskRamdisk() throws {
+        let (model, _) = model(rootOn: true)
+        let directory = try diagnostics(record: record(end: "guest-panic", boot: "unobserved"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
+        // The pause asks for no root at the next start, and the report still says what booted.
+        let text = String(decoding: try #require(model.rootReportEntry()).data, as: UTF8.self)
+        #expect(text.contains("booted the Magisk ramdisk: yes"))
+        #expect(text.contains("paused: a start with root ended before Android booted"))
     }
 
     @Test func theBugReportCarriesTheRootLineOnlyWhereRootIsOffered() {

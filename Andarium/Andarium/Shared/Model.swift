@@ -546,6 +546,14 @@ final class AppModel {
     /// A fallback decided at launch, before a driver could save the guest.
     @ObservationIgnored
     var rootStateUnsaved = false
+    /// The previous session's record is left where the runtime wrote it while
+    /// a decision made from it (a pause of root) is not saved, so that a
+    /// launch that ends first reads it again (`PreviousSession`).
+    @ObservationIgnored
+    var previousSessionHeld = false
+    /// The ramdisk the previous session's last boot used, as its record said.
+    @ObservationIgnored
+    var previousBootRamdisk: SessionRecord.BootRamdisk?
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
@@ -815,15 +823,23 @@ final class AppModel {
     func adoptDiagnostics(in diagnostics: URL, containers: [String], endedOutOfForeground: Bool) {
         diagnosticsDirectory = diagnostics
         diagnosticsContainers = containers
-        guard let previous = PreviousSession.consume(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
+        guard let previous = PreviousSession.read(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
         else { return }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
+        previousBootRamdisk = previous.record.ramdisk
         // A start with root that ended before Android booted is told by the
         // record alone, which names the ramdisk of the boot that ended: a
         // guest kernel's panic ends the process, so no run end is seen
-        // (`RootFallbackRule`).
-        if guest?.root.on == true, RootFallbackRule.endedBeforeBoot(previous.record) { applyRootFallback() }
+        // (`RootFallbackRule`). The record stays where it is until the pause
+        // is saved.
+        if guest?.root.on == true, RootFallbackRule.endedBeforeBoot(previous.record) {
+            previousSessionHeld = true
+            applyRootFallback()
+            keepPreviousSessionIfDecided()
+        } else {
+            PreviousSession.keep(in: diagnostics)
+        }
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -883,13 +899,19 @@ final class AppModel {
         }
     }
 
-    func persistNow() {
+    /// Writes the guest's choices now; whether they were written. A failure
+    /// tells the person, and a caller whose decision must outlast the process
+    /// (`applyRootFallback`) does not go on as if it were saved.
+    @discardableResult
+    func persistNow() -> Bool {
         persistTask?.cancel()
-        guard let driver, let guest else { return }
+        guard let driver, let guest else { return false }
         do {
             try driver.save(guest)
+            return true
         } catch {
             alert = AppAlert(title: String(localized: "Settings not saved"), message: error.localizedDescription)
+            return false
         }
     }
 
@@ -1687,6 +1709,11 @@ final class AppModel {
     /// rename is not one, and the start waits for it.
     func start(_ mode: StartMode, withoutRoot: Bool = false) {
         guard !snapshotActivity.holdsGuestFiles else { return }
+        // A pause of root decided from the previous session's record and not
+        // saved yet is settled first: the run's own record replaces that one.
+        // Without it saved, no run begins (the alert says why).
+        saveRootStateIfPending()
+        guard !rootStateUnsaved else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
             // A request to open an Android app that waited for this answer starts with it.
@@ -1704,18 +1731,24 @@ final class AppModel {
             if case let .update(from, _) = plan { bootFrom = from } else { bootFrom = nil }
             rootAppInstalling = false
             bootRun &+= 1
-            // The ramdisk this start boots is written with the guest before the
-            // runtime is handed the start, so that a process that ends in the
-            // guest's panic still says which ramdisk it had (`RootFallbackRule`).
+            // Whether this start asks for the Magisk ramdisk. Nothing of it is
+            // saved: which ramdisk a boot used is the runtime's record of that
+            // boot (`SessionRecord.ramdisk`).
             if let current = guest {
                 guest?.root.startRooted = current.bootsRooted(
                     mode: mode, releaseCarriesRoot: rootAvailable, withoutRootOnce: withoutRoot)
                 // "Start without root" is the person's answer to a stopped start.
                 if withoutRoot, current.root.attention == .stoppedStart { guest?.root.attention = nil }
             }
-            if let driver, let guest {
-                persistNow()
-                driver.begin(guest: guest, mode: mode, kind: kind)
+            if let driver, var begun = guest {
+                // The choices are written before the runtime is handed the
+                // start. A start with root whose write failed begins without
+                // root (the alert says the settings were not saved).
+                if !persistNow(), begun.root.startRooted {
+                    begun.root.startRooted = false
+                    guest?.root.startRooted = false
+                }
+                driver.begin(guest: begun, mode: mode, kind: kind)
             }
         case .lowSpace: startBlocked = true
         // The screens offer no start the plan refuses (`StartPlan.allowsStart`),

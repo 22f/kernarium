@@ -25,7 +25,12 @@ final class StubDriver: RuntimeDriver {
         if eraseFails { throw InstanceError.refused("Nothing could be deleted.") }
         erased += 1
     }
-    func save(_ guest: Guest) throws { savedGuest = guest }
+    /// Makes the next saves fail, as a full disk does.
+    var saveError: (any Error)?
+    func save(_ guest: Guest) throws {
+        if let saveError { throw saveError }
+        savedGuest = guest
+    }
     func startPlan() -> StartPlan? { plan }
     /// Whether the guest's first Android boot has not been seen to complete.
     var firstBootIsPending = false
@@ -40,7 +45,27 @@ final class StubDriver: RuntimeDriver {
         begun.append((mode, kind))
         begunGuests.append(guest)
         savedWhenBegun.append(savedGuest)
+        // The runtime begins the run's record with the ramdisk the boot
+        // uses; a test that plays a boot that never began, or one that
+        // restarted into recovery, sets `sessionRecord` itself.
+        if recordsTheBoot {
+            let ramdisk = mode == .recovery ? "recovery" : guest.root.startRooted ? "root" : "stock"
+            sessionRecord = SessionRecord(text: """
+                uml-session 8
+                state running
+                end running
+                status 0
+                pid 1
+                started \(Int(Date().timeIntervalSince1970))
+                boot unobserved
+                restarts 0
+                ramdisk \(ramdisk)
+
+                """)
+        }
     }
+    /// Whether `begin` leaves the record of the boot it began, as the runtime does.
+    var recordsTheBoot = true
     func restoreUpdate() async throws {
         if restoreFails { throw InstanceError.refused("No update is pending.") }
         restored += 1
@@ -53,6 +78,9 @@ final class StubDriver: RuntimeDriver {
     var rootRelease: RootRelease?
     var rootApkURL: URL?
     var guestShell: (any GuestShell)?
+    /// The runtime's record of the run that was begun, as the test plays it.
+    var sessionRecord: SessionRecord?
+    func currentSessionRecord() -> SessionRecord? { sessionRecord }
     /// The denials of the network the model told the driver, in order; nil is none.
     private(set) var networkNotices: [NetworkDenial?] = []
     func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }

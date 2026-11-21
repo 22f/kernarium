@@ -683,7 +683,15 @@ address space holds, so this is a fallback.
   with the Magisk ramdisk that ended in a guest panic or an error exit before
   Android's boot completed, whether or not init had printed anything, is a
   failed start, and one that restarted into recovery or never began is not.
-  What a start asks for (`RootState.startRooted`) is never saved. Restoring a snapshot forgets what the application
+  What a start asks for (`RootState.startRooted`) is never saved. The same
+  record decides the rest: the Magisk app step and a stopped start's card
+  follow the boot the record names (a boot that restarted in place into
+  recovery, or never began, installs nothing), the end of a run reads it too
+  (a kernel's error exit pauses root without a relaunch), and the bug report
+  says from it which ramdisk the last boot used. The previous session's record
+  stays where the runtime wrote it until the pause decided from it is saved,
+  no run begins while that save is owed, and a start with root whose settings
+  cannot be saved begins without root. Restoring a snapshot forgets what the application
   remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
   snapshot's disk may not have it; the switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release

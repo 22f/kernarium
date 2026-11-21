@@ -269,6 +269,11 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// Throws when that file is not the release's regular file or the install
     /// fails. A driver with no root has none to put in.
     func installRootApp() async throws
+    /// The runtime's record of the run the last `begin` asked for, as it stands:
+    /// which ramdisk the boot used (`SessionRecord.ramdisk`), how far it got
+    /// and how it ended. Nil until the runtime has begun that run's session,
+    /// so that the record of an earlier run is never taken for it.
+    func currentSessionRecord() -> SessionRecord?
     /// The guest's shell, for the short questions about the Magisk app; nil
     /// when there is none to ask.
     var guestShell: (any GuestShell)? { get }
@@ -293,6 +298,7 @@ extension RuntimeDriver {
     var rootApkURL: URL? { nil }
     func installRootApp() async throws { throw CancellationError() }
     var guestShell: (any GuestShell)? { nil }
+    func currentSessionRecord() -> SessionRecord? { nil }
 }
 
 /// What a screen needs from its launch arguments to open a state directly.
