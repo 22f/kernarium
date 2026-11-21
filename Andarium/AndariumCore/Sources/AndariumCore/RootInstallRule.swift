@@ -32,17 +32,22 @@ public enum RootInstallRule {
 
     /// What a start with root does about the app, given what the guest says of
     /// it and the version the release carries. An app older than the carried
-    /// one is always updated (`-r` keeps its data), and so is one the state
-    /// does not say the application put in for this release: whose app a
-    /// package of that name is shows only in its signature, which the package
-    /// manager checks and names when it refuses the install. An absent one is
-    /// put in by `policy`.
+    /// one is always updated (`-r` keeps its data), and so is one of the
+    /// carried version that the state does not say the application put in:
+    /// whose app a package of that name is shows only in its signature, which
+    /// the package manager checks and names when it refuses the install. A
+    /// newer one is left alone, since Android refuses the downgrade. An absent
+    /// one is put in by `policy`.
     public static func decide(
         presence: MagiskApp.Presence, carriedVersionCode: Int, state: RootState, policy: Policy = RootInstallRule.policy
     ) -> Action {
         switch presence {
         case .installed(let code):
-            return code < carriedVersionCode || !isOurs(state, carriedVersionCode: carriedVersionCode) ? .install : .none
+            // A newer app is left alone and counts as present: `pm install -r`
+            // refuses a downgrade, and the person's newer official app works
+            // with the daemon.
+            if code != carriedVersionCode { return code < carriedVersionCode ? .install : .none }
+            return isOurs(state, carriedVersionCode: carriedVersionCode) ? .none : .install
         case .absent, .unknown:
             switch policy {
             case .oncePerOnPeriod: return state.appVersionCode == nil ? .install : .none

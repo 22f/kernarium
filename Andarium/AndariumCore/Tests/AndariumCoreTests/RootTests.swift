@@ -302,9 +302,11 @@ struct RootRulesTests {
         // An app the state says the application put in for this release is left alone.
         #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_100, state: state(period: 31_100)) == .none)
         #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state(period: 31_100)) == .none)
-        // One of that name the state does not say it put in is installed over, whatever its version code says.
+        // One of the carried version that the state does not say it put in is installed over.
         #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_100, state: state()) == .install)
-        #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state()) == .install)
+        // A newer one is left alone, recorded or not: Android refuses the downgrade.
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state()) == .none)
+        #expect(RootInstallRule.decide(presence: .installed(versionCode: 32_000), carriedVersionCode: 31_100, state: state(period: 27_000)) == .none)
         #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_100), carriedVersionCode: 31_200, state: state(period: 31_100)) == .install)
         #expect(RootInstallRule.decide(presence: .installed(versionCode: 31_200), carriedVersionCode: 31_200, state: state(period: 31_100)) == .install)
     }

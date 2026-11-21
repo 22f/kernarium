@@ -61,7 +61,7 @@ struct RootAppStepTests {
     @Test func aPackageTheStateDoesNotSayWePutInIsInstalledOverNotRecordedAsOurs() async {
         // The same package name and version code as the release's: only its
         // signature says whose it is, and the package manager checks that.
-        for line in ["package:com.topjohnwu.magisk versionCode:31100\n", "package:com.topjohnwu.magisk versionCode:99999\n"] {
+        for line in ["package:com.topjohnwu.magisk versionCode:31100\n"] {
             let shell = shell(line)
             let installed = RootCounter()
             let outcome = await RootAppStep.run(
@@ -73,6 +73,22 @@ struct RootAppStepTests {
             #expect(state.appInstall == .init(reason: .notRecorded, installed: true), Comment(rawValue: line))
             #expect(state.appVersionCode == 31_100)
             #expect(!shell.commands.contains { $0.contains("uninstall") }, "the person's app is never removed")
+        }
+    }
+
+    @Test func aNewerPackageTheStateDoesNotRecordIsLeftAloneAtEveryStart() async {
+        // The person's newer official app, after root was turned off and on or a snapshot was restored:
+        // Android would refuse the downgrade, so no install is tried and no alert would follow.
+        for boot in 1...2 {
+            let shell = shell("package:com.topjohnwu.magisk versionCode:31200\n")
+            let showed = RootCounter()
+            let outcome = await RootAppStep.run(
+                shell: shell, release: release, state: rooted,
+                installing: { await showed.bump() }, install: { Issue.record("a newer app was installed over") })
+            #expect(outcome == .notNeeded, "boot \(boot)")
+            let shown = await showed.value
+            #expect(shown == 0, "boot \(boot)")
+            #expect(shell.commands == [MagiskApp.probeCommand], "boot \(boot)")
         }
     }
 

@@ -669,10 +669,11 @@ address space holds, so this is a fallback.
   the check, the install and the opening of the app are bound together to
   45 s, and the step belongs to its boot: after a Stop, a restart or a later
   start it adds only the app's own bookkeeping to the state, never an alert or
-  a step. A package of that name the
-  application did not put in for this release is installed over like an older
-  one, since only its signature says whose it is and the package manager
-  checks it and refuses another signer; it is never uninstalled. A failure is an alert and
+  a step. A package of that name at the
+  carried version that the application did not put in is installed over like
+  an older one, since only its signature says whose it is and the package
+  manager checks it and refuses another signer; a newer one is left alone,
+  since Android refuses a downgrade, and none is ever uninstalled. A failure is an alert and
   the boot goes on with root on. A start with root that ends before Android
   boots (a guest panic or exit the previous session's record shows, a restart
   loop, or a Stop by the person) is the fallback's: starts boot without root
