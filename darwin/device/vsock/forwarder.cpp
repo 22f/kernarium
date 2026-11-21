@@ -227,22 +227,35 @@ void Forwarder::attach(std::shared_ptr<Endpoint> endpoint)
         for (const auto& listener : listeners_) {
             uml::gpu::UniqueDescriptor queued;
             int error = 0;
-            for (unsigned taken = 0; taken < queuedLimit; ++taken) {
+            unsigned dequeued = 0;
+            bool accounted = false;
+            for (unsigned attempts = 0; attempts < queuedLimit && !accounted;
+                 ++attempts) {
+                /* A taken connection is closed before the next is asked for,
+                 * so that it does not keep a descriptor the next one needs. */
+                queued.reset();
                 const auto result =
                     takeQueued(listener->descriptor.get(), queued, error);
-                if (result == Taken::none)
-                    break;
-                if (result == Taken::failed) {
-                    failure = "cannot take the connections queued on " +
-                        listener->specification.hostAddress + ":" +
-                        std::to_string(listener->port) +
-                        " before attaching the vsock forward: " +
-                        std::strerror(error);
+                if (result == Taken::none) {
+                    accounted = true;
+                } else if (result == Taken::connection) {
+                    /* As many connections as the kernel queues: whatever
+                     * arrives after them arrived after the call began. */
+                    accounted = ++dequeued == queuedLimit;
+                } else if (result == Taken::failed) {
                     break;
                 }
             }
-            if (!failure.empty())
+            if (!accounted) {
+                /* The queue was not seen to the end, or to the bound: an
+                 * interrupted or reset attempt is no connection taken. */
+                failure = "cannot account for the connections queued on " +
+                    listener->specification.hostAddress + ":" +
+                    std::to_string(listener->port) +
+                    " before attaching the vsock forward: " +
+                    std::strerror(error);
                 break;
+            }
         }
         if (failure.empty())
             endpoint_ = std::move(endpoint);

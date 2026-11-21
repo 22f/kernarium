@@ -13,16 +13,21 @@
 
 #include <arpa/inet.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 
 /* A seam under the forwarder's accept(). This executable defines accept()
  * below, so the forwarder, linked in as a library, reaches it before the
  * system's, and it is the system's unless a test says otherwise: it fails with
- * an errno without touching the queue (`failure`), or lets a client arrive
- * before each accept of the thread that watches (`arrivals`). */
+ * an errno without touching the queue (`failure`), lets a client arrive before
+ * each accept of the thread that watches (`arrivals`), leaves the queue to the
+ * thread that watches (`holdOthers`), or gives the thread that watches one
+ * descriptor at a time (`oneSlot`). */
 struct AcceptSeam final {
     std::atomic<int> failure {};
+    std::atomic_bool holdOthers {};
+    std::atomic_bool oneSlot {};
     std::atomic<unsigned> arrivals {};
     std::atomic<unsigned> watchedAccepts {};
     std::atomic<std::uint16_t> port {};
@@ -32,6 +37,7 @@ struct AcceptSeam final {
 
 AcceptSeam acceptSeam;
 thread_local bool watchingAccepts = false;
+thread_local int lastGivenDescriptor = -1;
 
 void arriveAtTheSeam();
 
@@ -372,6 +378,67 @@ void anAttachThatCannotTakeTheQueuedConnectionsFails()
     exchangeWith(guest, port, 5555);
 }
 
+void anAttachClosesEachQueuedConnectionBeforeTakingTheNext()
+{
+    uml::testing::Watchdog watchdog("forwarder drain slots", std::chrono::seconds(60));
+    Guest guest;
+    Forwarder forwarder(nullptr, {forward(0, 5555)});
+    const auto port = forwarder.port(0);
+    std::array<int, 3> clients {};
+    /* The queue is left to the attach, which is given one descriptor at a
+     * time: it can take three connections only by closing each before the
+     * next. */
+    acceptSeam.holdOthers.store(true);
+    for (auto& client : clients)
+        client = connectCompleted(port);
+    acceptSeam.oneSlot.store(true);
+    watchingAccepts = true;
+    bool refused = false;
+    try {
+        forwarder.attach(borrowed(guest));
+    } catch (const std::runtime_error&) {
+        refused = true;
+    }
+    watchingAccepts = false;
+    acceptSeam.oneSlot.store(false);
+    acceptSeam.holdOthers.store(false);
+    require(!refused, "the attach kept a descriptor the next connection needed");
+    for (const int client : clients) {
+        require(endsWithin(client, 5000));
+        ::close(client);
+    }
+    require(guest.quiet());
+    exchangeWith(guest, port, 5555);
+}
+
+void anAttachThatCannotAccountForTheQueueFails()
+{
+    uml::testing::Watchdog watchdog("forwarder drain interrupted", std::chrono::seconds(60));
+    Guest guest;
+    Forwarder forwarder(nullptr, {forward(0, 5555)});
+    const auto port = forwarder.port(0);
+    bool refused = false;
+    int client = -1;
+    {
+        /* Every accept is interrupted and takes nothing, so the attach neither
+         * takes the queued connection nor sees the queue end. */
+        acceptSeam.failure.store(EINTR);
+        client = connectCompleted(port);
+        try {
+            forwarder.attach(borrowed(guest));
+        } catch (const std::runtime_error&) {
+            refused = true;
+        }
+        acceptSeam.failure.store(0);
+    }
+    require(refused, "the attach went through without seeing the queue's end");
+    require(endsWithin(client, 5000));
+    ::close(client);
+    require(guest.quiet());
+    forwarder.attach(borrowed(guest));
+    exchangeWith(guest, port, 5555);
+}
+
 void anAttachUnderSteadyArrivalsDoesBoundedWork()
 {
     uml::testing::Watchdog watchdog("forwarder attach under arrivals", std::chrono::seconds(60));
@@ -451,15 +518,30 @@ extern "C" int accept(int descriptor, sockaddr* address, socklen_t* length)
         errno = failure;
         return -1;
     }
-    if (watchingAccepts) {
-        acceptSeam.watchedAccepts.fetch_add(1);
-        unsigned left = acceptSeam.arrivals.load();
-        while (left != 0 && !acceptSeam.arrivals.compare_exchange_weak(left, left - 1)) {
+    if (!watchingAccepts) {
+        if (acceptSeam.holdOthers.load()) {
+            errno = EAGAIN;
+            return -1;
         }
-        if (left != 0)
-            arriveAtTheSeam();
+        return system(descriptor, address, length);
     }
-    return system(descriptor, address, length);
+    acceptSeam.watchedAccepts.fetch_add(1);
+    /* One descriptor slot: the next is refused while the last one given is
+     * still open. */
+    if (acceptSeam.oneSlot.load() && lastGivenDescriptor >= 0 &&
+        ::fcntl(lastGivenDescriptor, F_GETFD) >= 0) {
+        errno = EMFILE;
+        return -1;
+    }
+    unsigned left = acceptSeam.arrivals.load();
+    while (left != 0 && !acceptSeam.arrivals.compare_exchange_weak(left, left - 1)) {
+    }
+    if (left != 0)
+        arriveAtTheSeam();
+    const int accepted = system(descriptor, address, length);
+    if (accepted >= 0)
+        lastGivenDescriptor = accepted;
+    return accepted;
 }
 
 int main()
@@ -480,6 +562,10 @@ int main()
          aConnectionFromTheGapNeverReachesTheNextGuest},
         {"an-attach-that-cannot-take-the-queued-connections-fails",
          anAttachThatCannotTakeTheQueuedConnectionsFails},
+        {"an-attach-closes-each-queued-connection-before-taking-the-next",
+         anAttachClosesEachQueuedConnectionBeforeTakingTheNext},
+        {"an-attach-that-cannot-account-for-the-queue-fails",
+         anAttachThatCannotAccountForTheQueueFails},
         {"an-attach-under-steady-arrivals-does-bounded-work",
          anAttachUnderSteadyArrivalsDoesBoundedWork},
         {"detach-ends-an-opening-the-guest-never-answers",

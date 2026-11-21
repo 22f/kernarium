@@ -65,7 +65,8 @@ public:
      * guest it reached before. A connection that had reached a listener
      * before the call is closed, not offered to the new guest. Throws
      * std::runtime_error, and stays detached, when the connections queued on a
-     * listener cannot all be taken: the new guest must not be offered them. */
+     * listener cannot be taken to the end of the queue: the new guest must not
+     * be offered them. */
     void attach(std::shared_ptr<Endpoint> endpoint);
 
     /* Reaches no guest. A connection that arrives while none is attached is
