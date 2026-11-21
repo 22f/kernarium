@@ -42,6 +42,24 @@ public struct SessionRecord: Equatable, Sendable {
     /// a guest whose console says so; nil in a record that does not say (an
     /// earlier runtime, or a guest that never reports it).
     public var bootFinished: Bool?
+    /// How far the guest's boot had got, for a guest whose console reports it,
+    /// with "unobserved" kept apart from a record that says nothing of the
+    /// boot (nil): a guest that panics before init's first line leaves
+    /// "unobserved".
+    public var bootProgress: BootProgress?
+    /// Which ramdisk the boot started with, when the record says (the runtime
+    /// writes it for a guest that reports its boot): the release's own, the
+    /// Magisk-patched one, or recovery's. The record of a boot the runtime
+    /// never began has none.
+    public var ramdisk: BootRamdisk?
+
+    public enum BootProgress: String, Equatable, Sendable {
+        case completed, unfinished, unobserved
+    }
+
+    public enum BootRamdisk: String, Equatable, Sendable {
+        case stock, root, recovery
+    }
     /// How many times the guest had restarted in the process before this
     /// session, for a guest whose boot the record follows.
     public var restarts: Int?
@@ -120,6 +138,8 @@ public struct SessionRecord: Equatable, Sendable {
         kernelOutput = parts.count > 1 ? Self.withoutPadding(parts[1]) : nil
         memory = fields["memory"].flatMap(Self.memory(from:))
         bootFinished = fields["boot"].flatMap { ["completed": true, "unfinished": false][$0] }
+        bootProgress = fields["boot"].flatMap(BootProgress.init(rawValue:))
+        ramdisk = fields["ramdisk"].flatMap(BootRamdisk.init(rawValue:))
         restarts = fields["restarts"].flatMap { Int($0) }
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
@@ -331,20 +351,41 @@ public enum DiagnosticRedaction {
     }
 }
 
-/// The previous session's record at launch: read once, then kept as
+/// The previous session's record at launch: read, then kept as
 /// `previous-session.txt` for the bug report, so the next boot can write its
 /// own and a second launch says nothing more.
 public enum PreviousSession {
-    /// The record and the notice Home shows for it. `endedOutOfForeground`
-    /// is whether the pause marker said the previous process ended paused.
-    public static func consume(in diagnostics: URL, endedOutOfForeground: Bool)
+    /// The previous session's record and the notice Home shows for it, left
+    /// where the runtime wrote it. `endedOutOfForeground` is whether the pause
+    /// marker said the previous process ended paused. Nothing is moved: the
+    /// record stays readable until `keep` says what was decided from it is
+    /// safe, so that a launch that ends in between reads it again.
+    public static func read(in diagnostics: URL, endedOutOfForeground: Bool)
         -> (record: SessionRecord, notice: HomeNotice?)?
     {
         let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
         guard let record = SessionRecord.read(at: current) else { return nil }
+        return (record, record.notice(endedOutOfForeground: endedOutOfForeground).map { .sessionEnded($0) })
+    }
+
+    /// Keeps the record `read` returned as `previous-session.txt` for the bug
+    /// report, so that the next boot can write its own and a second launch
+    /// says nothing more.
+    public static func keep(in diagnostics: URL) {
+        let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
         let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        guard FileManager.default.fileExists(atPath: current.path) else { return }
         try? FileManager.default.removeItem(at: kept)
         try? FileManager.default.moveItem(at: current, to: kept)
-        return (record, record.notice(endedOutOfForeground: endedOutOfForeground).map { .sessionEnded($0) })
+    }
+
+    /// `read`, then `keep`: for a reader that decides nothing from the record
+    /// that must outlive the launch.
+    public static func consume(in diagnostics: URL, endedOutOfForeground: Bool)
+        -> (record: SessionRecord, notice: HomeNotice?)?
+    {
+        guard let previous = read(in: diagnostics, endedOutOfForeground: endedOutOfForeground) else { return nil }
+        keep(in: diagnostics)
+        return previous
     }
 }

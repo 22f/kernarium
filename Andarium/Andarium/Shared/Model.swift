@@ -820,9 +820,10 @@ final class AppModel {
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
         // A start with root that ended before Android booted is told by the
-        // record alone: a guest kernel's panic ends the process, so no run
-        // end is seen (`RootFallbackRule`).
-        if guest?.root.rooted == true, RootFallbackRule.endedBeforeBoot(previous.record) { applyRootFallback() }
+        // record alone, which names the ramdisk of the boot that ended: a
+        // guest kernel's panic ends the process, so no run end is seen
+        // (`RootFallbackRule`).
+        if guest?.root.on == true, RootFallbackRule.endedBeforeBoot(previous.record) { applyRootFallback() }
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -1707,7 +1708,7 @@ final class AppModel {
             // runtime is handed the start, so that a process that ends in the
             // guest's panic still says which ramdisk it had (`RootFallbackRule`).
             if let current = guest {
-                guest?.root.rooted = current.bootsRooted(
+                guest?.root.startRooted = current.bootsRooted(
                     mode: mode, releaseCarriesRoot: rootAvailable, withoutRootOnce: withoutRoot)
                 // "Start without root" is the person's answer to a stopped start.
                 if withoutRoot, current.root.attention == .stoppedStart { guest?.root.attention = nil }

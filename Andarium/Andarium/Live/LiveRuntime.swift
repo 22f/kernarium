@@ -645,7 +645,7 @@ final class LiveRuntime: RuntimeDriver {
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         // Root: the release's Magisk ramdisk for every normal boot of this run;
         // the model decided it before the start and wrote it with the guest.
-        let rootBoot = run.mode == .normal && run.guest.root.rooted && rootRelease != nil
+        let rootBoot = run.mode == .normal && run.guest.root.startRooted && rootRelease != nil
         let memoryMiB = UInt32(run.guest.memoryMiB)
         runMemoryMiB = run.guest.memoryMiB
         let processorCount = UInt32(run.guest.cores)
@@ -879,7 +879,7 @@ final class LiveRuntime: RuntimeDriver {
 
     /// The root the carried release holds, read at launch; nil for a release
     /// with none. The run asks the runtime for the release's own Magisk ramdisk
-    /// only while `Guest.root.rooted` says so.
+    /// only while `Guest.root.startRooted` says so.
     var rootRelease: RootRelease?
 
     var rootApkURL: URL? { rootRelease?.apkURL(in: storage.releaseDirectory) }

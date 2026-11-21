@@ -113,10 +113,12 @@ public struct RootState: Equatable, Codable, Sendable {
     /// The person's switch. Off for a new guest and for one stored before the
     /// switch existed.
     public var on = false
-    /// The last start booted the Magisk ramdisk. Written before the runtime is
-    /// handed the start, so that a process that ends in the guest's panic
-    /// still says which ramdisk it had.
-    public var rooted = false
+    /// The start that is being handed to the runtime asks for the Magisk
+    /// ramdisk. Never saved: whether a boot used it is the runtime's own
+    /// record of that boot (`SessionRecord.ramdisk`), which a restart in
+    /// place or a process that ended before the runtime began cannot make
+    /// stale.
+    public var startRooted = false
     /// What Home owes the person, if anything.
     public var attention: Attention?
     /// The version code the application itself put the Magisk app in at, in
@@ -198,13 +200,12 @@ public struct RootState: Equatable, Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case on, rooted, attention, appVersionCode, appEverHandled, appInstall
+        case on, attention, appVersionCode, appEverHandled, appInstall
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         on = try values.decodeIfPresent(Bool.self, forKey: .on) ?? false
-        rooted = try values.decodeIfPresent(Bool.self, forKey: .rooted) ?? false
         attention = try? values.decodeIfPresent(Attention.self, forKey: .attention)
         appVersionCode = try values.decodeIfPresent(Int.self, forKey: .appVersionCode)
         appEverHandled = try values.decodeIfPresent(Bool.self, forKey: .appEverHandled) ?? false

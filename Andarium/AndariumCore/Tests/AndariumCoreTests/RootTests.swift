@@ -144,18 +144,32 @@ struct RootStateTests {
             """
         let guest = try JSONDecoder().decode(Guest.self, from: Data(old.utf8))
         #expect(guest.root == RootState())
-        #expect(!guest.root.on && !guest.root.rooted && guest.root.attention == nil)
+        #expect(!guest.root.on && !guest.root.startRooted && guest.root.attention == nil)
     }
 
     @Test func theStateIsKeptWithTheGuest() throws {
         var guest = Guest.fresh(on: host)
         guest.root.setOn(true)
-        guest.root.rooted = true
+        guest.root.startRooted = true
         guest.root.appVersionCode = 31_100
         guest.root.appEverHandled = true
         guest.root.attention = .stoppedStart
         let back = try JSONDecoder().decode(Guest.self, from: JSONEncoder().encode(guest))
-        #expect(back.root == guest.root)
+        // The request of a start is not the guest's: it is never saved, so a
+        // process that ends between the save and the runtime's start leaves
+        // nothing that says a boot used the Magisk ramdisk.
+        var kept = guest.root
+        kept.startRooted = false
+        #expect(back.root == kept)
+        #expect(!back.root.startRooted)
+        #expect(!String(decoding: try JSONEncoder().encode(guest), as: UTF8.self).contains("ooted"))
+        // A guest saved by an earlier build, which wrote the flag, reads it as no start.
+        let earlier = """
+            {"cores":6,"memoryMiB":4096,"capacityGiB":8,"microphone":false,"includeInBackups":false,
+             "root":{"on":true,"rooted":true}}
+            """
+        let old = try JSONDecoder().decode(Guest.self, from: Data(earlier.utf8))
+        #expect(old.root.on && !old.root.startRooted)
         // A stored value this reader does not know is no attention.
         let odd = """
             {"cores":6,"memoryMiB":4096,"capacityGiB":8,"microphone":false,"includeInBackups":false,
@@ -200,7 +214,7 @@ struct RootStateTests {
     @Test func aStepThatRanEarlierAddsOnlyTheAppsBookkeeping() {
         var learned = RootState()
         learned.on = true
-        learned.rooted = true
+        learned.startRooted = true
         learned.appVersionCode = 31_100
         learned.appEverHandled = true
         learned.appInstall = .init(reason: .absent, installed: true)
@@ -209,7 +223,7 @@ struct RootStateTests {
         now.on = true
         now.attention = .failedStart
         now.adoptApp(from: learned)
-        #expect(now.on && now.attention == .failedStart && !now.rooted)
+        #expect(now.on && now.attention == .failedStart && !now.startRooted)
         #expect(now.appVersionCode == 31_100 && now.appEverHandled && now.appInstall == learned.appInstall)
         // Root was turned off while the step ran: no period begins, and the switch stays off.
         var off = RootState()
@@ -226,13 +240,13 @@ struct RootStateTests {
     @Test func aFactoryResetKeepsTheChoiceAndForgetsTheApp() {
         var guest = Guest.fresh(on: host)
         guest.root.setOn(true)
-        guest.root.rooted = true
+        guest.root.startRooted = true
         guest.root.appVersionCode = 31_100
         guest.root.appEverHandled = true
         guest.root.appInstall = .init(reason: .absent, installed: true)
         guest.root.attention = .failedStart
         let erased = guest.erased
-        #expect(erased.root.on && erased.root.rooted)
+        #expect(erased.root.on)
         #expect(erased.root.attention == nil && erased.root.appVersionCode == nil && !erased.root.appEverHandled)
         #expect(erased.root.appInstall == nil, "the last install's note outlived the data it was about")
     }
@@ -331,9 +345,9 @@ struct RootRulesTests {
     @Test func aFailedStartPausesRootByDefault() {
         #expect(RootFallbackRule.behaviour == .bootStockOnce)
         var root = state()
-        root.rooted = true
+        root.startRooted = true
         #expect(RootFallbackRule.failed(&root))
-        #expect(root.on && !root.rooted && root.paused && root.attention == .failedStart)
+        #expect(root.on && !root.startRooted && root.paused && root.attention == .failedStart)
         var other = state()
         #expect(RootFallbackRule.failed(&other, behaviour: .turnOff))
         #expect(!other.on && other.attention == .turnedOffAfterFailure)
@@ -372,9 +386,12 @@ struct RootRulesTests {
 }
 
 struct RootFallbackRecordTests {
-    private func record(end: String, status: Int = 0, boot: String? = "unfinished", running: Bool = false) throws -> SessionRecord {
+    private func record(
+        end: String, status: Int = 0, boot: String? = "unfinished", running: Bool = false, ramdisk: String? = "root"
+    ) throws -> SessionRecord {
         var text = "uml-session 8\nstate \(running ? "running" : "ended")\nend \(end)\nstatus \(status)\npid 1\n"
-        if let boot { text += "boot \(boot)\n" }
+        if let boot { text += "boot \(boot)\nrestarts 0\n" }
+        if let ramdisk { text += "ramdisk \(ramdisk)\n" }
         return try #require(SessionRecord(text: text))
     }
 
@@ -382,6 +399,29 @@ struct RootFallbackRecordTests {
         #expect(RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic")))
         #expect(RootFallbackRule.endedBeforeBoot(try record(end: "kernel-abort")))
         #expect(RootFallbackRule.endedBeforeBoot(try record(end: "kernel-exit", status: 1)))
+    }
+
+    @Test func aRootedStartThatPanickedBeforeInitSaidAnythingIsAFailedStartToo() throws {
+        // A ramdisk with no /init, or a magiskinit that dies before AOSP's
+        // first stage: the runtime saw no output of init, so the boot is "unobserved".
+        for end in ["guest-panic", "kernel-abort"] {
+            let ended = try record(end: end, boot: "unobserved")
+            #expect(ended.bootProgress == .unobserved && ended.bootFinished == nil)
+            #expect(RootFallbackRule.endedBeforeBoot(ended), "\(end)")
+        }
+        #expect(RootFallbackRule.endedBeforeBoot(try record(end: "kernel-exit", status: 2, boot: "unobserved")))
+    }
+
+    @Test func onlyABootThatTheRecordSaysUsedTheMagiskRamdiskCounts() throws {
+        // A restart in place into recovery, or a stock start: whatever the application asked for.
+        #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic", ramdisk: "recovery")))
+        #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic", boot: "unobserved", ramdisk: "recovery")))
+        #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic", ramdisk: "stock")))
+        // A record that names no ramdisk (an earlier runtime, a boot never begun) is no rooted boot.
+        #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic", ramdisk: nil)))
+        #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic", boot: "unobserved", ramdisk: nil)))
+        // A record with no boot evidence at all, even one that names the ramdisk.
+        #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "guest-panic", boot: nil)))
     }
 
     @Test func everyOtherEndTakesTheOrdinaryPaths() throws {
@@ -393,6 +433,7 @@ struct RootFallbackRecordTests {
         for end in ["powered-off", "restarted", "stopped", "host-fault", "hibernation-restore-failed", "process-exit", "failed"] {
             let ended = try record(end: end, status: 1)
             #expect(!RootFallbackRule.endedBeforeBoot(ended), "\(end)")
+            #expect(!RootFallbackRule.endedBeforeBoot(try record(end: end, status: 1, boot: "unobserved")), "\(end) unobserved")
         }
         // The system or the person ended the process: the record is still running.
         #expect(!RootFallbackRule.endedBeforeBoot(try record(end: "running", running: true)))
@@ -432,18 +473,28 @@ actor RootCounter {
     private let release = RootRelease(versionName: "v31.1", versionCode: 31100, apkPath: "root/Magisk-v31.1.apk")
 
     @Test func aStockGuestSaysSoInFourLines() {
-        let text = RootReport.text(state: RootState(), release: nil)
+        let text = RootReport.text(state: RootState(), release: nil, lastBoot: .stock)
         #expect(text.split(separator: "\n").count == 4)
         #expect(text.contains("root switch: off"))
         #expect(text.contains("the release carries root: no"))
     }
 
+    @Test func theLastBootsRamdiskIsWhatTheRecordSaysAndNotWhatWasAskedFor() {
+        var state = RootState()
+        state.on = true
+        // A failed rooted start pauses root and asks for none: the report still says what booted.
+        state.attention = .failedStart
+        #expect(RootReport.text(state: state, release: release, lastBoot: .root).contains("booted the Magisk ramdisk: yes"))
+        #expect(RootReport.text(state: state, release: release, lastBoot: .stock).contains("booted the Magisk ramdisk: no"))
+        #expect(RootReport.text(state: state, release: release, lastBoot: .recovery).contains("booted the Magisk ramdisk: no"))
+        #expect(RootReport.text(state: state, release: release, lastBoot: nil).contains("booted the Magisk ramdisk: unknown"))
+    }
+
     @Test func aRootedGuestNamesTheMagiskVersionAndWhatTheApplicationRecorded() {
         var state = RootState()
         state.on = true
-        state.rooted = true
         state.appVersionCode = 31100
-        let text = RootReport.text(state: state, release: release)
+        let text = RootReport.text(state: state, release: release, lastBoot: .root)
         #expect(text.contains("root switch: on"))
         #expect(text.contains("booted the Magisk ramdisk: yes"))
         #expect(text.contains("Magisk v31.1 (31100)"))

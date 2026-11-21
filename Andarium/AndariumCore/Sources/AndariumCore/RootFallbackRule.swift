@@ -20,14 +20,25 @@ public enum RootFallbackRule {
     /// The first option of the decision.
     public static let behaviour = Behaviour.bootStockOnce
 
-    /// Whether a session record, read at the next launch, is the end of a
-    /// start with root that never finished booting: the guest's kernel
+    /// Whether a session record, read at the next launch or at the end of a
+    /// run, is the end of a start with root that never finished booting: the
+    /// record says the boot used the Magisk ramdisk, the guest's kernel
     /// panicked, crashed or ended the process with an error status, and the
-    /// console had not said that Android booted. A record still running (the
+    /// console had not said that Android booted, whether or not init had
+    /// printed anything ("boot unobserved" is a failed start, as the first
+    /// line of init is the first thing a ramdisk with no /init never prints).
+    /// What the application asked for is no evidence, only the record of the
+    /// boot that ran: a boot that restarted into recovery, one the runtime
+    /// never began and a record of a runtime that does not name the ramdisk or
+    /// the boot are not failed starts with root. A record still running (the
     /// system or the person ended the process), a host fault, an orderly end
     /// and a hibernation failure are ordinary and take today's paths.
     public static func endedBeforeBoot(_ record: SessionRecord) -> Bool {
-        guard !record.running, record.bootFinished == false else { return false }
+        guard !record.running, record.ramdisk == .root else { return false }
+        switch record.bootProgress {
+        case .unfinished?, .unobserved?: break
+        case .completed?, nil: return false
+        }
         switch record.end {
         case "guest-panic", "kernel-abort": return true
         case "kernel-exit": return record.status != 0
@@ -45,7 +56,7 @@ public enum RootFallbackRule {
     /// the state changed.
     @discardableResult
     public static func failed(_ state: inout RootState, behaviour: Behaviour = RootFallbackRule.behaviour) -> Bool {
-        state.rooted = false
+        state.startRooted = false
         switch behaviour {
         case .bootStockOnce:
             state.attention = .failedStart

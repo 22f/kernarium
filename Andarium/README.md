@@ -678,8 +678,12 @@ address space holds, so this is a fallback.
   loop, or a Stop by the person) is the fallback's: starts boot without root
   until the person chooses, and a Home card offers Try with root again and Turn
   off root (or, after a Stop, Start without root); a panic ends the process, so
-  the application writes the start's ramdisk (`Guest.root.rooted`) before the
-  runtime is handed it. Restoring a snapshot forgets what the application
+  the next launch reads the previous session's record, which names the ramdisk
+  of the boot that ended (`SessionRecord.ramdisk`) and how far it got: a boot
+  with the Magisk ramdisk that ended in a guest panic or an error exit before
+  Android's boot completed, whether or not init had printed anything, is a
+  failed start, and one that restarted into recovery or never began is not.
+  What a start asks for (`RootState.startRooted`) is never saved. Restoring a snapshot forgets what the application
   remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
   snapshot's disk may not have it; the switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release

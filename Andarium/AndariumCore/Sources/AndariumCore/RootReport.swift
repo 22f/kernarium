@@ -10,14 +10,21 @@ public enum RootReport {
     /// The entry's name in the report's archive.
     public static let name = "andarium/root.txt"
 
-    public static func entry(state: RootState, release: RootRelease?) -> BugReportArchive.Entry {
-        .init(name: name, data: Data(text(state: state, release: release).utf8))
+    /// `lastBoot` is the ramdisk the last boot used as the runtime's record of
+    /// that boot says (`SessionRecord.ramdisk`), nil when no record says.
+    public static func entry(
+        state: RootState, release: RootRelease?, lastBoot: SessionRecord.BootRamdisk? = nil
+    ) -> BugReportArchive.Entry {
+        .init(name: name, data: Data(text(state: state, release: release, lastBoot: lastBoot).utf8))
     }
 
-    public static func text(state: RootState, release: RootRelease?) -> String {
+    public static func text(
+        state: RootState, release: RootRelease?, lastBoot: SessionRecord.BootRamdisk? = nil
+    ) -> String {
+        let booted = lastBoot.map { $0 == .root ? "yes" : "no" } ?? "unknown"
         var lines = [
             "root switch: \(state.on ? "on" : "off")",
-            "last start booted the Magisk ramdisk: \(state.rooted ? "yes" : "no")",
+            "last start booted the Magisk ramdisk: \(booted)",
         ]
         switch state.attention {
         case .failedStart?: lines.append("paused: a start with root ended before Android booted")

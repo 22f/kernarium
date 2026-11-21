@@ -54,7 +54,7 @@ extension AppModel {
             guest?.root = state
             if driver == nil { rootStateUnsaved = true } else { persistNow() }
         } else {
-            guest?.root.rooted = false
+            guest?.root.startRooted = false
         }
     }
 
@@ -69,7 +69,7 @@ extension AppModel {
     /// The run of a start with root ended: a restart loop before Android booted
     /// is a failed start; a stop by the person before it is a stopped one.
     func rootRunEnded(_ end: RunEnd) {
-        guard guest?.root.rooted == true else { return }
+        guard guest?.root.startRooted == true else { return }
         let booted = bootTracker.isReady
         if RootFallbackRule.endedBeforeBoot(end, bootCompleted: booted) {
             applyRootFallback()
@@ -83,7 +83,7 @@ extension AppModel {
     /// Android booted with the Magisk ramdisk: a stopped start that waited for
     /// the person's decision is answered by it.
     func rootBootFinished(_ kind: BootKind) {
-        guard kind != .recovery, guest?.root.rooted == true, guest?.root.attention == .stoppedStart else { return }
+        guard kind != .recovery, guest?.root.startRooted == true, guest?.root.attention == .stoppedStart else { return }
         guest?.root.attention = nil
     }
 
@@ -115,7 +115,7 @@ extension AppModel {
     /// app: a normal boot (recovery has no root), the guest's `rooted` flag
     /// and a release that holds both of root's files.
     private var bootedRooted: Bool {
-        guard let guest, guest.root.rooted, rootAvailable, let driver else { return false }
+        guard let guest, guest.root.startRooted, rootAvailable, let driver else { return false }
         return driver.rootRelease != nil && driver.rootApkURL != nil
     }
 

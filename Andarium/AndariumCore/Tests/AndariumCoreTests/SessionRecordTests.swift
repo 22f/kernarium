@@ -88,6 +88,49 @@ struct SessionRecordTests {
         #expect(!unseen.summary.contains("finished booting"))
     }
 
+    @Test func readsWhichRamdiskTheBootUsedAndHowFarItGot() throws {
+        for (word, expected) in [
+            ("stock", SessionRecord.BootRamdisk.stock), ("root", .root), ("recovery", .recovery),
+        ] {
+            let read = try #require(SessionRecord(text: record(
+                "state ended\nend guest-panic\nstatus 0\npid 7\nstarted 1\nended 2\nboot unobserved\nrestarts 0\nramdisk \(word)\n")))
+            #expect(read.ramdisk == expected && read.bootProgress == .unobserved, "\(word)")
+        }
+        let progress = try #require(SessionRecord(text: record(
+            "state ended\nend stopped\nstatus 0\npid 7\nstarted 1\nended 2\nboot unfinished\nrestarts 0\n")))
+        #expect(progress.bootProgress == .unfinished && progress.ramdisk == nil)
+        let done = try #require(SessionRecord(text: record(
+            "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\nboot completed\nrestarts 0\nramdisk root\n")))
+        #expect(done.bootProgress == .completed && done.ramdisk == .root)
+        // A word this reader does not know, or no word, names no ramdisk.
+        let odd = try #require(SessionRecord(text: record(
+            "state ended\nend powered-off\nstatus 0\npid 7\nboot sideways\nramdisk floppy\n")))
+        #expect(odd.bootProgress == nil && odd.ramdisk == nil)
+    }
+
+    @Test func theRecordStaysWhereItWasWrittenUntilTheLaunchKeepsIt() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("previous-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let current = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        try Data(record("state ended\nend guest-panic\nstatus 0\npid 7\nstarted 1\nended 2\nboot unobserved\nrestarts 0\nramdisk root\n").utf8)
+            .write(to: current)
+        // Reading it again and again, as a launch that ends in between does, finds it.
+        for _ in 0..<2 {
+            let read = try #require(PreviousSession.read(in: directory, endedOutOfForeground: false))
+            #expect(read.record.ramdisk == .root && read.record.end == "guest-panic")
+            #expect(FileManager.default.fileExists(atPath: current.path) && !FileManager.default.fileExists(atPath: kept.path))
+        }
+        // Once what was decided from it is saved, it is kept for the bug report and a second launch finds none.
+        PreviousSession.keep(in: directory)
+        #expect(!FileManager.default.fileExists(atPath: current.path) && FileManager.default.fileExists(atPath: kept.path))
+        #expect(PreviousSession.read(in: directory, endedOutOfForeground: false) == nil)
+        // A launch with no current record leaves the kept one alone.
+        PreviousSession.keep(in: directory)
+        #expect(FileManager.default.fileExists(atPath: kept.path))
+    }
+
     @Test func aRecordThatSaysNothingOfTheBootLeavesItUnknown() throws {
         let plain = try #require(SessionRecord(text: record(
             "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\n")))

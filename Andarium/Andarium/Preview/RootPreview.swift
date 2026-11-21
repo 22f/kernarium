@@ -54,7 +54,7 @@ enum RootPreview {
         case "boot-root":
             // The boot screen of a start with root, at its fifth step: the app is being put in.
             model.guest?.root.setOn(true)
-            model.guest?.root.rooted = true
+            model.guest?.root.startRooted = true
             model.rootAppInstalling = true
             model.frozenBootStage = freeze ? BootSteps.rootAppStep : nil
             model.frozenElapsed = 11

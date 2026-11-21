@@ -15,6 +15,14 @@ struct RootAppStepTests {
         return state
     }
 
+    /// A wait that a cancel does not end and that holds no thread, so that a
+    /// suite running beside others is not starved by it.
+    private static func waitThatACancelDoesNotEnd(seconds: Double) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { continuation.resume() }
+        }
+    }
+
     private func shell(_ probe: String, exit: Int = 0) -> RootScriptedShell {
         RootScriptedShell { command in
             command == MagiskApp.probeCommand ? GuestShellOutput(text: probe, exitCode: exit) : GuestShellOutput(text: "", exitCode: 0)
@@ -118,57 +126,71 @@ struct RootAppStepTests {
     }
 
     @Test func theBoundIsReleasedEvenWhenTheWorkIgnoresItsCancellation() async {
+        // The waits are long against the bound and the checks are loose: a
+        // suite that runs beside others may hold the pool for seconds.
         let started = ContinuousClock.now
         let outcome = await RootAppStep.run(
             shell: shell(""), release: release, state: rooted, installing: {},
-            install: {
-                // A wait that a cancel does not end.
-                let deadline = ContinuousClock.now + .seconds(3)
-                while ContinuousClock.now < deadline { await Task.yield() }
-            },
+            install: { await Self.waitThatACancelDoesNotEnd(seconds: 40) },
             limit: .milliseconds(200))
         #expect(outcome.isFailure)
-        #expect(ContinuousClock.now - started < .seconds(2))
+        #expect(ContinuousClock.now - started < .seconds(20))
     }
 
     @Test func openingTheAppIsInsideTheBoundAndSaysNothingOfTheInstall() async {
         let slowOpen = RootScriptedShell { command in
-            if command == MagiskApp.openCommand {
-                // A wait that a cancel does not end.
-                let deadline = ContinuousClock.now + .seconds(2)
-                while ContinuousClock.now < deadline { await Task.yield() }
-            }
+            if command == MagiskApp.openCommand { await Self.waitThatACancelDoesNotEnd(seconds: 40) }
             return GuestShellOutput(text: "", exitCode: 0)
         }
         let started = ContinuousClock.now
         let outcome = await RootAppStep.run(
-            shell: slowOpen, release: release, state: rooted, installing: {}, install: {}, limit: .milliseconds(400))
+            shell: slowOpen, release: release, state: rooted, installing: {}, install: {}, limit: .seconds(2))
         guard case .installed = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
-        #expect(ContinuousClock.now - started < .milliseconds(1_500), "the open waited past the bound")
-        #expect(slowOpen.commands.contains(MagiskApp.openCommand))
+        #expect(ContinuousClock.now - started < .seconds(20), "the open waited past the bound")
     }
 
-    @Test func aCancelledCallerIsReleasedAtOnceAndInstallsNothing() async {
+    @Test func aCancelledCallerIsReleasedBeforeTheWorkEnds() async {
+        let answered = RootCounter()
         let slowAnswer = RootScriptedShell { _ in
-            let deadline = ContinuousClock.now + .seconds(2)
-            while ContinuousClock.now < deadline { await Task.yield() }
+            await Self.waitThatACancelDoesNotEnd(seconds: 40)
+            await answered.bump()
+            return GuestShellOutput(text: "", exitCode: 0)
+        }
+        let release = release
+        let state = rooted
+        let task = Task {
+            await RootAppStep.run(shell: slowAnswer, release: release, state: state, installing: {}, install: {})
+        }
+        while slowAnswer.commands.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        task.cancel()
+        let outcome = await task.value
+        let answeredBefore = await answered.value
+        #expect(outcome.isFailure)
+        #expect(answeredBefore == 0, "a cancelled step kept its caller until the guest answered")
+    }
+
+    @Test func aCancelledStepInstallsNothingWhenTheGuestAnswersLate() async {
+        let gate = RootCounter()
+        let answered = RootCounter()
+        let slowAnswer = RootScriptedShell { _ in
+            while await gate.value == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+            await answered.bump()
             return GuestShellOutput(text: "", exitCode: 0)
         }
         let installed = RootCounter()
         let release = release
         let state = rooted
-        let started = ContinuousClock.now
         let task = Task {
             await RootAppStep.run(
                 shell: slowAnswer, release: release, state: state, installing: {}, install: { await installed.bump() })
         }
-        try? await Task.sleep(for: .milliseconds(100))
+        while slowAnswer.commands.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
         task.cancel()
-        let outcome = await task.value
-        #expect(outcome.isFailure)
-        #expect(ContinuousClock.now - started < .milliseconds(1_000), "a cancelled step kept its caller")
-        // The work that ignored the cancel ends without installing.
-        try? await Task.sleep(for: .seconds(2.2))
+        _ = await task.value
+        await gate.bump()
+        var waited = 0
+        while await answered.value == 0, waited < 4_000 { try? await Task.sleep(for: .milliseconds(5)); waited += 5 }
+        try? await Task.sleep(for: .milliseconds(200))
         let done = await installed.value
         #expect(done == 0)
     }

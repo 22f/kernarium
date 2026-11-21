@@ -75,31 +75,30 @@ final class RootStartTests {
         return (model, driver)
     }
 
-    @Test func aStartWithRootOnIsWrittenAsRootedBeforeTheRuntimeIsHandedIt() {
+    @Test func aStartWithRootOnAsksTheRuntimeForTheMagiskRamdisk() {
         let (model, driver) = model(rootOn: true)
         model.start(.normal)
-        #expect(driver.begunGuests.first?.root.rooted == true)
-        #expect(driver.savedWhenBegun.first??.root.rooted == true)
-        #expect(model.guest?.root.rooted == true)
+        #expect(driver.begunGuests.first?.root.startRooted == true)
+        #expect(model.guest?.root.startRooted == true)
     }
 
     @Test func noStartBootsRootedWithoutTheSwitchOrTheReleaseOrInRecovery() {
         let (off, offDriver) = model(rootOn: false)
         off.start(.normal)
-        #expect(offDriver.begunGuests.first?.root.rooted == false)
+        #expect(offDriver.begunGuests.first?.root.startRooted == false)
 
         let (without, withoutDriver) = model(rootOn: true, available: false)
         without.start(.normal)
-        #expect(withoutDriver.begunGuests.first?.root.rooted == false)
+        #expect(withoutDriver.begunGuests.first?.root.startRooted == false)
 
         let (recovery, recoveryDriver) = model(rootOn: true)
         recovery.start(.recovery)
-        #expect(recoveryDriver.begunGuests.first?.root.rooted == false)
+        #expect(recoveryDriver.begunGuests.first?.root.startRooted == false)
 
         let (paused, pausedDriver) = model(rootOn: true)
         paused.guest?.root.attention = .failedStart
         paused.start(.normal)
-        #expect(pausedDriver.begunGuests.first?.root.rooted == false)
+        #expect(pausedDriver.begunGuests.first?.root.startRooted == false)
     }
 
     @Test func theStepPutsTheAppInWhenTheGuestHasNoneAndRemembersIt() async {
@@ -197,29 +196,43 @@ final class RootStartTests {
         return directory
     }
 
-    private func record(end: String, status: Int = 0, boot: String = "unfinished") -> String {
-        "uml-session 8\nstate ended\nend \(end)\nstatus \(status)\npid 1\nboot \(boot)\n"
+    private func record(
+        end: String, status: Int = 0, boot: String = "unfinished", ramdisk: String? = "root"
+    ) -> String {
+        var text = "uml-session 8\nstate ended\nend \(end)\nstatus \(status)\npid 1\nboot \(boot)\nrestarts 0\n"
+        if let ramdisk { text += "ramdisk \(ramdisk)\n" }
+        return text
     }
 
     @Test func aPanicBeforeAndroidBootedPausesRootAtLaunchAndSavesIt() throws {
         let (model, driver) = model(rootOn: true)
-        model.guest?.root.rooted = true
+        // Nothing of the last start is saved with the guest: the record alone says it booted Magisk.
         let directory = try diagnostics(record: record(end: "guest-panic"))
         defer { try? FileManager.default.removeItem(at: directory) }
         model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
         #expect(model.guest?.root.attention == .failedStart)
-        #expect(model.guest?.root.rooted == false)
+        #expect(model.guest?.root.startRooted == false)
         #expect(model.guest?.root.on == true)
         #expect(driver.savedGuest?.root.attention == .failedStart)
         // The next start boots without root until the person chooses.
         model.start(.normal)
-        #expect(driver.begunGuests.last?.root.rooted == false)
+        #expect(driver.begunGuests.last?.root.startRooted == false)
+    }
+
+    @Test func aPanicBeforeInitSaidAnythingPausesRootToo() throws {
+        for end in ["guest-panic", "kernel-abort"] {
+            let (model, driver) = model(rootOn: true)
+            let directory = try diagnostics(record: record(end: end, boot: "unobserved"))
+            defer { try? FileManager.default.removeItem(at: directory) }
+            model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
+            #expect(model.guest?.root.attention == .failedStart, "\(end)")
+            #expect(driver.savedGuest?.root.attention == .failedStart, "\(end)")
+        }
     }
 
     @Test func aLaunchBeforeTheDriverExistsSavesTheFallbackOnceItDoes() throws {
         let (model, driver) = model(rootOn: true)
         model.driver = nil
-        model.guest?.root.rooted = true
         let directory = try diagnostics(record: record(end: "kernel-abort"))
         defer { try? FileManager.default.removeItem(at: directory) }
         model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
@@ -230,14 +243,16 @@ final class RootStartTests {
         #expect(driver.savedGuest?.root.attention == .failedStart)
     }
 
-    @Test func aPanicAfterAndroidBootedOrWithoutRootChangesNothing() throws {
-        for (rooted, boot) in [(true, "completed"), (false, "unfinished")] {
+    @Test func aPanicAfterAndroidBootedOrOfAnotherRamdiskChangesNothing() throws {
+        // Booted; a stock boot; recovery after an automatic restart; a record that names no ramdisk.
+        for (ramdisk, boot) in [("root", "completed"), ("stock", "unfinished"), ("recovery", "unobserved")] as [(String?, String)]
+            + [(nil, "unfinished")]
+        {
             let (model, driver) = model(rootOn: true)
-            model.guest?.root.rooted = rooted
-            let directory = try diagnostics(record: record(end: "guest-panic", boot: boot))
+            let directory = try diagnostics(record: record(end: "guest-panic", boot: boot, ramdisk: ramdisk))
             defer { try? FileManager.default.removeItem(at: directory) }
             model.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
-            #expect(model.guest?.root.attention == nil, "rooted \(rooted), boot \(boot)")
+            #expect(model.guest?.root.attention == nil, "ramdisk \(ramdisk ?? "none"), boot \(boot)")
             #expect(driver.savedGuest == nil)
         }
     }
@@ -274,12 +289,12 @@ final class RootStartTests {
         #expect(model.guest?.root.attention == nil)
         #expect(model.guest?.root.on == true)
         model.start(.normal)
-        #expect(driver.begunGuests.last?.root.rooted == true)
+        #expect(driver.begunGuests.last?.root.startRooted == true)
 
         let (stopped, stoppedDriver) = self.model(rootOn: true)
         stopped.guest?.root.attention = .stoppedStart
         stopped.start(.normal, withoutRoot: true)
-        #expect(stoppedDriver.begunGuests.last?.root.rooted == false)
+        #expect(stoppedDriver.begunGuests.last?.root.startRooted == false)
         #expect(stopped.guest?.root.attention == nil)
         #expect(stopped.guest?.root.on == true)
     }
