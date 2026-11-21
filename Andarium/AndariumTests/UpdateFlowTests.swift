@@ -170,6 +170,14 @@ final class StubDriver: RuntimeDriver {
         return installOutcome
     }
 
+    /// How many times the model asked for the release's own Magisk app to be
+    /// put in; the same `install` answers it.
+    private(set) var rootInstalls = 0
+    func installRootApp() async throws {
+        rootInstalls += 1
+        try await install { _ in }
+    }
+
     /// Android's screen reader as the stub plays it: what the guest holds
     /// (every service it has on, and `accessibility_enabled`), nil while it
     /// cannot be asked, how long each reply takes, and the calls the model

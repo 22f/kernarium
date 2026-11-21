@@ -886,6 +886,15 @@ final class LiveRuntime: RuntimeDriver {
 
     var guestShell: (any GuestShell)? { AdbGuestShell(operations: operations) }
 
+    func installRootApp() async throws {
+        guard let release = rootRelease else { throw CancellationError() }
+        let folder = storage.releaseDirectory
+        try await operations.installReleaseApk(
+            name: (release.apkPath as NSString).lastPathComponent,
+            open: { try release.openApk(in: folder, capacity: ApkInstallOperation.chunkBytes) },
+            update: { _ in })
+    }
+
     func installApk(
         at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
     ) async throws -> ApkInstallOutcome {

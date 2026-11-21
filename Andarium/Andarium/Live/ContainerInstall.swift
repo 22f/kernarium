@@ -116,7 +116,8 @@ nonisolated enum ContainerInstallOperation {
             // An APK under another name installs as one, from the start.
             watchdog.disarm()
             try ApkInstallOperation.sendPlain(
-                session: session, file: file, name: name, device: device,
+                session: session, reader: FileChunkReader(contentsOf: file, capacity: ApkInstallOperation.chunkBytes),
+                name: name, device: device,
                 bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
             return .installed
         case let .parts(plan):

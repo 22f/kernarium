@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import Darwin
 import Foundation
 
 /// What the Android release Andarium carries holds for root: a copy of its own
@@ -53,18 +54,24 @@ public struct RootRelease: Equatable, Sendable {
     }
 
     /// The release in `folder`, when its manifest has a `root` object whose
-    /// two files are both there as regular files: a partial `root/` is no root.
+    /// two files are both there as regular files, each reached without a link
+    /// in its path under `folder`: a partial `root/` is no root.
     public static func carried(in folder: URL, manifest: Data) -> RootRelease? {
         guard let release = RootRelease(manifest: manifest) else { return nil }
         func regular(_ path: String) -> Bool {
-            var isDirectory: ObjCBool = false
-            let url = folder.appendingPathComponent(path)
-            // A link is not the release's own file.
-            if (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil { return false }
-            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+            guard let descriptor = try? FileChunkReader.openRegularFile(path, under: folder) else { return false }
+            Darwin.close(descriptor)
+            return true
         }
         guard regular(bootImage), regular(release.apkPath) else { return nil }
         return release
+    }
+
+    /// Opens the Magisk app file of the release in `folder` for the upload:
+    /// the file `carried` saw, reached without a link, checked as a regular
+    /// file on the descriptor it was opened on and read from that descriptor.
+    public func openApk(in folder: URL, capacity: Int) throws -> FileChunkReader {
+        try FileChunkReader(regularFileAt: apkPath, under: folder, capacity: capacity)
     }
 
     /// The Magisk app file inside the release `folder`.

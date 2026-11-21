@@ -92,7 +92,7 @@ final class RootStartTests {
         var installing = 0
         await model.runRootAppStep(kind: .normal) { installing += 1 }
         #expect(installing == 1)
-        #expect(driver.installURLs == [apk])
+        #expect(driver.rootInstalls == 1)
         #expect(model.rootAppInstalling)
         #expect(model.guest?.root.appVersionCode == 31100)
         #expect(model.alert == nil)
@@ -102,7 +102,7 @@ final class RootStartTests {
         model.rootAppInstalling = false
         await model.runRootAppStep(kind: .normal) { again += 1 }
         #expect(again == 0)
-        #expect(driver.installURLs.count == 1)
+        #expect(driver.rootInstalls == 1)
         #expect(!model.rootAppInstalling)
     }
 
@@ -123,7 +123,7 @@ final class RootStartTests {
         model.start(.normal)
         await model.runRootAppStep(kind: .normal) {}
         #expect(shell.commands.isEmpty)
-        #expect(driver.installURLs.isEmpty)
+        #expect(driver.rootInstalls == 0)
         #expect(model.alert == nil)
     }
 
@@ -133,7 +133,7 @@ final class RootStartTests {
         model.start(.normal)
         await model.runRootAppStep(kind: .recovery) {}
         #expect(shell.commands.isEmpty)
-        #expect(driver.installURLs.isEmpty)
+        #expect(driver.rootInstalls == 0)
     }
 
     // MARK: A start with root that did not finish

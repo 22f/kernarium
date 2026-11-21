@@ -662,7 +662,9 @@ address space holds, so this is a fallback.
   [boot selection](../darwin/device/block/README.md#boot-selection)).
   Before the boot screen ends, a start with root asks the guest whether the
   official Magisk app is there (`RootAppStep`, over the application's adb
-  channel) and puts the release's own copy in when it is not: the screen adds
+  channel) and puts the release's own copy in when it is not (a regular file
+  reached under `root/` with no link in its path, opened once without following
+  one and sent from that descriptor, `RootRelease.openApk`): the screen adds
   a fifth step, Magisk app, after Startup only for a start that installs, and
   the check and install are bound together to 45 s. A failure is an alert and
   the boot goes on with root on. A start with root that ends before Android

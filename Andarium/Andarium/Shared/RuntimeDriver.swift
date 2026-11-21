@@ -264,6 +264,11 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// The release's own copy of the official Magisk app, which the step puts
     /// in the guest; nil with no root.
     var rootApkURL: URL? { get }
+    /// Puts the release's own copy of the Magisk app in the guest, reading it
+    /// from the file it opens without following a link (`RootRelease.openApk`).
+    /// Throws when that file is not the release's regular file or the install
+    /// fails. A driver with no root has none to put in.
+    func installRootApp() async throws
     /// The guest's shell, for the short questions about the Magisk app; nil
     /// when there is none to ask.
     var guestShell: (any GuestShell)? { get }
@@ -286,6 +291,7 @@ extension RuntimeDriver {
     /// A driver with no release to read has no root to offer.
     var rootRelease: RootRelease? { nil }
     var rootApkURL: URL? { nil }
+    func installRootApp() async throws { throw CancellationError() }
     var guestShell: (any GuestShell)? { nil }
 }
 

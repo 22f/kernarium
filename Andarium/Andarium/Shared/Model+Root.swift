@@ -129,8 +129,7 @@ extension AppModel {
     /// where `RootOffRule` says so.
     func runRootAppStep(kind: BootKind, installing: @escaping @MainActor () -> Void) async {
         guard kind != .recovery, let driver, let shell = driver.guestShell else { return }
-        guard bootedRooted, let release = driver.rootRelease, let apk = driver.rootApkURL,
-            let state = guest?.root
+        guard bootedRooted, let release = driver.rootRelease, let state = guest?.root
         else {
             await runRootOffStep(driver: driver, shell: shell)
             return
@@ -143,7 +142,7 @@ extension AppModel {
             },
             install: { [weak self] in
                 guard let self else { throw CancellationError() }
-                try await self.installRootApp(at: apk)
+                try await self.installRootApp()
             })
         switch outcome {
         case let .notNeeded(next), let .installed(next):
@@ -158,9 +157,9 @@ extension AppModel {
 
     /// Puts the release's Magisk app in the guest over the application's adb
     /// install path, which replaces an older copy and keeps its data.
-    private func installRootApp(at url: URL) async throws {
+    private func installRootApp() async throws {
         guard let driver else { throw CancellationError() }
-        _ = try await driver.installApk(at: url, bypassLowTargetSdkBlock: false, update: { _ in })
+        try await driver.installRootApp()
     }
 
     /// A start without root, when `RootOffRule` removes the app the person

@@ -64,6 +64,59 @@ struct RootReleaseTests {
         try FileManager.default.createSymbolicLink(at: image, withDestinationURL: elsewhere)
         #expect(RootRelease.carried(in: folder, manifest: data) == nil)
     }
+
+    /// A release folder with both files, the app under `root/`.
+    private func releaseFolder() throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("root-release-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("root"), withIntermediateDirectories: true)
+        try Data("ramdisk".utf8).write(to: folder.appendingPathComponent(RootRelease.bootImage))
+        try Data("app".utf8).write(to: folder.appendingPathComponent("root/Magisk-v31.1.apk"))
+        return folder
+    }
+
+    @Test func anAppReachedThroughALinkedDirectoryOrNotARegularFileIsNoRoot() throws {
+        let folder = try releaseFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        // The directory the app is under is a link to a directory elsewhere.
+        let elsewhere = folder.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        try Data("app".utf8).write(to: elsewhere.appendingPathComponent("Magisk-v31.1.apk"))
+        try FileManager.default.createSymbolicLink(
+            at: folder.appendingPathComponent("root/linked"), withDestinationURL: elsewhere)
+        #expect(
+            RootRelease.carried(in: folder, manifest: manifest(apk: "root/linked/Magisk-v31.1.apk")) == nil,
+            "a linked directory")
+        // A pipe is not a file, and opening it must not wait for a writer.
+        let pipe = folder.appendingPathComponent("root/pipe.apk")
+        try #require(mkfifo(pipe.path, 0o600) == 0)
+        #expect(RootRelease.carried(in: folder, manifest: manifest(apk: "root/pipe.apk")) == nil, "a pipe")
+        // The ordinary layout is root.
+        #expect(RootRelease.carried(in: folder, manifest: manifest()) != nil)
+        // A `root` that is itself a link leaves the release.
+        let moved = folder.appendingPathComponent("moved")
+        try FileManager.default.moveItem(at: folder.appendingPathComponent("root"), to: moved)
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("root"), withDestinationURL: moved)
+        #expect(RootRelease.carried(in: folder, manifest: manifest()) == nil, "a linked root directory")
+    }
+
+    @Test func theAppIsUploadedFromTheFileThatWasOpenedAndChecked() throws {
+        let folder = try releaseFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let release = try #require(RootRelease.carried(in: folder, manifest: manifest()))
+        let reader = try release.openApk(in: folder, capacity: 16)
+        #expect(reader.size == 3)
+        // The path is replaced after the open by a link to another file.
+        let apk = release.apkURL(in: folder)
+        let other = folder.appendingPathComponent("other.apk")
+        try Data("not the release's app".utf8).write(to: other)
+        try FileManager.default.removeItem(at: apk)
+        try FileManager.default.createSymbolicLink(at: apk, withDestinationURL: other)
+        #expect(try reader.read(upTo: 16) == Data("app".utf8))
+        // A new open refuses the link, and so does a path of another shape.
+        #expect(throws: POSIXError.self) { try release.openApk(in: folder, capacity: 16) }
+        let escaping = RootRelease(versionName: "v31.1", versionCode: 31_100, apkPath: "root/../other.apk")
+        #expect(throws: POSIXError.self) { try escaping.openApk(in: folder, capacity: 16) }
+    }
 }
 
 struct RootStateTests {

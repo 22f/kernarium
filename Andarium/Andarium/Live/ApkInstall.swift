@@ -54,7 +54,8 @@ nonisolated enum ApkInstallOperation {
             result = Result {
                 if InstallRefusal.isPlainApk(fileName: url.lastPathComponent) {
                     try sendPlain(
-                        session: session, file: readable, name: url.lastPathComponent, device: device,
+                        session: session, reader: FileChunkReader(contentsOf: readable, capacity: chunkBytes),
+                        name: url.lastPathComponent, device: device,
                         bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
                     return .installed
                 }
@@ -67,12 +68,12 @@ nonisolated enum ApkInstallOperation {
         return try result.get()
     }
 
-    /// One APK, sent whole with the package manager's `install`.
+    /// One APK, sent whole with the package manager's `install`, from the
+    /// file `reader` has open (its size is that file's).
     static func sendPlain(
-        session: AdbSession, file: URL, name: String, device: String, bypassLowTargetSdkBlock: Bool,
+        session: AdbSession, reader: FileChunkReader, name: String, device: String, bypassLowTargetSdkBlock: Bool,
         hostFree: @Sendable () -> UInt64, update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws {
-        let reader = try FileChunkReader(contentsOf: file, capacity: chunkBytes)
         let bytes = reader.size
         guard bytes > 0 else { throw AdbFailure(message: PackageInstallMessages.message(forCode: "FAILED_INVALID_APK")) }
         update(BusyUpdate(detail: "\(name) \u{00B7} \(Formats.size(bytes: bytes))"))
