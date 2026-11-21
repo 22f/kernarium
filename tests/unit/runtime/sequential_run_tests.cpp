@@ -1201,6 +1201,38 @@ void a_failed_restart_keeps_the_choice_of_its_session()
 	(void)close(world.control);
 }
 
+#if UML_TEST_KERNEL_RUNNER
+/* The production path enters the kernel through the loader, which refuses an
+ * image it cannot run before the guest does: the start has taken its AOT
+ * choice by then and must put it back. A one-byte image is a kernel image to
+ * the handle and to nothing else. */
+void a_loader_refusal_leaves_the_aot_choice_alone()
+{
+	const auto release = uml::cpu::arm64::aot::embedded_release();
+	require(release.has_value(), "the framework names no release");
+	const std::string matching = release_argument(*release);
+	static const unsigned char one_byte[]{0};
+	auto refused = uml::testing::create_emulator({
+		.abi_version = UML_EMULATOR_ABI_VERSION,
+		.struct_size = sizeof(uml_emulator_config),
+		.rootfs_path = "/tmp/uml-test.img",
+		.kernel_image = one_byte,
+		.kernel_image_size = sizeof(one_byte),
+	});
+	const char *arguments[]{"uml-sequential-runs", "--aot=off"};
+	require(uml_emulator_run(refused.get(), 2, arguments, nullptr) == 126,
+		"the loader did not refuse the image");
+	require(kernel_entries == 0, "a refused image entered a kernel");
+	/* Nothing ran, so the process has chosen nothing: another handle with a
+	 * kernel states the release and takes the component. */
+	auto next = make_emulator(kernel);
+	require(run_stating(next.get(), "--aot=on", matching) == kernel_booted,
+		"a start the loader refused held the next one off the component");
+	require(uml::cpu::arm64::aot::enabled(),
+		"the next start's choice of the component was not taken");
+}
+#endif
+
 /* A guest that restarts is one session: its choice stays through the
  * restart, which is not a session boundary. */
 void a_restart_keeps_the_choice_of_its_session(bool on)
@@ -1584,6 +1616,10 @@ int main(int argc, char **argv)
 		else if (mode == "release-race-mismatched")
 			a_start_waits_for_the_session_before_it_to_end(
 				false, NextStart::on_mismatched);
+#if UML_TEST_KERNEL_RUNNER
+		else if (mode == "loader-refusal-keeps-aot-choice")
+			a_loader_refusal_leaves_the_aot_choice_alone();
+#endif
 		else if (mode == "failed-start-keeps-aot-choice")
 			a_failed_start_leaves_the_aot_choice_alone();
 		else if (mode == "failed-restart-keeps-aot-choice")

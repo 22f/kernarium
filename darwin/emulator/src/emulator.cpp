@@ -433,6 +433,14 @@ private:
 	bool kept_{};
 };
 
+#if UML_EMULATOR_HAS_KERNEL_RUNNER
+/* What the loader calls as it enters the kernel (uml_elf_run). */
+void keep_aot_choice(void *scope) noexcept
+{
+	static_cast<AotChoiceScope *>(scope)->keep();
+}
+#endif
+
 class ProcessAddressSpaceAdmission final {
 public:
 	ProcessAddressSpaceAdmission() noexcept = default;
@@ -824,13 +832,14 @@ public:
 				&Emulator::trim_for_memory_pressure_of, this);
 #endif
 		}
-		choice_scope.keep();
+		/* The choice is the session's once the loader is about to enter the
+		 * kernel: a kernel image it refuses leaves it as it was. */
 		const auto result = uml_elf_run(kernel_view_.data(),
 			kernel_view_.size(), native_layout.load_bias,
 			native_layout.reserved ? native_layout.window_start : 0U,
 			native_layout.reserved ? native_layout.window_end : 0U,
 			static_cast<int>(arguments.size()), argument_pointers.data(),
-			environment_pointers.data());
+			environment_pointers.data(), keep_aot_choice, &choice_scope);
 		return result;
 #else
 		return -UML_EMULATOR_UNSUPPORTED;

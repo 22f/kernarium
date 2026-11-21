@@ -197,7 +197,16 @@ uml_add_unit_test(
 # afresh, whatever the last one did.
 if(TARGET uml_arm64_aot_framework)
     target_compile_definitions(uml_runtime_sequential_run_tests PRIVATE
-        UML_TEST_AOT=1)
+        UML_TEST_AOT=1
+        UML_TEST_KERNEL_RUNNER=$<BOOL:${UML_BUILD_KERNEL_RUNNER}>)
+    # Where the build has the production loader too, a kernel image it refuses
+    # leaves the AOT choice as it was.
+    if(UML_BUILD_KERNEL_RUNNER)
+        uml_add_unit_test(
+            NAME runtime-loader-refusal-keeps-aot-choice
+            COMMAND uml_runtime_sequential_run_tests
+                loader-refusal-keeps-aot-choice)
+    endif()
     uml_add_unit_test(
         NAME runtime-release-reselects-aot
         COMMAND uml_runtime_sequential_run_tests release-reselects-aot)
@@ -215,7 +224,7 @@ if(TARGET uml_arm64_aot_framework)
     unset(_uml_aot_mode)
 else()
     target_compile_definitions(uml_runtime_sequential_run_tests PRIVATE
-        UML_TEST_AOT=0)
+        UML_TEST_AOT=0 UML_TEST_KERNEL_RUNNER=0)
 endif()
 
 add_executable(uml_runtime_x86_tier_tests x86_tier_tests.cpp)
