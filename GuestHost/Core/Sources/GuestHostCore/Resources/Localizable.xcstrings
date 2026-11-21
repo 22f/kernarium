@@ -63,7 +63,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "每天檢查一次是否有較新的版本。不會傳送任何帳號、識別碼或使用資料。"
+            "value" : "每天檢查一次是否有較新的版本。不會傳送任何帳號、識別碼或使用狀況資料。"
           }
         }
       }
@@ -95,7 +95,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Appファイルをダウンロード"
+            "value" : "アプリファイルをダウンロード"
           }
         },
         "zh-Hans" : {
@@ -117,7 +117,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Appファイルをダウンロードします。"
+            "value" : "アプリファイルをダウンロードします。"
           }
         },
         "zh-Hans" : {
@@ -183,7 +183,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "以前と同じApple IDと同じAppでインストールすると、このバージョンが置き換えられ、仮想マシンも残ります。"
+            "value" : "以前と同じApple IDと同じアプリでインストールすると、このバージョンが置き換えられ、仮想マシンも残ります。"
           }
         },
         "zh-Hans" : {
@@ -205,7 +205,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "以前と同じAppまたはコンピュータと、同じApple IDでインストールします。"
+            "value" : "以前と同じアプリまたはコンピュータと、同じApple IDでインストールします。"
           }
         },
         "zh-Hans" : {
@@ -250,7 +250,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "後で"
+            "value" : "あとで"
           }
         },
         "zh-Hans" : {
@@ -272,7 +272,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "公開ページを開く"
+            "value" : "リリースページを開く"
           }
         },
         "zh-Hans" : {
