@@ -19,6 +19,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -353,6 +354,63 @@ class RootVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "changed the stock entry system/bin/toolbox"):
             self.verify_root()
 
+    def test_root_files_are_real_files_and_the_only_ones(self) -> None:
+        # The standalone verifier (staging runs it) follows no link on any component
+        # it opens and holds root/ to its two declared children, as the installer does.
+        def link_root(release):
+            (release / "root").rename(release / "root.real")
+            (release / "root").symlink_to("root.real")
+
+        def link_file(release):
+            apk = release / f"root/Magisk-{TEST_VERSION}.apk"
+            (release / "elsewhere.apk").write_bytes(apk.read_bytes())
+            apk.unlink()
+            apk.symlink_to("../elsewhere.apk")
+
+        def link_guest(release):
+            (release / "guest").rename(release / "guest.real")
+            (release / "guest").symlink_to("guest.real")
+
+        def link_disk(release):
+            (release / "guest/system.img").rename(release / "guest/disk.real")
+            (release / "guest/system.img").symlink_to("disk.real")
+
+        def link_layout(release):
+            (release / "guest/partition-layout.json").rename(release / "guest/layout.real")
+            (release / "guest/partition-layout.json").symlink_to("layout.real")
+
+        def link_manifest(release):
+            (release / "release-manifest.json").rename(release / "manifest.real")
+            (release / "release-manifest.json").symlink_to("manifest.real")
+
+        cases = {
+            "a file beside the two": (lambda r: (r / "root/extra.bin").write_bytes(b"x"), "does not declare"),
+            "an empty directory beside the two": (lambda r: (r / "root/empty").mkdir(), "does not declare"),
+            "a pipe beside the two": (lambda r: os.mkfifo(r / "root/pipe"), "does not declare"),
+            "a link beside the two": (
+                lambda r: (r / "root/link").symlink_to("init_boot-magisk.img"), "does not declare"),
+            "root/ as a link to a directory with the files": (link_root, "real directory"),
+            "an APK that is a link": (link_file, "partial|unsafe"),
+            "guest/ as a link": (link_guest, "must be a real"),
+            "a disk that is a link": (link_disk, "must be a real"),
+            "a layout that is a link": (link_layout, "must be a real"),
+            "a manifest that is a link": (link_manifest, "must be a real"),
+        }
+        for label, (change, pattern) in cases.items():
+            with self.subTest(label):
+                directory = Path(tempfile.mkdtemp(dir=self.directory))
+                fixture = ReleaseFixture(directory)
+                change(fixture.release)
+                manifest = json.loads(
+                    (fixture.release / "release-manifest.json").read_text()) if not (
+                        fixture.release / "release-manifest.json").is_symlink() else fixture.manifest
+                with self.assertRaisesRegex(SystemExit, pattern):
+                    release_common.verify_root(fixture.release, manifest, pin=None)
+                refused = subprocess.run(
+                    [sys.executable, "-B", str(TOOLS / "verify-magisk-boot.py"), "--release", str(fixture.release)],
+                    capture_output=True, text=True, check=False)
+                self.assertNotEqual(refused.returncode, 0, label)
+
     def test_a_patched_image_larger_than_the_stock_partition_is_refused_before_it_is_read(self) -> None:
         # The image is bounded by the partition it replaces, and the bound is checked
         # on the file's size, not on what was read.
@@ -405,6 +463,20 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(record["boot_image"]["stock_init_boot_sha1"], hashlib.sha1(stock).hexdigest())
         self.assertEqual(record["boot_image"]["stock_init_boot_sha256"], hashlib.sha256(stock).hexdigest())
         self.assertEqual(record["magisk"]["version_name"], TEST_VERSION)
+
+    def test_a_producer_refuses_a_root_directory_that_is_not_the_two_real_files(self) -> None:
+        arguments = (self.release / "guest/system.img", self.release / "guest/partition-layout.json", self.fixture.pin)
+        (self.release / "root/extra.bin").write_bytes(b"x")
+        with self.assertRaisesRegex(SystemExit, "does not declare"):
+            release_common.root_record(self.release / "root", *arguments)
+        (self.release / "root/extra.bin").unlink()
+        patched = self.release / "root/init_boot-magisk.img"
+        data = patched.read_bytes()
+        patched.unlink()
+        (self.directory / "elsewhere.img").write_bytes(data)
+        patched.symlink_to(self.directory / "elsewhere.img")
+        with self.assertRaisesRegex(SystemExit, "missing, a link or not a regular file"):
+            release_common.root_record(self.release / "root", *arguments)
 
     def test_a_producer_refuses_an_apk_that_is_not_the_pin(self) -> None:
         apk = self.release / f"root/Magisk-{TEST_VERSION}.apk"

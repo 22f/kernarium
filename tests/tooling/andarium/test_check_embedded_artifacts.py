@@ -459,6 +459,33 @@ class CheckTests(unittest.TestCase):
         (self.repo / ".build/andarium-system" / record["apk"]["path"]).unlink()
         self.fails(self.fixture.run(app=False, decision=RELEASE_ID), "root file that is not the accepted release's")
 
+    def test_root_files_must_be_real_files_and_the_only_ones_staged_and_packaged(self) -> None:
+        # Not only a regular extra file: a directory, a pipe and a link are as much
+        # more than the two files, and a root/ that is a link hides what it holds.
+        def link_root(root):
+            (root.parent / "root.real").mkdir()
+            for child in list(root.iterdir()):
+                child.rename(root.parent / "root.real" / child.name)
+            root.rmdir()
+            root.symlink_to("root.real")
+
+        for label, change, message in (
+            ("an empty directory", lambda root: (root / "empty").mkdir(), "holds root files the accepted release does not"),
+            ("a pipe", lambda root: os.mkfifo(root / "pipe"), "holds root files the accepted release does not"),
+            ("a link", lambda root: (root / "link").symlink_to("init_boot-magisk.img"),
+             "holds root files the accepted release does not"),
+            ("root/ as a link", link_root, "root/ that is not a real directory"),
+        ):
+            for packaged in (False, True):
+                with self.subTest(label, packaged=packaged):
+                    self.with_root()
+                    held = (self.fixture.app / "andarium-system" / "root") if packaged else (
+                        self.repo / ".build/andarium-system/root")
+                    change(held)
+                    result = self.fixture.run(decision=RELEASE_ID) if packaged else self.fixture.run(
+                        app=False, decision=RELEASE_ID)
+                    self.fails(result, "the packaged system" if packaged else "the staged system", message)
+
     def test_a_root_file_no_record_declares_fails(self) -> None:
         self.with_root()
         (self.repo / ".build/andarium-system/root/extra.bin").write_bytes(b"x")

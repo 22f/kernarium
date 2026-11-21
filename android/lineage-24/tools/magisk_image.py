@@ -33,7 +33,7 @@ import struct
 import sys
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import android_image
 
@@ -276,14 +276,88 @@ def root_files(record: dict) -> dict[str, dict]:
     }
 
 
-def check_root_files(release_root: Path, record: dict, error: Error) -> None:
-    """Every root file is a regular file of the recorded size and SHA-256."""
-    for relative, entry in root_files(record).items():
-        path = release_root / relative
-        if path.is_symlink() or not path.is_file():
+def _mode(path: Path, label: str, error: Error) -> int | None:
+    """The mode of `path` without following a link; None when it does not exist."""
+    try:
+        return os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as failure:
+        raise error(f"cannot read {label}: {path} ({failure})") from failure
+
+
+def real_directory(path: Path, label: str, error: Error) -> Path:
+    """`path` is a directory itself, not a link to one."""
+    mode = _mode(path, label, error)
+    if mode is None or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise error(f"{label} must be a real directory, not a link or a file (and must exist): {path}")
+    return path
+
+
+def real_path_below(base: Path, relative: str, error: Error, *, directory: bool = False) -> Path:
+    """`base` joined with `relative`, every component below `base` a real directory
+    and the last a regular file (a real directory with `directory`): a link, a
+    special file or a missing one on the way is refused."""
+    current = base
+    parts = PurePosixPath(relative).parts
+    for number, part in enumerate(parts):
+        current = current / part
+        mode = _mode(current, relative, error)
+        wants_directory = directory or number < len(parts) - 1
+        if mode is None or stat.S_ISLNK(mode) or not (
+            stat.S_ISDIR(mode) if wants_directory else stat.S_ISREG(mode)
+        ):
+            kind = "directory" if wants_directory else "file"
+            raise error(f"{relative} must be a real {kind} (no link or special file, none missing): {current}")
+    return current
+
+
+def check_root_files(
+    release_root: Path, record: dict, error: Error, *, image_limit: int | None = None
+) -> dict[str, bytes]:
+    """root/ is a real directory holding exactly the two declared files, each a
+    regular file of the recorded size and SHA-256. Returns their bytes: a caller
+    that goes on to use the files uses these and never reopens the paths.
+    `image_limit` bounds the patched image (the stock partition's size)."""
+    root_dir = release_root / ROOT_DIRECTORY
+    mode = _mode(root_dir, "release root/", error)
+    if mode is None:
+        raise error("release root/ is partial: the directory is missing")
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise error("release root/ must be a real directory, not a link or a file")
+    files = root_files(record)
+    declared = {PurePosixPath(relative).name for relative in files}
+    try:
+        held = set(os.listdir(root_dir))
+    except OSError as failure:
+        raise error(f"cannot read release root/: {failure}") from failure
+    for relative in files:
+        if PurePosixPath(relative).name not in held:
             raise error(f"release root/ is partial: {relative} is missing or unsafe")
-        if path.stat().st_size != entry["size"] or sha256_file(path) != entry["sha256"]:
+    if held - declared:
+        raise error(
+            "release root/ holds files its manifest's root record does not declare: "
+            f"{sorted(held - declared)}"
+        )
+    contents: dict[str, bytes] = {}
+    for relative, entry in files.items():
+        path = release_root / relative
+        mode = _mode(path, relative, error)
+        if mode is None or stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise error(f"release root/ is partial: {relative} is missing or unsafe")
+        is_image = relative == record["boot_image"]["path"]
+        limit = (image_limit if image_limit is not None else MAX_BOOT_IMAGE) if is_image else MAX_APK_FILE
+        if entry["size"] > limit:
+            raise error(
+                f"release root file {relative} is larger than the stock init_boot partition"
+                if is_image and image_limit is not None
+                else f"release root file {relative} is larger than {limit} bytes"
+            )
+        data = read_file(path, limit, f"release root file {relative}", error)
+        if len(data) != entry["size"] or sha256_bytes(data) != entry["sha256"]:
             raise error(f"release root file differs from its recorded size or SHA-256: {relative}")
+        contents[relative] = data
+    return contents
 
 
 # ------------------------------------------------------------ the disk side --
@@ -700,33 +774,32 @@ def verify_release_root(release_root: Path, error: Error, pin: Pin | None = None
     APK. With a pin, the record is the pinned Magisk release. Returns the record.
     """
     try:
-        manifest = contract_checks.load_json_object(release_root / MANIFEST, error)
+        manifest = contract_checks.load_json_object(
+            real_path_below(release_root, MANIFEST, error), error)
     except (OSError, ValueError) as failure:
         raise error(f"cannot read the release manifest: {failure}") from failure
     if "root" not in manifest:
         raise error("the release manifest has no root record")
     record = validate_root_record(manifest["root"], error)
-    check_root_files(release_root, record, error)
+    disk = real_path_below(release_root, SYSTEM_DISK, error)
+    layout = real_path_below(release_root, PARTITION_LAYOUT, error)
+    stock = read_partition(disk, layout, "init_boot", error)
+    contents = check_root_files(release_root, record, error, image_limit=len(stock))
     if pin is not None:
         magisk, apk = record["magisk"], record["apk"]
         if (magisk["version_name"], magisk["version_code"]) != (pin.version, pin.version_code):
             raise error("the root record is not the pinned Magisk version")
         if (apk["sha256"], apk["size"]) != (pin.apk_sha256, pin.apk_size):
             raise error("the Magisk APK digest is not the pinned one")
-    disk = release_root / SYSTEM_DISK
-    layout = release_root / PARTITION_LAYOUT
-    stock = read_partition(disk, layout, "init_boot", error)
     patched = record["boot_image"]
     if (
         sha256_bytes(stock) != patched["stock_init_boot_sha256"]
         or hashlib.sha1(stock).hexdigest() != patched["stock_init_boot_sha1"]
     ):
         raise error("the root record's stock digests are not those of the release's init_boot")
-    if patched["size"] > len(stock):
-        raise error("the patched init_boot is larger than the stock init_boot partition")
-    with open_apk(release_root / record["apk"]["path"], error) as apk:
+    with open_apk(contents[record["apk"]["path"]], error) as apk:
         verify_patched(
-            read_file(release_root / patched["path"], len(stock), "the patched init_boot", error),
+            contents[patched["path"]],
             stock,
             apk,
             preinit_device(layout, error),

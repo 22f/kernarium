@@ -166,6 +166,8 @@ def patch(arguments: argparse.Namespace) -> None:
     output = arguments.output_dir
     if not output.is_absolute():
         raise error("--output-dir must be an absolute local path")
+    if output.is_symlink() or (output.exists() and not output.is_dir()):
+        raise error(f"--output-dir must be a real directory, not a link or a file: {output}")
     patched_path = output / PATCHED_NAME
     apk_copy = output / Path(magisk_image.apk_path(pin.version)).name
     for path in (patched_path, apk_copy):
@@ -190,7 +192,9 @@ def patch(arguments: argparse.Namespace) -> None:
             )
         magisk_image.verify_patched(results[0], stock, archive, preinit, error)
 
-    output.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.mkdir(exist_ok=True)
+    magisk_image.real_directory(output, "--output-dir", error)
     try:
         with patched_path.open("xb") as handle:
             handle.write(results[0])

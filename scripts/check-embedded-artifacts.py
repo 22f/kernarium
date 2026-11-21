@@ -90,9 +90,10 @@ import gzip
 import hashlib
 import os
 import re
+import stat
 import struct
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 HERE = Path(__file__).resolve().parents[1]
 for _tools in ("kernel/common/artifacts", "android/lineage-24/tools", "tools/aot"):
@@ -453,21 +454,34 @@ def check_root_files(report, system, manifest, expected, label):
     except (KeyError, TypeError) as error:
         report.error(f"{label} has an unreadable root record", str(error))
         return
+    try:
+        mode = os.lstat(held).st_mode
+    except OSError:
+        mode = None
+    if mode is None or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        report.error(
+            f"{label} has a root/ that is not a real directory",
+            f"{held} is missing, a link or a file; the accepted release's root files are two files in a "
+            "real root/ directory",
+        )
+        return
+    names = {PurePosixPath(relative).name for relative in files}
     for relative, digest in sorted(files.items()):
         path = system / relative
-        if path.is_symlink() or not path.is_file() or sha256_file(path) != digest:
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError:
+            regular = False
+        if not regular or sha256_file(path) != digest:
             report.error(
                 f"{label} has a root file that is not the accepted release's: {relative}",
-                f"{path} is missing or does not hash to the record's digest",
+                f"{path} is missing, not a regular file, or does not hash to the record's digest",
             )
-    present = (
-        {str(path.relative_to(system)) for path in held.rglob("*") if path.is_file() or path.is_symlink()}
-        if held.is_dir() and not held.is_symlink() else set()
-    )
-    if present - set(files):
+    extra = sorted(set(os.listdir(held)) - names)
+    if extra:
         report.error(
             f"{label} holds root files the accepted release does not",
-            *(f"{system / relative}" for relative in sorted(present - set(files))),
+            *(f"{held / name}" for name in extra),
         )
 
 

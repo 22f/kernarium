@@ -721,6 +721,10 @@ class RootFilesTests(unittest.TestCase):
         def no_record(directory, manifest):
             del manifest["root"]
 
+        def link_root(directory, manifest):
+            (directory / "root").rename(directory / "root.real")
+            (directory / "root").symlink_to("root.real")
+
         def unlink(relative):
             return lambda directory, manifest: (directory / relative).unlink()
 
@@ -735,6 +739,12 @@ class RootFilesTests(unittest.TestCase):
             "a patched image that is the stock image": (stock_as_patched, "lz4 legacy"),
             "an APK with another magiskinit": (other_magiskinit, "not the APK's arm64 magiskinit"),
             "a root/ with no record": (no_record, "does not declare a root record"),
+            "a file beside the two root files": (
+                lambda directory, manifest: (directory / "root/extra.bin").write_bytes(b"x"),
+                "does not declare"),
+            "an empty directory beside the two root files": (
+                lambda directory, manifest: (directory / "root/empty").mkdir(), "does not declare"),
+            "a root/ that is a link": (link_root, "real directory"),
         }
         for proof in (False, True):
             for name, (edit, message) in cases.items():

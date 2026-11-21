@@ -816,9 +816,16 @@ def root_record(root_dir: Path, disk: Path, layout: Path, pin: Path | None = Non
     pinned = magisk_image.read_pin(pin or magisk_image.PIN_PATH, error)
     apk = root_dir / Path(magisk_image.apk_path(pinned.version)).name
     patched = root_dir / Path(magisk_image.PATCHED_PATH).name
+    magisk_image.real_directory(root_dir, "the root files directory", error)
+    held = set(os.listdir(root_dir))
+    if held - {apk.name, patched.name}:
+        fail(
+            "the root files directory holds files the root record does not declare: "
+            f"{sorted(held - {apk.name, patched.name})}"
+        )
     magisk_image.check_apk_is_pin(apk, pinned, error)
-    if patched.is_symlink() or not patched.is_file():
-        fail(f"the Magisk-patched init_boot is missing: {patched}")
+    if patched.name not in held or patched.is_symlink() or not patched.is_file():
+        fail(f"the Magisk-patched init_boot is missing, a link or not a regular file: {patched}")
     stock = magisk_image.read_partition(disk, layout, "init_boot", error)
     return magisk_image.validate_root_record({
         "magisk": {

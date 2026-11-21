@@ -615,6 +615,17 @@ class PatcherTests(unittest.TestCase):
         self.assertRegex(result.stderr, "already exists")
         self.assertEqual((self.output / "init_boot-magisk.img").read_bytes(), b"earlier")
 
+    def test_an_output_directory_that_is_a_link_is_refused(self) -> None:
+        apk = self.fixture.apk(script=patch_script())
+        target = self.directory / "target"
+        target.mkdir()
+        self.output.parent.mkdir(parents=True)
+        self.output.symlink_to(target)
+        result = self.patch(apk)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stderr, "real directory")
+        self.assertEqual(list(target.iterdir()), [])
+
     def test_a_layout_without_userdata_is_refused(self) -> None:
         fixture = Fixture(Path(self.enterContext(tempfile.TemporaryDirectory())), userdata=False)
         apk = fixture.apk(script=patch_script())
