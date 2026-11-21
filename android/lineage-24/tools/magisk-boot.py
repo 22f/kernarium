@@ -5,13 +5,14 @@
     magisk-boot.py patch --magisk-apk APK --disk system.img \\
         --layout partition-layout.json --output-dir DIR
 
-runs on the x86-64 Linux builder, after the system disk is assembled. It takes
-the APK as a local file and refuses one that is not the pinned release
-(metadata/magisk.env), reads the stock init_boot partition from the disk, and runs
-Magisk's own boot_patch.sh from the APK twice, in private directories, with the
-fixed patch inputs: Magisk's x86-64 magiskboot patches, and only the APK's arm64
-magiskinit, magisk and init-ld go into the ramdisk. The two results must be
-identical, and the result must verify as the stock image plus exactly what Magisk
+runs on the x86-64 Linux builder, after the system disk is assembled. It reads
+the APK, a local file, once, refuses it unless it is the pinned release
+(metadata/magisk.env), and uses those same bytes to extract from, to run and to
+deliver: the path is never reopened. It reads the stock init_boot partition from
+the disk and runs Magisk's own boot_patch.sh from the APK twice, in private
+directories, with the fixed patch inputs: Magisk's x86-64 magiskboot patches, and
+only the APK's arm64 magiskinit, magisk and init-ld go into the ramdisk. The two
+results must be identical, and the result must verify as the stock image plus exactly what Magisk
 adds (magisk_image.py). DIR then holds init_boot-magisk.img and the unmodified APK
 under its official name, which is how a release carries them as its root/ files.
 
@@ -158,7 +159,7 @@ def patch(arguments: argparse.Namespace) -> None:
     apk = arguments.magisk_apk
     if not apk.is_absolute():
         raise error("--magisk-apk must be an absolute local path")
-    magisk_image.check_apk_is_pin(apk, pin, error)
+    snapshot = magisk_image.read_pinned_apk(apk, pin, error)
     for label, path in (("--disk", arguments.disk), ("--layout", arguments.layout)):
         if path.is_symlink() or not path.is_file():
             raise error(f"{label} must be a regular non-symlink file")
@@ -175,7 +176,7 @@ def patch(arguments: argparse.Namespace) -> None:
     magisk_image.boot_ramdisk(stock, "the release's init_boot", error)
     preinit = magisk_image.preinit_device(arguments.layout, error)
     results: list[bytes] = []
-    with magisk_image.open_apk(apk, error) as archive:
+    with magisk_image.open_apk(snapshot, error) as archive:
         for _ in range(RUNS):
             work = Path(tempfile.mkdtemp(prefix=".magisk-boot."))
             try:
@@ -193,8 +194,8 @@ def patch(arguments: argparse.Namespace) -> None:
     try:
         with patched_path.open("xb") as handle:
             handle.write(results[0])
-        with apk.open("rb") as source, apk_copy.open("xb") as handle:
-            shutil.copyfileobj(source, handle, 1 << 20)
+        with apk_copy.open("xb") as handle:
+            handle.write(snapshot)
     except FileExistsError as failure:
         raise error(f"{failure.filename} appeared meanwhile: an existing file is never replaced") from failure
     os.chmod(patched_path, 0o644)

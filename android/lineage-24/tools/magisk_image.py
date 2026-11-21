@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import lzma
+import os
 import re
 import stat
 import struct
@@ -171,15 +172,34 @@ def read_pin(path: Path, error: Error) -> Pin:
     return Pin(MAGISK_NAME, version, code, digest, size)
 
 
+def read_pinned_apk(apk: Path, pin: Pin, error: Error) -> bytes:
+    """The bytes of the APK, read once through one descriptor, after checking that
+    they are the pinned Magisk release by size and SHA-256. A caller uses these
+    bytes for everything it does with the APK and never reopens the path, so a file
+    that is replaced meanwhile changes nothing."""
+    unpinned = error(
+        f"the Magisk APK is not the pinned {pin.name} {pin.version} "
+        "(its size or SHA-256 differs from metadata/magisk.env)"
+    )
+    try:
+        descriptor = os.open(apk, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as failure:
+        raise error(f"the Magisk APK must be a regular non-symlink file: {apk} ({failure})") from failure
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise error(f"the Magisk APK must be a regular non-symlink file: {apk}")
+        if info.st_size != pin.apk_size:
+            raise unpinned
+        data = handle.read(pin.apk_size + 1)
+    if len(data) != pin.apk_size or sha256_bytes(data) != pin.apk_sha256:
+        raise unpinned
+    return data
+
+
 def check_apk_is_pin(apk: Path, pin: Pin, error: Error) -> None:
     """The APK is the pinned Magisk release, by size and SHA-256."""
-    if apk.is_symlink() or not apk.is_file():
-        raise error(f"the Magisk APK must be a regular non-symlink file: {apk}")
-    if apk.stat().st_size != pin.apk_size or sha256_file(apk) != pin.apk_sha256:
-        raise error(
-            f"the Magisk APK is not the pinned {pin.name} {pin.version} "
-            "(its size or SHA-256 differs from metadata/magisk.env)"
-        )
+    read_pinned_apk(apk, pin, error)
 
 
 # --------------------------------------------------------------- the record --
@@ -476,9 +496,10 @@ def apk_member(archive: zipfile.ZipFile, name: str, error: Error) -> bytes:
         raise error(f"cannot read {name} of the Magisk APK: {failure}") from failure
 
 
-def open_apk(apk: Path, error: Error) -> zipfile.ZipFile:
+def open_apk(apk: Path | bytes, error: Error) -> zipfile.ZipFile:
+    """The APK as a zip archive, from a path or from bytes already read."""
     try:
-        return zipfile.ZipFile(apk)
+        return zipfile.ZipFile(io.BytesIO(apk) if isinstance(apk, bytes) else apk)
     except (OSError, zipfile.BadZipFile) as failure:
         raise error(f"the Magisk APK is not a readable archive: {failure}") from failure
 

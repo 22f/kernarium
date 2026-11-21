@@ -18,6 +18,7 @@ import importlib.util
 import json
 import lzma
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -25,6 +26,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 from pathlib import Path
 
 import magisk_fixture
@@ -435,6 +437,54 @@ class PatcherTests(unittest.TestCase):
         ):
             with self.subTest(label):
                 self.assert_refused(self.patch(self.fixture.apk(**kwargs)), pattern)
+
+    def load_tool(self):
+        spec = importlib.util.spec_from_file_location("magisk_boot_tool", TOOLS / "magisk-boot.py")
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        return tool
+
+    def patch_in_process(self, tool, apk: Path, pin: Path) -> None:
+        tool.patch(argparse.Namespace(
+            pin=pin, magisk_apk=apk, disk=self.fixture.disk, layout=self.fixture.layout,
+            output_dir=self.output))
+
+    def test_the_apk_is_one_set_of_bytes_whatever_happens_to_the_path(self) -> None:
+        # The path is checked against the pin, and then used for the extraction, the
+        # execution and the delivered copy. A file that is replaced in between must
+        # change none of them: the bytes checked are the bytes used.
+        original = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(original)
+        original_bytes = original.read_bytes()
+        other = self.fixture.apk("other.apk", script=patch_script(exit_status=1))
+        for label, name in (
+            ("while the stock image is read, before the archive is opened", "read_partition"),
+            ("after the patch, before the copy is delivered", "verify_patched"),
+        ):
+            with self.subTest(label):
+                shutil.rmtree(self.output, ignore_errors=True)
+                original.write_bytes(original_bytes)
+                tool = self.load_tool()
+                real = getattr(magisk_image, name)
+
+                def swapping(*arguments, _real=real, **keywords):
+                    result = _real(*arguments, **keywords)
+                    original.write_bytes(other.read_bytes())
+                    return result
+
+                with mock.patch.object(magisk_image, name, swapping):
+                    self.patch_in_process(tool, original, pin)
+                self.assertEqual(
+                    (self.output / f"Magisk-{TEST_VERSION}.apk").read_bytes(), original_bytes)
+                self.assertEqual(
+                    (self.output / "init_boot-magisk.img").read_bytes(),
+                    self.fixture.patched_reference())
+
+    def test_an_apk_that_is_a_link_is_refused(self) -> None:
+        apk = self.fixture.apk(script=patch_script())
+        link = self.directory / "link.apk"
+        link.symlink_to(apk)
+        self.assert_refused(self.patch(link, pin=self.fixture.pin(apk)), "regular non-symlink file")
 
     def test_a_script_that_hangs_is_stopped(self) -> None:
         spec = importlib.util.spec_from_file_location("magisk_boot_tool", TOOLS / "magisk-boot.py")
