@@ -1462,7 +1462,10 @@ ones except `/init`, which is the APK's `magiskinit`; `.backup/init.xz` as the
 stock `/init`; `overlay.d/sbin/{magisk,init-ld}.xz` as the APK's arm64 binaries;
 and `.backup/.magisk` as the fixed flags, the pre-init partition and the SHA-1
 of the stock image. `root/init_boot-magisk.img` and the unmodified
-`root/Magisk-<version>.apk` land in the output directory.
+`root/Magisk-<version>.apk` land in the output directory. `tools/magisk-boot.py
+record --root-dir DIR --disk system.img --layout partition-layout.json` prints
+the manifest's `root` record of such a directory for a producer that writes its
+own manifest.
 
 A schema 8 manifest records them as a `root` object (the Magisk name, version and
 version code; the APK's path, size and SHA-256; the patched image's path, size and

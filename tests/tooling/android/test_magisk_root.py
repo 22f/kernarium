@@ -15,6 +15,7 @@ __import__("sys").dont_write_bytecode = True
 import argparse
 import hashlib
 import importlib.util
+import json
 import lzma
 import re
 import stat
@@ -358,6 +359,47 @@ class PatcherTests(unittest.TestCase):
         not_pinned = run_tool(
             "verify-magisk-boot.py", "--image", image, "--apk", other, "--disk", self.fixture.disk,
             "--layout", self.fixture.layout, "--pin", self.fixture.pin(apk))
+        self.assertRegex(not_pinned.stderr, "is not the pinned Magisk")
+
+    def test_record_prints_the_manifest_root_record_of_a_producers_files(self) -> None:
+        apk = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(apk)
+        self.assertEqual(self.patch(apk, pin=pin).returncode, 0)
+        result = run_tool(
+            "magisk-boot.py", "record", "--root-dir", self.output, "--disk", self.fixture.disk,
+            "--layout", self.fixture.layout, "--pin", pin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        patched = (self.output / "init_boot-magisk.img").read_bytes()
+        stock = self.fixture.stock_image
+        self.assertEqual(record["magisk"]["version"], TEST_VERSION)
+        self.assertEqual(record["apk"], {
+            "path": f"root/Magisk-{TEST_VERSION}.apk",
+            "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),
+            "size": apk.stat().st_size,
+        })
+        self.assertEqual(record["init_boot"], {
+            "path": "root/init_boot-magisk.img",
+            "sha256": hashlib.sha256(patched).hexdigest(),
+            "size": len(patched),
+            "stock_sha256": hashlib.sha256(stock).hexdigest(),
+            "stock_sha1": hashlib.sha1(stock).hexdigest(),
+        })
+        # No patched image, or an APK that is not the pin, gives no record.
+        (self.output / "init_boot-magisk.img").unlink()
+        missing = run_tool(
+            "magisk-boot.py", "record", "--root-dir", self.output, "--disk", self.fixture.disk,
+            "--layout", self.fixture.layout, "--pin", pin)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertRegex(missing.stderr, "Magisk-patched init_boot is missing")
+        other = self.fixture.apk("other.apk", script=patch_script(exit_status=1))
+        wrong = self.directory / "wrong"
+        wrong.mkdir()
+        (wrong / f"Magisk-{TEST_VERSION}.apk").write_bytes(other.read_bytes())
+        (wrong / "init_boot-magisk.img").write_bytes(patched)
+        not_pinned = run_tool(
+            "magisk-boot.py", "record", "--root-dir", wrong, "--disk", self.fixture.disk,
+            "--layout", self.fixture.layout, "--pin", pin)
         self.assertRegex(not_pinned.stderr, "is not the pinned Magisk")
 
     def test_a_script_that_writes_the_pre_init_line_gives_the_same_image(self) -> None:

@@ -19,6 +19,14 @@ The script cannot name the data disk's userdata partition, which it asks the
 guest's own magisk for; the tool therefore writes the missing PREINITDEVICE line
 into .backup/.magisk itself when the script did not, with magiskboot, and
 repacks.
+
+    magisk-boot.py record --root-dir DIR --disk system.img \\
+        --layout partition-layout.json
+
+prints the manifest's `root` record for the files of such a DIR, for a producer
+that writes its own manifest (publish-release.py builds the record itself). The
+record is the producer's statement; verify-magisk-boot.py --release checks the
+files against it.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ __import__("sys").dont_write_bytecode = True
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import signal
@@ -196,6 +205,19 @@ def patch(arguments: argparse.Namespace) -> None:
     )
 
 
+def record(arguments: argparse.Namespace) -> None:
+    import release_common  # the one place the record is built
+
+    for label, path in (("--disk", arguments.disk), ("--layout", arguments.layout)):
+        if path.is_symlink() or not path.is_file():
+            raise error(f"{label} must be a regular non-symlink file")
+    if not arguments.root_dir.is_absolute() or not arguments.root_dir.is_dir():
+        raise error("--root-dir must be an absolute local directory")
+    document = release_common.root_record(
+        arguments.root_dir, arguments.disk, arguments.layout, arguments.pin)
+    print(json.dumps(document, indent=2, sort_keys=True))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -207,8 +229,15 @@ def main() -> None:
     patch_parser.add_argument("--layout", type=Path, required=True, help="its partition-layout.json")
     patch_parser.add_argument("--output-dir", type=Path, required=True)
     patch_parser.add_argument("--pin", type=Path, default=magisk_image.PIN_PATH, help=argparse.SUPPRESS)
+    record_parser = commands.add_parser(
+        "record", help="print the manifest's root record for a producer's root/ directory"
+    )
+    record_parser.add_argument("--root-dir", type=Path, required=True)
+    record_parser.add_argument("--disk", type=Path, required=True, help="the release's system.img")
+    record_parser.add_argument("--layout", type=Path, required=True, help="its partition-layout.json")
+    record_parser.add_argument("--pin", type=Path, default=None, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
-    patch(arguments)
+    (patch if arguments.command == "patch" else record)(arguments)
 
 
 if __name__ == "__main__":
