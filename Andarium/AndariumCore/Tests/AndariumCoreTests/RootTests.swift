@@ -113,6 +113,30 @@ struct RootReleaseTests {
         #expect(RootRelease.carried(in: folder, manifest: manifest()) == nil, "a linked root directory")
     }
 
+    @Test func aComponentThatIsOnlyDotsToTheFilesystemNeverLeavesRoot() throws {
+        let folder = try releaseFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        // A file outside root/, in the release folder itself.
+        try Data("not root's app".utf8).write(to: folder.appendingPathComponent("outside.apk"))
+        // A NUL ends the name the filesystem is given: this component is ".." to it and not to Swift.
+        let sneaky = "root/..\u{0}x/outside.apk"
+        #expect(RootRelease(manifest: manifest(apk: sneaky))?.apkPath == sneaky, "the manifest reader sees a name")
+        #expect(RootRelease.carried(in: folder, manifest: manifest(apk: sneaky)) == nil)
+        let release = RootRelease(versionName: "v31.1", versionCode: 31_100, apkPath: sneaky)
+        #expect(throws: POSIXError.self) { try release.openApk(in: folder, capacity: 16) }
+        // The same for a NUL anywhere, and for the plain forms.
+        for path in [
+            "root/Magisk-v31.1.apk\u{0}", "root/Mag\u{0}isk-v31.1.apk", "root/.\u{0}x/outside.apk", "root/./Magisk-v31.1.apk",
+            "root/../outside.apk", "root//Magisk-v31.1.apk", "",
+        ] {
+            let odd = RootRelease(versionName: "v31.1", versionCode: 31_100, apkPath: path)
+            #expect(throws: POSIXError.self) { try odd.openApk(in: folder, capacity: 16) }
+        }
+        // A name that only looks like the plain ones is a name, and the file is read.
+        let ordinary = RootRelease(versionName: "v31.1", versionCode: 31_100, apkPath: "root/Magisk-v31.1.apk")
+        #expect(try ordinary.openApk(in: folder, capacity: 16).size == 3)
+    }
+
     @Test func theAppIsUploadedFromTheFileThatWasOpenedAndChecked() throws {
         let folder = try releaseFolder()
         defer { try? FileManager.default.removeItem(at: folder) }

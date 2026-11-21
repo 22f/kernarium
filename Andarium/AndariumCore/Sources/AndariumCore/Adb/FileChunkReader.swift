@@ -62,12 +62,21 @@ public final class FileChunkReader {
     /// A descriptor for the regular file `path` names under `base`: each
     /// directory of the path is opened from the one before it and the file
     /// from the last, none by following a link (`base` itself is the
-    /// caller's own folder). A path with an empty or dot segment is refused.
+    /// caller's own folder). What is checked is the bytes that reach the
+    /// filesystem, not Swift's view of the string: a NUL ends a C string, so
+    /// a component such as two dots, a NUL and a suffix would name the parent
+    /// directory to `openat`. A path with a NUL, an empty component or a
+    /// component of one or two dots is refused.
     static func openRegularFile(_ path: String, under base: URL) throws -> Int32 {
-        let names = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard let leaf = names.last, !names.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
-            throw POSIXError(.EINVAL)
-        }
+        let bytes = Array(path.utf8)
+        let dot = UInt8(ascii: ".")
+        let names = bytes.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+        guard !bytes.isEmpty, !bytes.contains(0), let last = names.last,
+            !names.contains(where: { $0.isEmpty || $0.elementsEqual([dot]) || $0.elementsEqual([dot, dot]) })
+        else { throw POSIXError(.EINVAL) }
+        // A piece of valid text split at an ASCII slash is valid text, and
+        // with no NUL it reaches `openat` as exactly these bytes.
+        let leaf = String(decoding: last, as: UTF8.self)
         var directory = base.withUnsafeFileSystemRepresentation { path -> Int32 in
             guard let path else {
                 errno = EINVAL
@@ -77,7 +86,7 @@ public final class FileChunkReader {
         }
         guard directory >= 0 else { throw failure(errno) }
         for name in names.dropLast() {
-            let next = openat(directory, String(name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            let next = openat(directory, String(decoding: name, as: UTF8.self), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
             let code = errno
             Darwin.close(directory)
             guard next >= 0 else { throw failure(code) }
@@ -85,7 +94,7 @@ public final class FileChunkReader {
         }
         defer { Darwin.close(directory) }
         // O_NONBLOCK so that opening a pipe does not wait for its writer.
-        let opened = openat(directory, String(leaf), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        let opened = openat(directory, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard opened >= 0 else { throw failure(errno) }
         var status = stat()
         guard fstat(opened, &status) == 0, status.st_mode & S_IFMT == S_IFREG else {
