@@ -7,8 +7,9 @@ import UIKit
 /// The preview's states of Settings' Performance section and of the heat
 /// notice's alert. The heat is stated here (the model is told the device is
 /// held at critical), so no device is heated and no runtime runs. The 120 Hz
-/// screens (Home's Performance section, and Settings, which has no row of it)
-/// state a screen that shows 120 frames a second, which no Simulator has.
+/// screens (Home's Performance section, with the AOT screens, and Settings,
+/// which has no row of it) state a screen that shows 120 frames a second,
+/// which no Simulator has.
 @MainActor
 enum HeatLimitPreview {
     /// Settings' screens, which scroll to Stats and show Performance below it.
@@ -19,7 +20,7 @@ enum HeatLimitPreview {
     ]
 
     static func apply(screen: String, to model: AppModel) {
-        if screen.hasPrefix("home-performance") || screen == "settings-performance-120" {
+        if screen.hasPrefix("home-performance") || screen.hasPrefix("home-aot") || screen == "settings-performance-120" {
             model.statedMaximumFramesPerSecond = 120
             model.screenDidChange(nativeScale: model.screenNativeScale, maximumFramesPerSecond: 120)
         }

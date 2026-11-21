@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import XCTest
 
-/// Home's AOT row in the Simulator preview: shown, above JIT in the
-/// Performance section, in a build that carries the translated-code framework
-/// (the preview plays one with `-screen home-aot`), absent from one that does
-/// not (`home`), on by default, turned off and on again, and dimmed with its
-/// reason while the next start runs on the JIT engine, which does not use the
-/// translated code.
+/// Home's AOT row in the Simulator preview: shown, between "120 Hz" and JIT in
+/// the Performance section, in a build that carries the translated-code
+/// framework (the preview plays one with `-screen home-aot`), absent from one
+/// that does not (`home`), on by default, turned off and on again, and dimmed
+/// with its reason while the next start runs on the JIT engine, which does not
+/// use the translated code. The preview words the row either way the owner is
+/// choosing between (`-aotTitle`, `-aotNote`).
 final class TranslatedLibrariesUITests: XCTestCase {
     private static let identifier = "home-aot-switch"
     private static let title = "AOT"
-    private static let note =
+    private static let note = "Faster. Turn this off only to troubleshoot."
+    private static let explainedTitle = "Translated system libraries"
+    private static let explainedNote =
         "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot."
     private static let jitNote = "Not used while JIT is on."
 
@@ -19,9 +22,9 @@ final class TranslatedLibrariesUITests: XCTestCase {
     }
 
     @MainActor
-    private func launch(_ screen: String) -> XCUIApplication {
+    private func launch(_ screen: String, words: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = previewTestLanguage + ["-screen", screen]
+        app.launchArguments = previewTestLanguage + ["-screen", screen] + words
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20), "\(screen) did not open")
         return app
@@ -80,15 +83,28 @@ final class TranslatedLibrariesUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheRowIsAboveJitInTheSameSection() {
+    func testTheRowIsBetweenTheHundredAndTwentyHertzRowAndJit() {
         let app = launch("home-aot")
         let toggle = app.switches[Self.identifier].firstMatch
         reveal(toggle, in: app)
+        let refresh = app.switches["home-high-refresh-switch"].firstMatch
         let jit = app.switches["JIT"].firstMatch
+        XCTAssertTrue(refresh.exists, "the 120 Hz row is missing")
         XCTAssertTrue(jit.exists, "the JIT row is missing")
+        XCTAssertLessThan(refresh.frame.maxY, toggle.frame.minY, "the AOT row is not below 120 Hz")
         XCTAssertLessThan(toggle.frame.maxY, jit.frame.minY, "the AOT row is not above the JIT row")
-        // One section: a single Performance heading above the rows.
+        // One section: a single Performance heading above the three rows.
         XCTAssertEqual(app.staticTexts.matching(identifier: "Performance").count, 1)
+    }
+
+    @MainActor
+    func testThePreviewShowsTheOtherWordsTheOwnerChoosesBetween() {
+        let app = launch("home-aot", words: ["-aotTitle", "translated", "-aotNote", "explained"])
+        let toggle = app.switches[Self.identifier].firstMatch
+        reveal(toggle, in: app)
+        XCTAssertEqual(toggle.label, Self.explainedTitle, "the switch's label is \(toggle.label)")
+        XCTAssertTrue(text(Self.explainedNote, in: app).exists, "the longer note is missing")
+        XCTAssertFalse(text(Self.note, in: app).exists, "the short note shows beside the longer one")
     }
 
     @MainActor
