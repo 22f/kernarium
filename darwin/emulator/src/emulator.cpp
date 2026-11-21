@@ -14,6 +14,7 @@
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
 #include "stall_watch.hpp"
+#include "start_refusal.hpp"
 #include "thread_fence.hpp"
 #include "virtual_jetsam.hpp"
 #include "x86_runtime_support.hpp"
@@ -347,6 +348,11 @@ constexpr std::uintptr_t default_test_native_window_start = 0;
 #endif
 std::atomic<std::uintptr_t> test_native_kernel_window_start{
 	default_test_native_window_start};
+/* Where the pre-start RAM trial of a run is made, instead of in the run's
+ * window; 0 for the window. */
+std::atomic<std::uintptr_t> test_guest_ram_trial_start{0};
+/* Whether every run's window is one the host places, as on an iOS device. */
+std::atomic_bool test_native_kernel_window_by_the_host{false};
 #endif
 
 /* Where a run's native kernel window goes: the product's placement, or in the
@@ -360,6 +366,14 @@ std::atomic<std::uintptr_t> test_native_kernel_window_start{
 	const auto start = test_native_kernel_window_start.load(
 		std::memory_order_acquire);
 	auto product = ::uml::runtime::native_kernel_placement(guest_memory);
+	if (test_native_kernel_window_by_the_host.load(
+		    std::memory_order_acquire) &&
+	    product.geometry.valid) {
+		const auto layout = ::uml::runtime::reserve_process_native_window(
+			product.geometry, ::uml::runtime::WindowPlacement::anywhere);
+		return layout.valid ? layout :
+			::uml::runtime::NativeKernelLayout{.reservation_failed = true};
+	}
 	if (start != 0 && product.geometry.valid &&
 	    product.placement == ::uml::runtime::WindowPlacement::exact) {
 		auto &geometry = product.geometry;
@@ -374,6 +388,23 @@ std::atomic<std::uintptr_t> test_native_kernel_window_start{
 	}
 #endif
 	return ::uml::runtime::prepare_native_kernel_layout(guest_memory);
+}
+
+/* The layout the pre-start RAM trial is made in: the run's own. A test
+ * variant can make it elsewhere, where the host maps no RAM. */
+[[nodiscard]] ::uml::runtime::NativeKernelLayout guest_ram_trial_layout(
+	::uml::runtime::NativeKernelLayout layout) noexcept
+{
+#if UML_EMULATOR_TESTING
+	if (const auto start =
+		    test_guest_ram_trial_start.load(std::memory_order_acquire);
+	    start != 0) {
+		const auto length = layout.window_end - layout.window_start;
+		layout.window_start = start;
+		layout.window_end = start + length;
+	}
+#endif
+	return layout;
 }
 
 class ProcessAddressSpaceAdmission final {
@@ -458,6 +489,17 @@ void place_native_kernel_window(std::uintptr_t start) noexcept
 	test_native_kernel_window_start.store(start, std::memory_order_release);
 }
 
+void place_native_kernel_window_by_the_host(bool by_the_host) noexcept
+{
+	test_native_kernel_window_by_the_host.store(
+		by_the_host, std::memory_order_release);
+}
+
+void place_guest_ram_trial(std::uintptr_t start) noexcept
+{
+	test_guest_ram_trial_start.store(start, std::memory_order_release);
+}
+
 void set_guest_hand_back_hook(GuestHandBackHook hook, void *context) noexcept
 {
 	guest_hand_back_hook_context.store(context, std::memory_order_release);
@@ -531,6 +573,10 @@ public:
 	[[nodiscard]] int run(int argc, const char *const argv[],
 			      const char *const envp[])
 	{
+		/* The mark of the last run of this handle is gone before anything of
+		 * this one can fail, so that a result this run returns for another
+		 * reason never reads as a refusal for memory. */
+		start_refused_for_memory_.store(false, std::memory_order_release);
 		if (argc < 0 || (argc != 0 && argv == nullptr))
 			return -UML_EMULATOR_INVALID_ARGUMENT;
 		if (kernel_view_.empty())
@@ -638,12 +684,38 @@ public:
 		 * and removes it when the run returns, however the guest ended. */
 		const ::uml::device::GuestConsoleRun console_run{
 			!prepared.informational && prepared.host_console_directory};
+		/* The geometry of the guest's size is checked, and the window it
+		 * needs reserved, before anything else is: a size the product has no
+		 * layout for reserves nothing. A host that has not the address space
+		 * or the memory limit for the guest's size says so here, before the
+		 * kernel starts, and the run fails with a result of its own: past
+		 * this point the kernel answers a refused mapping by ending the
+		 * process. */
 		const auto native_layout = run_native_kernel_layout(
 			prepared.guest_memory_bytes);
 		if (!native_layout.valid)
 			return native_layout.reservation_failed ?
-				-UML_EMULATOR_RUNTIME_ERROR :
+				refused_for_memory() :
 				-UML_EMULATOR_INVALID_ARGUMENT;
+		/* The kernel's first block of RAM comes from the process's heap
+		 * region, which the window may have left no room for. A start
+		 * refused for it leaves the process's window as it was before the
+		 * start (THE RULE, runtime/native_kernel_layout.hpp), so that the
+		 * guest tried next has the address space it had; every other start
+		 * keeps what it reserved. An informational run asks for no heap
+		 * region and loads a kernel, whose kept text the window then holds:
+		 * it keeps its window. */
+		if (!prepared.informational &&
+		    !::uml::runtime::reserve_process_heap()) {
+			::uml::runtime::undo_process_window();
+			return refused_for_memory();
+		}
+		::uml::runtime::commit_process_window();
+		if (!prepared.informational &&
+		    !::uml::runtime::native_guest_memory_mappable(
+			    guest_ram_trial_layout(native_layout),
+			    prepared.guest_memory_bytes))
+			return refused_for_memory();
 		const ::uml::runtime::NativeKernelLayoutScope layout_scope{
 			native_layout};
 		if (!layout_scope.entered())
@@ -1146,6 +1218,13 @@ public:
 		return run_end_;
 	}
 
+	/* Whether this handle's last run was refused for want of memory before
+	 * its kernel started (start_refusal.hpp). */
+	[[nodiscard]] bool start_refused_for_memory() const noexcept
+	{
+		return start_refused_for_memory_.load(std::memory_order_acquire);
+	}
+
 #if UML_EMULATOR_TESTING
 	/* The lifecycle calls that have announced themselves and not ended. */
 	[[nodiscard]] unsigned int lifecycle_calls() const noexcept
@@ -1644,6 +1723,19 @@ private:
 	 * Clearing this on success prevents an old handle from releasing a later
 	 * guest belonging to another handle. */
 	bool power_off_pending_{};
+	/* Set where a run is refused for want of memory before its kernel starts,
+	 * and cleared when the next run of the handle begins. */
+	std::atomic_bool start_refused_for_memory_{false};
+
+	/* The result of a run refused for want of memory before its kernel
+	 * started, with the mark that says so: the same number also comes from a
+	 * failed allocation of the library's own. */
+	[[nodiscard]] int refused_for_memory() noexcept
+	{
+		start_refused_for_memory_.store(true, std::memory_order_release);
+		return -UML_EMULATOR_OUT_OF_MEMORY;
+	}
+
 	/* How the handle's most recent run ended, for uml_emulator_get_run_end. */
 	mutable std::mutex run_end_mutex_;
 	uml_emulator_run_end run_end_ {
@@ -1662,6 +1754,16 @@ struct uml_emulator {
 
 	uml::emulator::Emulator implementation;
 };
+
+namespace uml::emulator {
+
+bool start_refused_for_memory(const uml_emulator *emulator) noexcept
+{
+	return emulator != nullptr &&
+		emulator->implementation.start_refused_for_memory();
+}
+
+} // namespace uml::emulator
 
 #if UML_EMULATOR_TESTING
 namespace uml::emulator::testing {
