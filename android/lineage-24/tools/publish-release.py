@@ -550,7 +550,7 @@ def main() -> None:
             ]
             if root is not None:
                 receipt_rows += [
-                    ("root_magisk", f"{root['magisk']['name']} {root['magisk']['version']}"),
+                    ("root_magisk", f"{root['magisk']['name']} {root['magisk']['version_name']}"),
                     ("root_apk_sha256", root["apk"]["sha256"]),
                 ]
             write_receipt(staging / "provenance/build-receipt.tsv", receipt_rows)

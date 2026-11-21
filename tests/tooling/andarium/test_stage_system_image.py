@@ -611,13 +611,13 @@ def rooted_release(root: pathlib.Path, *, proof: bool = False, edit=None) -> pat
     (release / "root/init_boot-magisk.img").write_bytes(patched)
     (release / f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk").write_bytes(apk)
     record = {
-        "magisk": {"name": "Magisk", "version": magisk_fixture.TEST_VERSION,
+        "magisk": {"name": "Magisk", "version_name": magisk_fixture.TEST_VERSION,
                    "version_code": magisk_fixture.TEST_VERSION_CODE},
         "apk": {"path": f"root/Magisk-{magisk_fixture.TEST_VERSION}.apk",
                 "sha256": hashlib.sha256(apk).hexdigest(), "size": len(apk)},
-        "init_boot": {"path": "root/init_boot-magisk.img", "sha256": hashlib.sha256(patched).hexdigest(),
-                      "size": len(patched), "stock_sha256": hashlib.sha256(synthetic.stock_image).hexdigest(),
-                      "stock_sha1": hashlib.sha1(synthetic.stock_image).hexdigest()},
+        "boot_image": {"path": "root/init_boot-magisk.img", "sha256": hashlib.sha256(patched).hexdigest(),
+                      "size": len(patched), "stock_init_boot_sha256": hashlib.sha256(synthetic.stock_image).hexdigest(),
+                      "stock_init_boot_sha1": hashlib.sha1(synthetic.stock_image).hexdigest()},
     }
     layout = json.loads((release / "guest/partition-layout.json").read_text())
     if proof:
@@ -701,13 +701,13 @@ class RootFilesTests(unittest.TestCase):
             return bytes([data[0] ^ 1]) + data[1:]
 
         def stale_stock(directory, manifest):
-            manifest["root"]["init_boot"]["stock_sha256"] = "0" * 64
+            manifest["root"]["boot_image"]["stock_init_boot_sha256"] = "0" * 64
 
         def stock_as_patched(directory, manifest):
             stock = magisk_fixture.Fixture(pathlib.Path(tempfile.mkdtemp(dir=self.root))).stock_image
             (directory / "root/init_boot-magisk.img").write_bytes(stock)
-            manifest["root"]["init_boot"]["sha256"] = hashlib.sha256(stock).hexdigest()
-            manifest["root"]["init_boot"]["size"] = len(stock)
+            manifest["root"]["boot_image"]["sha256"] = hashlib.sha256(stock).hexdigest()
+            manifest["root"]["boot_image"]["size"] = len(stock)
 
         def other_magiskinit(directory, manifest):
             other = self.root / "other.apk"

@@ -823,7 +823,7 @@ def root_record(root_dir: Path, disk: Path, layout: Path, pin: Path | None = Non
     return magisk_image.validate_root_record({
         "magisk": {
             "name": pinned.name,
-            "version": pinned.version,
+            "version_name": pinned.version,
             "version_code": pinned.version_code,
         },
         "apk": {
@@ -831,12 +831,12 @@ def root_record(root_dir: Path, disk: Path, layout: Path, pin: Path | None = Non
             "sha256": pinned.apk_sha256,
             "size": pinned.apk_size,
         },
-        "init_boot": {
+        "boot_image": {
             "path": magisk_image.PATCHED_PATH,
             "sha256": magisk_image.sha256_file(patched),
             "size": patched.stat().st_size,
-            "stock_sha256": magisk_image.sha256_bytes(stock),
-            "stock_sha1": hashlib.sha1(stock).hexdigest(),
+            "stock_init_boot_sha256": magisk_image.sha256_bytes(stock),
+            "stock_init_boot_sha1": hashlib.sha1(stock).hexdigest(),
         },
     }, error)
 

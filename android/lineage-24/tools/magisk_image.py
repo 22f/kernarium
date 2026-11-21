@@ -205,12 +205,12 @@ def _size(value: object, label: str, error: Error) -> int:
 
 def validate_root_record(value: object, error: Error) -> dict:
     """Check the `root` record a release manifest keeps; returns it."""
-    record = _expect_keys(value, {"magisk", "apk", "init_boot"}, "the root record", error)
-    magisk = _expect_keys(record["magisk"], {"name", "version", "version_code"},
+    record = _expect_keys(value, {"magisk", "apk", "boot_image"}, "the root record", error)
+    magisk = _expect_keys(record["magisk"], {"name", "version_name", "version_code"},
                           "the root record's magisk", error)
     if magisk["name"] != MAGISK_NAME:
         raise error(f"the root record is not for {MAGISK_NAME}")
-    version = magisk["version"]
+    version = magisk["version_name"]
     if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
         raise error("the root record's Magisk version is malformed")
     _size(magisk["version_code"], "the root record's Magisk version code", error)
@@ -220,23 +220,23 @@ def validate_root_record(value: object, error: Error) -> dict:
     _hex(apk["sha256"], HEX64_RE, "the root record's APK SHA-256", error)
     _size(apk["size"], "the root record's APK size", error)
     patched = _expect_keys(
-        record["init_boot"],
-        {"path", "sha256", "size", "stock_sha256", "stock_sha1"},
-        "the root record's init_boot", error,
+        record["boot_image"],
+        {"path", "sha256", "size", "stock_init_boot_sha256", "stock_init_boot_sha1"},
+        "the root record's boot_image", error,
     )
     if patched["path"] != PATCHED_PATH:
         raise error(f"the root record's patched image path is not {PATCHED_PATH}")
     _hex(patched["sha256"], HEX64_RE, "the root record's patched image SHA-256", error)
     _size(patched["size"], "the root record's patched image size", error)
-    _hex(patched["stock_sha256"], HEX64_RE, "the root record's stock init_boot SHA-256", error)
-    _hex(patched["stock_sha1"], HEX40_RE, "the root record's stock init_boot SHA-1", error)
+    _hex(patched["stock_init_boot_sha256"], HEX64_RE, "the root record's stock init_boot SHA-256", error)
+    _hex(patched["stock_init_boot_sha1"], HEX40_RE, "the root record's stock init_boot SHA-1", error)
     return record
 
 
 def root_payload_specs(record: dict) -> dict[str, tuple[str, str]]:
     """The inventory role and format of each root file, by path."""
     return {
-        record["init_boot"]["path"]: PATCHED_PAYLOAD,
+        record["boot_image"]["path"]: PATCHED_PAYLOAD,
         record["apk"]["path"]: APK_PAYLOAD,
     }
 
@@ -244,7 +244,7 @@ def root_payload_specs(record: dict) -> dict[str, tuple[str, str]]:
 def root_files(record: dict) -> dict[str, dict]:
     """The recorded size and digest of each root file, by path."""
     return {
-        record["init_boot"]["path"]: record["init_boot"],
+        record["boot_image"]["path"]: record["boot_image"],
         record["apk"]["path"]: record["apk"],
     }
 
@@ -580,17 +580,17 @@ def verify_release_root(release_root: Path, error: Error, pin: Pin | None = None
     check_root_files(release_root, record, error)
     if pin is not None:
         magisk, apk = record["magisk"], record["apk"]
-        if (magisk["version"], magisk["version_code"]) != (pin.version, pin.version_code):
+        if (magisk["version_name"], magisk["version_code"]) != (pin.version, pin.version_code):
             raise error("the root record is not the pinned Magisk version")
         if (apk["sha256"], apk["size"]) != (pin.apk_sha256, pin.apk_size):
             raise error("the Magisk APK digest is not the pinned one")
     disk = release_root / SYSTEM_DISK
     layout = release_root / PARTITION_LAYOUT
     stock = read_partition(disk, layout, "init_boot", error)
-    patched = record["init_boot"]
+    patched = record["boot_image"]
     if (
-        sha256_bytes(stock) != patched["stock_sha256"]
-        or hashlib.sha1(stock).hexdigest() != patched["stock_sha1"]
+        sha256_bytes(stock) != patched["stock_init_boot_sha256"]
+        or hashlib.sha1(stock).hexdigest() != patched["stock_init_boot_sha1"]
     ):
         raise error("the root record's stock digests are not those of the release's init_boot")
     with open_apk(release_root / record["apk"]["path"], error) as apk:

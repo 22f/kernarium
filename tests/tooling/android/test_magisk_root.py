@@ -372,18 +372,18 @@ class PatcherTests(unittest.TestCase):
         record = json.loads(result.stdout)
         patched = (self.output / "init_boot-magisk.img").read_bytes()
         stock = self.fixture.stock_image
-        self.assertEqual(record["magisk"]["version"], TEST_VERSION)
+        self.assertEqual(record["magisk"]["version_name"], TEST_VERSION)
         self.assertEqual(record["apk"], {
             "path": f"root/Magisk-{TEST_VERSION}.apk",
             "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),
             "size": apk.stat().st_size,
         })
-        self.assertEqual(record["init_boot"], {
+        self.assertEqual(record["boot_image"], {
             "path": "root/init_boot-magisk.img",
             "sha256": hashlib.sha256(patched).hexdigest(),
             "size": len(patched),
-            "stock_sha256": hashlib.sha256(stock).hexdigest(),
-            "stock_sha1": hashlib.sha1(stock).hexdigest(),
+            "stock_init_boot_sha256": hashlib.sha256(stock).hexdigest(),
+            "stock_init_boot_sha1": hashlib.sha1(stock).hexdigest(),
         })
         # No patched image, or an APK that is not the pin, gives no record.
         (self.output / "init_boot-magisk.img").unlink()

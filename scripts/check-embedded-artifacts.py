@@ -449,7 +449,7 @@ def check_root_files(report, system, manifest, expected, label):
         )
         return
     try:
-        files = {item["path"]: item["sha256"] for item in (record["init_boot"], record["apk"])}
+        files = {item["path"]: item["sha256"] for item in (record["boot_image"], record["apk"])}
     except (KeyError, TypeError) as error:
         report.error(f"{label} has an unreadable root record", str(error))
         return

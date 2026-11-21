@@ -49,15 +49,15 @@
       "description": "The Magisk root files of the release, under root/: the official APK, unmodified, and a copy of the release's own init_boot that Magisk's patcher made; schema 8, optional. Both files are in the inventory.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["magisk", "apk", "init_boot"],
+      "required": ["magisk", "apk", "boot_image"],
       "properties": {
         "magisk": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "version", "version_code"],
+          "required": ["name", "version_name", "version_code"],
           "properties": {
             "name": { "const": "Magisk" },
-            "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+(\\.[0-9]+)?$" },
+            "version_name": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+(\\.[0-9]+)?$" },
             "version_code": { "type": "integer", "minimum": 1 }
           }
         },
@@ -71,16 +71,16 @@
             "size": { "type": "integer", "minimum": 1 }
           }
         },
-        "init_boot": {
+        "boot_image": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["path", "sha256", "size", "stock_sha256", "stock_sha1"],
+          "required": ["path", "sha256", "size", "stock_init_boot_sha256", "stock_init_boot_sha1"],
           "properties": {
             "path": { "const": "root/init_boot-magisk.img" },
             "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "size": { "type": "integer", "minimum": 1 },
-            "stock_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "stock_sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+            "stock_init_boot_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "stock_init_boot_sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
           }
         }
       }

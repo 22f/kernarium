@@ -184,7 +184,7 @@ def check_root(release: Path, manifest: dict) -> list[str]:
         detail = (verified.stderr.strip() or verified.stdout.strip()).splitlines()
         raise StageError(f"the release's root files do not verify: {detail[-1] if detail else 'no reason given'}")
     # The verifier has fixed the shape of the record, so these are its two safe paths.
-    return [record["init_boot"]["path"], record["apk"]["path"]]
+    return [record["boot_image"]["path"], record["apk"]["path"]]
 
 
 def tracked_line(acceptance: Path, image_metadata: Path, kernel_descriptor: Path) -> dict:

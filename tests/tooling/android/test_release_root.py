@@ -237,10 +237,10 @@ class ManifestTests(unittest.TestCase):
             ("a zero version code", lambda r: r["magisk"].update(version_code=0)),
             ("a boolean size", lambda r: r["apk"].update(size=True)),
             ("an APK path that is not its version's", lambda r: r["apk"].update(path="root/Magisk.apk")),
-            ("another patched image path", lambda r: r["init_boot"].update(path="root/boot.img")),
+            ("another patched image path", lambda r: r["boot_image"].update(path="root/boot.img")),
             ("a short digest", lambda r: r["apk"].update(sha256="abc")),
             ("a capital digest", lambda r: r["apk"].update(sha256="A" * 64)),
-            ("a short SHA-1", lambda r: r["init_boot"].update(stock_sha1="a" * 39)),
+            ("a short SHA-1", lambda r: r["boot_image"].update(stock_init_boot_sha1="a" * 39)),
             ("a path that climbs out", lambda r: r["apk"].update(path="../Magisk-v99.1.apk")),
         ):
             with self.subTest(label):
@@ -272,13 +272,13 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["schema_version"]["enum"], list(release_common.SCHEMA_VERSIONS))
         record = schema["properties"]["root"]
         self.assertFalse(record["additionalProperties"])
-        self.assertEqual(set(record["required"]), {"magisk", "apk", "init_boot"})
-        self.assertEqual(set(record["properties"]["magisk"]["required"]), {"name", "version", "version_code"})
+        self.assertEqual(set(record["required"]), {"magisk", "apk", "boot_image"})
+        self.assertEqual(set(record["properties"]["magisk"]["required"]), {"name", "version_name", "version_code"})
         self.assertEqual(set(record["properties"]["apk"]["required"]), {"path", "sha256", "size"})
         self.assertEqual(
-            set(record["properties"]["init_boot"]["required"]),
-            {"path", "sha256", "size", "stock_sha256", "stock_sha1"})
-        self.assertEqual(record["properties"]["init_boot"]["properties"]["path"]["const"], magisk_image.PATCHED_PATH)
+            set(record["properties"]["boot_image"]["required"]),
+            {"path", "sha256", "size", "stock_init_boot_sha256", "stock_init_boot_sha1"})
+        self.assertEqual(record["properties"]["boot_image"]["properties"]["path"]["const"], magisk_image.PATCHED_PATH)
         # A root record needs schema 8, and the input trees need schema 7 or later.
         conditions = {json.dumps(rule["then"], sort_keys=True) for rule in schema["allOf"]}
         self.assertIn(json.dumps({"properties": {"schema_version": {"const": 8}}}, sort_keys=True), conditions)
@@ -301,7 +301,7 @@ class RootVerificationTests(unittest.TestCase):
         (self.release / "root" / name).write_bytes(payload)
         manifest = copy.deepcopy(self.fixture.manifest)
         record = manifest["root"]
-        entry = record["apk"] if name.endswith(".apk") else record["init_boot"]
+        entry = record["apk"] if name.endswith(".apk") else record["boot_image"]
         entry["sha256"] = hashlib.sha256(payload).hexdigest()
         entry["size"] = len(payload)
         self.fixture.write(manifest)
@@ -347,8 +347,8 @@ class RootVerificationTests(unittest.TestCase):
         data[8192:8192 + size] = stock
         disk.write_bytes(bytes(data))
         manifest = copy.deepcopy(self.fixture.manifest)
-        manifest["root"]["init_boot"]["stock_sha256"] = hashlib.sha256(stock).hexdigest()
-        manifest["root"]["init_boot"]["stock_sha1"] = hashlib.sha1(stock).hexdigest()
+        manifest["root"]["boot_image"]["stock_init_boot_sha256"] = hashlib.sha256(stock).hexdigest()
+        manifest["root"]["boot_image"]["stock_init_boot_sha1"] = hashlib.sha1(stock).hexdigest()
         self.fixture.write(manifest)
         with self.assertRaisesRegex(SystemExit, "changed the stock entry system/bin/toolbox"):
             self.verify_root()
@@ -394,9 +394,9 @@ class ProducerTests(unittest.TestCase):
             self.release / "guest/partition-layout.json", self.fixture.pin)
         self.assertEqual(record, self.fixture.manifest["root"])
         stock = self.fixture.synthetic.stock_image
-        self.assertEqual(record["init_boot"]["stock_sha1"], hashlib.sha1(stock).hexdigest())
-        self.assertEqual(record["init_boot"]["stock_sha256"], hashlib.sha256(stock).hexdigest())
-        self.assertEqual(record["magisk"]["version"], TEST_VERSION)
+        self.assertEqual(record["boot_image"]["stock_init_boot_sha1"], hashlib.sha1(stock).hexdigest())
+        self.assertEqual(record["boot_image"]["stock_init_boot_sha256"], hashlib.sha256(stock).hexdigest())
+        self.assertEqual(record["magisk"]["version_name"], TEST_VERSION)
 
     def test_a_producer_refuses_an_apk_that_is_not_the_pin(self) -> None:
         apk = self.release / f"root/Magisk-{TEST_VERSION}.apk"

@@ -76,11 +76,11 @@ def root_record(apk: bytes = ROOT_APK, patched: bytes = ROOT_PATCHED, version: s
     import hashlib
 
     return {
-        "magisk": {"name": "Magisk", "version": version, "version_code": 31100},
+        "magisk": {"name": "Magisk", "version_name": version, "version_code": 31100},
         "apk": {"path": f"root/Magisk-{version}.apk", "sha256": hashlib.sha256(apk).hexdigest(), "size": len(apk)},
-        "init_boot": {
+        "boot_image": {
             "path": "root/init_boot-magisk.img", "sha256": hashlib.sha256(patched).hexdigest(),
-            "size": len(patched), "stock_sha256": "e" * 64, "stock_sha1": "f" * 40,
+            "size": len(patched), "stock_init_boot_sha256": "e" * 64, "stock_init_boot_sha1": "f" * 40,
         },
     }
 
@@ -258,7 +258,7 @@ class Fixture:
         write(staged, "release-manifest.json", json.dumps(self.manifest(release_id, trees, root)))
         if root is not None:
             files = root_files if root_files is not None else {
-                root["apk"]["path"]: ROOT_APK, root["init_boot"]["path"]: ROOT_PATCHED}
+                root["apk"]["path"]: ROOT_APK, root["boot_image"]["path"]: ROOT_PATCHED}
             for relative, payload in files.items():
                 path = staged / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -440,7 +440,7 @@ class CheckTests(unittest.TestCase):
         ):
             with self.subTest(label):
                 self.with_root(root=record,
-                               root_files={record["apk"]["path"]: ROOT_APK, record["init_boot"]["path"]: ROOT_PATCHED})
+                               root_files={record["apk"]["path"]: ROOT_APK, record["boot_image"]["path"]: ROOT_PATCHED})
                 self.fails(self.fixture.run(decision=RELEASE_ID),
                            "records root files that differ from the Magisk root files of the accepted release")
 
@@ -451,7 +451,7 @@ class CheckTests(unittest.TestCase):
         self.fails(self.fixture.run(app=False, decision=RELEASE_ID),
                    "the staged system", "has a root file that is not the accepted release's: root/Magisk-v31.1.apk")
         self.with_root()
-        (self.fixture.app / "andarium-system" / record["init_boot"]["path"]).write_bytes(b"changed")
+        (self.fixture.app / "andarium-system" / record["boot_image"]["path"]).write_bytes(b"changed")
         result = self.fixture.run(decision=RELEASE_ID)
         self.fails(result, "the packaged system", "root file that is not the accepted release's: root/init_boot-magisk.img")
         self.assertNotIn("the staged system", result.stderr)

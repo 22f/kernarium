@@ -54,7 +54,7 @@ def main() -> None:
         record = magisk_image.verify_release_root(release, error, pin)
         print(
             f"verified Magisk root files of release {release.name}: "
-            f"{record['magisk']['name']} {record['magisk']['version']}"
+            f"{record['magisk']['name']} {record['magisk']['version_name']}"
         )
         return
 

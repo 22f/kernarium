@@ -1467,10 +1467,10 @@ record --root-dir DIR --disk system.img --layout partition-layout.json` prints
 the manifest's `root` record of such a directory for a producer that writes its
 own manifest.
 
-A schema 8 manifest records them as a `root` object (the Magisk name, version and
-version code; the APK's path, size and SHA-256; the patched image's path, size and
-SHA-256 and the SHA-256 and SHA-1 of the stock `init_boot` it was made from) and
-lists both files in its inventory. A release without root files is valid, as is
+A schema 8 manifest records them as a `root` object (`magisk`: the name, version
+name and version code; `apk`: the path, size and SHA-256; `boot_image`: the
+patched image's path, size and SHA-256 and the SHA-256 and SHA-1 of the stock
+`init_boot` it was made from) and lists both files in its inventory. A release without root files is valid, as is
 every release of schema 6 and 7, which cannot carry them.
 `tools/publish-release.py` takes exactly one of `--magisk-apk APK`, which it
 passes to `assemble-image.sh`, and `--without-root`, so a release cannot lose its
