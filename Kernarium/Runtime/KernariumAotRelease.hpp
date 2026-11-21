@@ -2,8 +2,12 @@
 #pragma once
 
 #include "KernariumRuntime.h"
+#include "block/android_release_identity.hpp"
+#include "options.hpp"
 
 #include <cstddef>
+#include <optional>
+#include <string>
 
 namespace kernarium::aot {
 
@@ -27,6 +31,25 @@ inline constexpr std::size_t bootSizeBeforeAotDisabled =
     return boot.struct_size >=
                bootSizeBeforeAotDisabled + sizeof(boot.android_aot_disabled) &&
            boot.android_aot_disabled != 0U;
+}
+
+/* The emulator argument that states the release a start boots, from the
+ * source of its identity (Storage::releaseIdentity): none when the launch
+ * keeps the component out, which does not read the release at all, and none
+ * for a release that states no identity the emulator accepts. This is the
+ * whole of what the request's android_aot_disabled changes about a start. */
+template <typename Release>
+[[nodiscard]] std::string releaseArgument(
+    bool disabled, const Release& release)
+{
+    if (disabled)
+        return {};
+    const std::optional<uml::android::ReleaseIdentity> identity =
+        release.releaseIdentity();
+    if (!identity)
+        return {};
+    return uml::emulator::aot_release_argument(
+        identity->id, identity->manifestSha256, identity->systemSha256);
 }
 
 } // namespace kernarium::aot

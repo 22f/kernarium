@@ -2028,13 +2028,10 @@ private:
                 "Kernarium: the launch states no ahead-of-time release; the "
                 "guest runs on the engine alone\n",
                 stderr);
-        else if (const auto identity =
-                     request_.androidStorage->releaseIdentity()) {
-            auto argument = uml::emulator::aot_release_argument(
-                identity->id, identity->manifestSha256, identity->systemSha256);
-            if (!argument.empty())
-                arguments.push_back(std::move(argument));
-        }
+        if (auto argument = kernarium::aot::releaseArgument(
+                request_.aotDisabled, *request_.androidStorage);
+            !argument.empty())
+            arguments.push_back(std::move(argument));
         appendKernelCommandLine(
             arguments,
             *request_.androidStorage,

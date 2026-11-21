@@ -6,6 +6,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
 
 namespace {
 
@@ -63,6 +65,70 @@ void theWordIsTheLastMemberAndTheApiIsTheOneThatAddedIt()
     require(KERNARIUM_RUNTIME_API_VERSION >= 44U);
 }
 
+/* The source of a release's identity, which counts the times it is read. */
+struct FakeRelease {
+    std::optional<uml::android::ReleaseIdentity> identity;
+    mutable int reads {};
+
+    std::optional<uml::android::ReleaseIdentity> releaseIdentity() const noexcept
+    {
+        ++reads;
+        return identity;
+    }
+};
+
+FakeRelease matchingRelease()
+{
+    return {uml::android::ReleaseIdentity {
+                "20261115-los24-r28", std::string(64, 'a'), std::string(64, '0')},
+            0};
+}
+
+const std::string statedMatchingRelease =
+    "--aot-release=20261115-los24-r28," + std::string(64, 'a') + "," +
+    std::string(64, '0');
+
+void aLaunchThatStatesNothingGivesTheEmulatorTheRelease()
+{
+    /* The arguments the runtime produces for a request of the current layout
+     * that states the word 0, and for a zeroed one. */
+    const FakeRelease release = matchingRelease();
+    require(releaseArgument(aotDisabled(request(0U)), release) ==
+            statedMatchingRelease);
+    require(release.reads == 1);
+}
+
+void aLaunchThatStatesTheWordGivesTheEmulatorNoRelease()
+{
+    /* Whatever the release is, a set word leaves it out, and does not read it. */
+    const FakeRelease release = matchingRelease();
+    require(releaseArgument(aotDisabled(request(1U)), release).empty());
+    require(releaseArgument(aotDisabled(request(0xffffffffU)), release).empty());
+    require(release.reads == 0);
+}
+
+void anOlderRequestStillGivesTheEmulatorTheRelease()
+{
+    /* An application that predates the word has no way to keep the component
+     * out, and its start boots with the release as before. */
+    kernarium_runtime_boot boot = request(1U);
+    boot.struct_size = static_cast<std::uint32_t>(bootSizeBeforeAotDisabled);
+    const FakeRelease release = matchingRelease();
+    require(releaseArgument(aotDisabled(boot), release) ==
+            statedMatchingRelease);
+}
+
+void aReleaseWithoutAnIdentityGivesTheEmulatorNone()
+{
+    /* A release that says nothing it can be identified by gets no argument
+     * whichever way the request goes. */
+    const FakeRelease none {std::nullopt, 0};
+    require(releaseArgument(aotDisabled(request(0U)), none).empty());
+    FakeRelease malformed = matchingRelease();
+    malformed.identity->systemSha256 = "not a digest";
+    require(releaseArgument(aotDisabled(request(0U)), malformed).empty());
+}
+
 } // namespace
 
 int main()
@@ -76,6 +142,14 @@ int main()
          aRequestThatEndsBeforeTheWordNeverStatesIt},
         {"the-word-is-the-last-member-and-the-api-is-the-one-that-added-it",
          theWordIsTheLastMemberAndTheApiIsTheOneThatAddedIt},
+        {"a-launch-that-states-nothing-gives-the-emulator-the-release",
+         aLaunchThatStatesNothingGivesTheEmulatorTheRelease},
+        {"a-launch-that-states-the-word-gives-the-emulator-no-release",
+         aLaunchThatStatesTheWordGivesTheEmulatorNoRelease},
+        {"an-older-request-still-gives-the-emulator-the-release",
+         anOlderRequestStillGivesTheEmulatorTheRelease},
+        {"a-release-without-an-identity-gives-the-emulator-none",
+         aReleaseWithoutAnIdentityGivesTheEmulatorNone},
     };
     return uml::testing::runNamedTests(tests);
 }
