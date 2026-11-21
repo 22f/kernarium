@@ -99,12 +99,14 @@ HERE = Path(__file__).resolve().parents[1]
 for _tools in ("kernel/common/artifacts", "android/lineage-24/tools", "tools/aot"):
     sys.path.insert(0, str(HERE / _tools))
 import contract_checks  # noqa: E402
+import magisk_image  # noqa: E402
 import release_artifact  # noqa: E402
 import release_inputs  # noqa: E402
 
 DECISION_ENV = "PENDING_INPUTS_DECISION"
 ANDROID_DESCRIPTOR = "android/lineage-24/metadata/accepted-release.env"
 INPUT_TREES_KEY = "LINEAGE24_ACCEPTED_INPUT_TREES"
+ROOT_RECORD_KEY = "LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256"
 UNSIGNED_PROOF = "unsigned-proof"
 STAGED_SYSTEM = ".build/andarium-system"
 # Where install-release.py installs a release, below the work tree.
@@ -417,6 +419,14 @@ def installed_release(repo, report, descriptor, release_id):
             f"the accepted Android release {release_id} installed as {name} names no usable "
             "system disk digest",
             f"{installed / LAYOUT}: system_disk.sha256 must be 64 lowercase hexadecimal digits",
+        )
+        return None
+    bound = descriptor.get(ROOT_RECORD_KEY)
+    if bound is not None and bound != magisk_image.root_record_digest(manifest.get("root")):
+        report.error(
+            "the installed root record is not the one the accepted descriptor binds",
+            f"{installed / MANIFEST} and {ANDROID_DESCRIPTOR} ({ROOT_RECORD_KEY}) disagree: install "
+            "the accepted release again",
         )
         return None
     return digest, manifest.get("root")

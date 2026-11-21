@@ -34,6 +34,7 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[3]
 SCRIPT = REPOSITORY / "scripts/check-embedded-artifacts.py"
 sys.path.insert(0, str(REPOSITORY / "android/lineage-24/tools"))
+import magisk_image  # noqa: E402
 import release_inputs  # noqa: E402
 
 sys.path.insert(0, str(REPOSITORY / "tools/aot"))
@@ -485,6 +486,27 @@ class CheckTests(unittest.TestCase):
                     result = self.fixture.run(decision=RELEASE_ID) if packaged else self.fixture.run(
                         app=False, decision=RELEASE_ID)
                     self.fails(result, "the packaged system" if packaged else "the staged system", message)
+
+    def test_the_installed_root_record_is_the_one_the_descriptor_binds(self) -> None:
+        # A schema 8 descriptor names the digest of the reviewed root record, or none.
+        # The installed release is the reference of the check, so it must be that one.
+        record = root_record()
+        self.with_root()
+        descriptor = (self.repo / DESCRIPTOR).read_text()
+        other = root_record(apk=b"another apk")
+        for bound, accepted in (
+            (magisk_image.root_record_digest(record), True),
+            ("none", False),
+            (magisk_image.root_record_digest(other), False),
+        ):
+            with self.subTest(bound=bound[:8]):
+                write(self.repo, DESCRIPTOR, descriptor + f"LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256='{bound}'\n")
+                commit(self.repo, f"bind {bound[:8]}")
+                result = self.fixture.run(app=False, decision=RELEASE_ID)
+                if accepted:
+                    self.passes(result)
+                else:
+                    self.fails(result, "root record is not the one the accepted descriptor binds")
 
     def test_a_root_file_no_record_declares_fails(self) -> None:
         self.with_root()
