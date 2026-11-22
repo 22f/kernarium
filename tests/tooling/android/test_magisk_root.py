@@ -916,7 +916,9 @@ class PatcherTests(unittest.TestCase):
         # system, and a builder has no zygote: the script then writes its messages to a
         # recovery's output descriptor, which is not there, and its abort unmounts system
         # directories. Said as BOOTMODE=true, the messages go to the output the log keeps,
-        # and an abort only exits. A caller's own BOOTMODE is not passed on.
+        # and an abort does not run that cleanup (it still removes the script's own TMPDIR,
+        # /dev/tmp, which the patcher does not guard). A caller's own BOOTMODE is not
+        # passed on.
         shown = patch_script().replace(b"./magiskboot unpack", b'echo "BOOTMODE=$BOOTMODE"\n./magiskboot unpack')
         apk = self.fixture.apk(script=shown)
         kept = self.directory / "kept-bootmode"
