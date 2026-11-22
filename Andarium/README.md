@@ -315,6 +315,10 @@ read, checked and sent is
 Kernarium application can use as well. Andarium supplies its name, the moment
 and the launch (`Live/AppUpdateLaunch.swift`).
 
+- `sideload/source.json` is that file for Andarium: the AltStore source that
+  [the README's sideloading section](../README.md#sideloading) tells people to
+  add, served from `main`, whose newest version's `size` and `date` are those of
+  its release's IPA (`guest-host-core` reads it with the application's own reader).
 - The address is compiled in, under the `UPDATE_NOTICE` definition, only in a
   Release build whose ignored `GuestHost/Config/Update.local.xcconfig` (from
   `Update.local.xcconfig.example`: a host, a path and the hosts links may name
