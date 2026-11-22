@@ -97,6 +97,23 @@ enum WhatsNewPreview {
         )
     }
 
+    /// The releases a screen plays. A launch with `-whatsNewFrom N` leaves out
+    /// the first N entries of the newest release, so that a capture of the
+    /// sheet can show the entries its first view cuts off, whole.
+    private static func shownReleases() -> [WhatsNewRelease] {
+        guard let skipped = UserDefaults.standard.string(forKey: "whatsNewFrom").flatMap({ Int($0) }),
+              skipped > 0
+        else { return releases }
+        return releases.map { release in
+            guard release.build == currentBuild else { return release }
+            var seen = 0
+            return release.keeping { _ in
+                seen += 1
+                return seen > skipped
+            }
+        }
+    }
+
     /// Decides the screen's ribbon from its record, as a launch does.
     static func apply(screen: String, to model: AppModel) {
         guard screens.contains(screen) else { return }
@@ -115,7 +132,7 @@ enum WhatsNewPreview {
         let host = model.host
         let vCPUs = model.guest?.cores ?? host.processorCount
         model.whatsNew.launch(
-            releases: releases, record: stored(for: screen),
+            releases: shownReleases(), record: stored(for: screen),
             currentBuild: currentBuild, hasGuest: model.guest != nil,
             offers: { $0.requirement?.isMet(by: host, vCPUs: vCPUs) ?? true }
         )
