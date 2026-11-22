@@ -1,10 +1,10 @@
 {
   "name": "Andarium",
-  "identifier": "com.imxieyi.andarium.source",
+  "identifier": "com.imxieyi.kernarium.source",
   "sourceURL": "https://raw.githubusercontent.com/imxieyi/Kernarium/main/sideload/source.json",
   "subtitle": "Android on iPhone and iPad",
   "description": "Andarium runs Android on iPhone and iPad. It is built on the Kernarium runtime.",
-  "iconURL": "https://raw.githubusercontent.com/imxieyi/Kernarium/main/sideload/icon.png",
+  "iconURL": "https://raw.githubusercontent.com/imxieyi/Kernarium/main/sideload/andarium.png",
   "website": "https://github.com/imxieyi/Kernarium",
   "apps": [
     {
@@ -13,7 +13,7 @@
       "developerName": "imxieyi",
       "subtitle": "Android on iPhone and iPad",
       "localizedDescription": "Andarium runs the Android system on iPhone and iPad. It is built on the Kernarium runtime, which runs a real Linux kernel natively and emulates only the code of the apps, with graphics drawn through Metal.\n\nIt needs iOS 26 or later. With a free Apple ID, Android gets less memory. JIT is optional and experimental.",
-      "iconURL": "https://raw.githubusercontent.com/imxieyi/Kernarium/main/sideload/icon.png",
+      "iconURL": "https://raw.githubusercontent.com/imxieyi/Kernarium/main/sideload/andarium.png",
       "versions": [
         {
           "version": "1.1",

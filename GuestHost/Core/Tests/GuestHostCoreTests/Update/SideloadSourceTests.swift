@@ -146,6 +146,19 @@ struct SideloadSourceTests {
         #expect(entry["downloadURL"] as? String != nil)
     }
 
+    /// The icon the app's page names is a tracked file: an address on the
+    /// branch the source is served from is the same path in this repository.
+    @Test func theIconTheAppNamesIsInTheRepository() throws {
+        let root = try Self.fileObject()
+        let apps = try #require(root["apps"] as? [[String: Any]])
+        let text = try #require(apps.first?["iconURL"] as? String)
+        let url = try #require(URL(string: text))
+        // /<account>/<repository>/<branch>/<path in the repository>
+        let path = url.pathComponents.dropFirst(4).joined(separator: "/")
+        #expect(path.hasPrefix("sideload/") && path.hasSuffix(".png"), "the icon is not a png of the sideload directory: \(path)")
+        #expect(FileManager.default.fileExists(atPath: Self.repositoryFile(path).path), "\(path) is not tracked")
+    }
+
     @Test func everyAddressInTheFileIsHTTPS() throws {
         func addresses(_ value: Any, key: String) -> [(String, String)] {
             switch value {
