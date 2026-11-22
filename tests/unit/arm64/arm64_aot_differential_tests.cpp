@@ -14,6 +14,7 @@
 
 #include "cpu/arm64/aot/aot_diagnostics.hpp"
 #include "cpu/arm64/aot/aot_runtime.hpp"
+#include "cpu/arm64/code_synchronization.hpp"
 #include "cpu/arm64/engine_adapters.hpp"
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
@@ -619,6 +620,11 @@ std::size_t g_faults_reported_as_continued = 0;
 [[nodiscard]] Outcome run_selected(GadgetExecutor &executor,
 	StaticGuestMemory &memory, unsigned long generation, CpuState &cpu)
 {
+	/* The engine's entry loop takes a pending IC IVAU note after each block
+	 * and drops a stale one when a run starts. This runs a block outside it,
+	 * so a note an earlier case armed is dropped here, or the executor would
+	 * end every later run early at its first stepped instruction. */
+	arm64::discard_unmapped_code_synchronization();
 	require(executor.begin_execution(generation, cpu.pc));
 	std::size_t executed = 0;
 	const auto event = aot_runtime::enabled() ?
@@ -1197,6 +1203,8 @@ struct Config final {
 	std::string only;
 	/* Run only the scan of the words the engine rejects. */
 	bool words_only{};
+	/* Run only the row about IC IVAU in rewritten code. */
+	bool code_synchronize_only{};
 	std::size_t starts{12}, interior{8}, sp_sites{6}, site_cases{4};
 	/* Cases the stepped-trace row follows, and the longest stepped run it
 	 * records (a case that takes more is left out). */
@@ -1231,6 +1239,9 @@ struct Config final {
 			c.only = argv[i + 1];
 		else if (key == "--words-only")
 			c.words_only = std::strtoul(argv[i + 1], nullptr, 0) != 0;
+		else if (key == "--code-synchronize-only")
+			c.code_synchronize_only =
+				std::strtoul(argv[i + 1], nullptr, 0) != 0;
 		else if (key == "--library")
 			c.library = std::strtol(argv[i + 1], nullptr, 0);
 		else if (key == "--sample")
@@ -3212,6 +3223,7 @@ std::size_t run_until_stub(GadgetExecutor &executor, StaticGuestMemory &memory,
 	std::size_t blocks = 0;
 	for (;; ++blocks) {
 		require(blocks < 20'000'000);
+		arm64::discard_unmapped_code_synchronization();
 		require(executor.begin_execution(generation, cpu.pc));
 		std::size_t executed = 0;
 		const auto event =
@@ -5824,6 +5836,192 @@ void the_dispatch_choice_is_made_when_the_executor_is_made(
 	require(on_while_on > 0 && on_while_off > 0);
 }
 
+
+/* The IC IVAU instructions of the library that rewritten code leaves to the
+ * engine, from the sites the rewriter reported as steps: SYS #3, C7, C5, #1
+ * with a register that is not the zero register. */
+[[nodiscard]] std::vector<std::uint64_t> code_synchronization_sites(
+	const LibraryImage &image, const std::set<std::uint64_t> &steps)
+{
+	std::vector<std::uint64_t> sites;
+	for (const auto offset : steps) {
+		if (offset + 4 > image.bytes.size())
+			continue;
+		std::uint32_t word;
+		std::memcpy(&word, &image.bytes[offset], 4);
+		if ((word & 0xffff'ffe0U) == 0xd50b'7520U && (word & 31U) != 31U)
+			sites.push_back(offset);
+	}
+	return sites;
+}
+
+/* An IC IVAU that rewritten code leaves to the engine, run through the
+ * engine's entry as the product runs it, is the guest's own: it is made in
+ * the generation the engine runs, whichever generation the thread last
+ * activated (the kernel selects one for its own calls, and a vCPU that ran
+ * another process's task last still holds that one). An address that
+ * generation maps nothing at faults, at the instruction, as hardware
+ * faults it for a load, and the native code that
+ * follows it does not run: the entry loop reports the fault at the
+ * instruction that armed it. Where the address is mapped the instruction
+ * retires and publishes the change in the running generation alone. The
+ * active generation maps the address in one arm and not in the others, so
+ * an instruction resolved there takes the wrong turn in two of the three.
+ *
+ * What the row proves about the executor's early exit, run_aot leaving at an
+ * instruction whose helper armed the note: the fault is at the IC IVAU and the
+ * retry hint is left there, so the retry (rewritten code still on) is the
+ * ordinary engine's one instruction. Without the exit that run went on, the
+ * engine's own check of the guest's code sequence ended it at the next
+ * instruction, and the retry entered rewritten code and stepped the IC IVAU
+ * again; the row fails on that.
+ * What it cannot prove: the exit also matters where the bridge answers
+ * non-zero and moves no code sequence of the running generation (no address
+ * space for the thread, an exception inside the call, an entered context of
+ * another address space's lifetime), and that answer cannot be made from a
+ * test without a hook that fails the bridge in the middle of a run. That
+ * case is covered by reading the exit, not by this row.
+ * Returns how many sites the library has. */
+[[gnu::noinline]]
+std::size_t code_synchronization_in_rewritten_code(const LibraryImage &image,
+	const std::set<std::uint64_t> &steps)
+{
+	const auto sites = code_synchronization_sites(image, steps);
+	constexpr std::size_t most = 3;
+	const auto bias = Fixture::bias;
+	const auto base = arena_base(bias);
+	constexpr std::size_t unmapped_page = 3;
+	static_assert(unmapped_page < arena_pages);
+	const auto target = base + unmapped_page * page_bytes + 0x40;
+	enum Arm : int { nowhere, guest_only, active_only, arms };
+	static constexpr const char *what[arms] = {
+		"the page is mapped in neither generation",
+		"the page is mapped in the guest's generation only",
+		"the page is mapped in the active generation only"};
+	unsigned long generation = 8100;
+	const auto chosen = std::min(most, sites.size());
+	for (std::size_t n = 0; n < chosen; ++n) {
+		const auto site = sites[n * sites.size() / chosen];
+		std::uint32_t word;
+		std::memcpy(&word, &image.bytes[site], 4);
+		const auto reg = word & 31U;
+		for (int arm = 0; arm < arms; ++arm) {
+			const auto guest = generation++;
+			const auto active = generation++;
+			Fixture f{guest, image};
+			Arena active_arena{active, base};
+			if (arm == guest_only)
+				f.arena.set_kind(unmapped_page, 1);
+			if (arm == active_only)
+				active_arena.set_kind(unmapped_page, 1);
+			arm64::CpuState cpu{};
+			cpu.tbi_enabled = true;
+			cpu.pc = bias + site;
+			cpu.sp = base + (arena_pages + stack_pages) * page_bytes - 0x40;
+			cpu.registers[30] = bias + stub_offset;
+			cpu.registers[reg] = target;
+			const auto guest_before = darwin_uml_static_vm_code_changes(guest);
+			const auto active_before =
+				darwin_uml_static_vm_code_changes(active);
+			/* The kernel's last selection on this thread. */
+			require(darwin_uml_static_vm_activate(active) == 0);
+			aot::reset_stats();
+			aot::set_enabled(true);
+			auto engine = arm64::detail::make_gadget_engine({});
+			uml::cpu::ExecutionRequest request{
+				.cpu = cpu,
+				.memory = f.env.memory,
+				.translated_memory = &f.env.memory,
+				.generation = guest,
+				.instruction_budget = std::size_t{1} << 20,
+			};
+			const auto result = engine->run(request);
+			const auto steps_taken = aot::stats().steps;
+			const auto faulted_at_target =
+				result.reason == uml::cpu::ExitReason::memory_fault &&
+				result.fault.address == target;
+			const auto say = [&](const char *failure) {
+				std::fprintf(stderr, "  IC IVAU at %llx, %s: %s (exit %d, "
+					"pc %llx, address %llx, retired %zu, steps %llu)\n",
+					static_cast<unsigned long long>(site), what[arm], failure,
+					static_cast<int>(result.reason),
+					static_cast<unsigned long long>(cpu.pc),
+					static_cast<unsigned long long>(result.fault.address),
+					result.retired_instructions,
+					static_cast<unsigned long long>(steps_taken));
+				require(false);
+			};
+			if (steps_taken == 0)
+				say("the instruction was not stepped by rewritten code");
+			if (darwin_uml_static_vm_code_changes(active) != active_before)
+				say("the active generation heard of the guest's IC IVAU");
+			if (arm == guest_only) {
+				aot::set_enabled(false);
+				if (faulted_at_target || cpu.pc == bias + site)
+					say("an IC IVAU at a mapped address faulted");
+				if (darwin_uml_static_vm_code_changes(guest) == guest_before)
+					say("the guest's generation did not hear of its IC IVAU");
+				continue;
+			}
+			if (!faulted_at_target ||
+			    result.fault.access != uml::memory::MemoryAccess::read)
+				say("an IC IVAU at an unmapped address did not fault");
+			/* The count of instructions an entry of rewritten code retired is
+			 * the budget it paid for, not what it ran: the fault's place is
+			 * what the guest sees. */
+			if (cpu.pc != bias + site)
+				say("the fault is not at the instruction");
+			/* The kernel maps the page for the guest, and the instruction
+			 * runs again, with rewritten code still on: the fault left the
+			 * PC at the instruction as the place the engine runs it (the
+			 * retry hint a stepped fault leaves), so the retry is the
+			 * ordinary engine's one instruction, and neither enters
+			 * rewritten code nor steps in it. A run that went on after the
+			 * instruction in rewritten code (the MMU's own advance of the
+			 * guest's code sequence ends it at the next check even so) has
+			 * no hint, and the retry enters rewritten code at the
+			 * instruction and steps it again. */
+			f.arena.set_kind(unmapped_page, 1);
+			request.instruction_budget = 1;
+			const auto guest_at_retry = darwin_uml_static_vm_code_changes(guest);
+			const auto active_at_retry =
+				darwin_uml_static_vm_code_changes(active);
+			const auto before_retry = aot::stats();
+			const auto again = engine->run(request);
+			const auto after_retry = aot::stats();
+			aot::set_enabled(false);
+			const auto retry_say = [&](const char *failure) {
+				std::fprintf(stderr, "  IC IVAU at %llx, %s: %s (exit %d, "
+					"pc %llx, retired %zu, enters %llu, steps %llu)\n",
+					static_cast<unsigned long long>(site), what[arm], failure,
+					static_cast<int>(again.reason),
+					static_cast<unsigned long long>(cpu.pc),
+					again.retired_instructions,
+					static_cast<unsigned long long>(
+						after_retry.enters - before_retry.enters),
+					static_cast<unsigned long long>(
+						after_retry.steps - before_retry.steps));
+				require(false);
+			};
+			if (again.reason != uml::cpu::ExitReason::instruction_budget ||
+			    cpu.pc != bias + site + 4 || again.retired_instructions != 1)
+				retry_say("the instruction did not run once its page was "
+					"mapped");
+			if (after_retry.enters != before_retry.enters ||
+			    after_retry.steps != before_retry.steps)
+				retry_say("the retry entered rewritten code");
+			if (darwin_uml_static_vm_code_changes(guest) == guest_at_retry)
+				retry_say("the guest's generation did not hear of its IC IVAU");
+			if (darwin_uml_static_vm_code_changes(active) != active_at_retry)
+				retry_say("the active generation heard of the guest's IC IVAU");
+		}
+	}
+	if (chosen != 0)
+		std::fprintf(stderr, "IC IVAU in rewritten code: %zu of %zu sites, "
+			"%d arms each\n", chosen, sites.size(), static_cast<int>(arms));
+	return sites.size();
+}
+
 } // namespace
 
 /* A host fault inside rewritten code is a bug; say where before dying. */
@@ -5894,6 +6092,7 @@ int main(int argc, char **argv)
 		return diagnose(c, image, bias) ? 0 : 1;
 	}
 	bool scenarios_done = false;
+	std::size_t code_synchronization_sites_seen = 0;
 	/* libz when the build holds it (some scenarios name its functions),
 	 * otherwise the first library. */
 	std::size_t scenario_index = libraries.front().index;
@@ -5921,6 +6120,12 @@ int main(int argc, char **argv)
 		if (cfg.words_only) {
 			words_the_engine_rejects_are_left_to_it(image, functions,
 				load_steps(cfg.steps, file.index));
+			continue;
+		}
+		if (cfg.code_synchronize_only) {
+			code_synchronization_sites_seen +=
+				code_synchronization_in_rewritten_code(image,
+					load_steps(cfg.steps, file.index));
 			continue;
 		}
 		if (!scenarios_done) {
@@ -6030,6 +6235,9 @@ int main(int argc, char **argv)
 		}
 		words_the_engine_rejects_are_left_to_it(image, functions,
 			load_steps(cfg.steps, file.index));
+		code_synchronization_sites_seen +=
+			code_synchronization_in_rewritten_code(image,
+				load_steps(cfg.steps, file.index));
 		if (file.guest.ends_with("/boot-fixture.oat"))
 			direct_branches_below_the_library(image);
 		/* The scenarios are about the mechanism, not about the code:
@@ -6056,6 +6264,12 @@ int main(int argc, char **argv)
 			two_vcpus(image, sample);
 		}
 	}
+	/* The release's own libraries hold IC IVAU (the instruction cache flush
+	 * of the runtime's JIT); a set with none leaves the row nothing to judge. */
+	if (cfg.library < 0 && !cfg.words_only)
+		require(code_synchronization_sites_seen != 0);
+	if (cfg.code_synchronize_only)
+		return 0;
 	if (libraries.size() > 1 && cfg.library < 0) {
 		/* The scenario library and the one listed after it. */
 		std::size_t at = 0;

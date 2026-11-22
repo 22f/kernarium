@@ -113,7 +113,7 @@ nonisolated enum HapticsLaunch {
 /// mouse drive the real application with it, because the runtime is out of
 /// reach of a test that runs in another process. The probe's guest registers
 /// each device when it is plugged, as a kernel with the hot-plug topic does;
-/// `unregistered` makes it one that never does, as the accepted kernel is.
+/// `unregistered` makes it one that never does, as a kernel without it is.
 nonisolated enum InputProbeLaunch {
     static let environmentName = "ANDARIUM_INPUT_PROBE"
     static let unregisteredValue = "unregistered"

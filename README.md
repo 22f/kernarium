@@ -60,11 +60,11 @@ This emulator architecture sits between a full system emulator (like [UTM](https
     - Supports most kernel features, including namespaces, SELinux and more
 - CPU emulation
     - Supports `arm64`, `arm32`, `x86_64` guest instructions
-    - Both interpreter and JIT execution modes (interpreter-only for TestFlight release)
+    - Both interpreter and JIT execution modes
 - GPU acceleration
     - Vulkan 1.4 via [KosmicKrisp](https://docs.mesa3d.org/drivers/kosmickrisp.html)
     - OpenGL 4.6 & GLES 3.2 via [Zink](https://docs.mesa3d.org/drivers/zink.html)
-    - Hardware video encoding and decoding (H.264, HEVC) via [VideoToolbox](https://developer.apple.com/documentation/videotoolbox)
+    - Hardware video encoding and decoding (H.264, HEVC; VP9 decoding) via [VideoToolbox](https://developer.apple.com/documentation/videotoolbox)
 - Storage
     - Supports virtual disks via UBD driver, with discard support
     - Supports any Linux filesystem including ext2/3/4, erofs, xfs, ...

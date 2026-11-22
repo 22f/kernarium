@@ -315,6 +315,10 @@ read, checked and sent is
 Kernarium application can use as well. Andarium supplies its name, the moment
 and the launch (`Live/AppUpdateLaunch.swift`).
 
+- `sideload/source.json` is that file for Andarium: the AltStore source that
+  [the README's sideloading section](../README.md#sideloading) tells people to
+  add, served from `main`, whose newest version's `size` and `date` are those of
+  its release's IPA (`guest-host-core` reads it with the application's own reader).
 - The address is compiled in, under the `UPDATE_NOTICE` definition, only in a
   Release build whose ignored `GuestHost/Config/Update.local.xcconfig` (from
   `Update.local.xcconfig.example`: a host, a path and the hosts links may name
@@ -796,8 +800,9 @@ address space holds, so this is a fallback.
   when a boot ends); until then, and for good on a kernel that never registers
   it, the system pointer's clicks are touches and its use only plugs the mouse.
   The devices need a kernel that follows configuration changes (the hot-plug
-  topic of the virtio-input devices); on the accepted kernel they plug and
-  nothing sees them, and input sent is dropped. A touch of the pointer is the
+  topic of the virtio-input devices), which the accepted kernels have; on a
+  kernel without it they plug and nothing sees them, and input sent is
+  dropped. A touch of the pointer is the
   mouse's or a finger's from its beginning to its end. An iPhone has no pointer
   to give the guest, and Settings' "Use the pointer as touch" (off for a fresh
   install, kept as `PointerPreference`, absent on an iPhone) leaves the guest

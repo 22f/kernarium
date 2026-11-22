@@ -340,7 +340,9 @@ guest's write-back before it (`RunStop`, `StopSettle`), and the update notice
 (the version file's reading and every rule that decides what is offered or
 opened, the one request against an in-process network with no real address,
 the daily schedule and the record (a record edited on the device included), the
-model's moments, and its words in each language), and
+model's moments, and its words in each language, and the tracked
+`sideload/source.json` read through that reader for the version and build the
+project builds), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the hardware input's plug policy and pointer
 capture, the snapshot store on APFS clones of sparse
@@ -1121,9 +1123,9 @@ M4 Mac) runs that path only on a host with the feature. Check a change to such
 a path by hand on an iOS device that has it: launch Kernarium with the
 `guest-hwcap-sanity` payload and the touched families' corpus cases built into
 one static guest program, and require the results of a gadget-engine run on a
-Mac. The device runs the gadget engine, and the JIT only in a development build
-whose debugger serves it, so a JIT path needing one of these features is checked
-on an M4 or newer Mac.
+Mac. The device runs the gadget engine, and the JIT only in a build whose
+debugger serves it, so a JIT path needing one of these features is checked on an
+M4 or newer Mac.
 
 ## Android
 

@@ -139,8 +139,8 @@ struct AppEntry {
         model.followsDeviceOrientation = launch.followsDeviceOrientation
             ?? (UIDevice.current.userInterfaceIdiom == .phone)
         #if !targetEnvironment(simulator)
-        // A development build on a device can run the guest on the JIT engine
-        // when a debugger prepares its memory.
+        // A build on a device, Debug or Release, can run the guest on the JIT
+        // engine when a debugger prepares its memory.
         model.jitAvailable = true
         #endif
         // The rulers offer no size the carried system's data disk would refuse.

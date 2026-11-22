@@ -27,6 +27,7 @@ input	android/lineage-24/metadata/base-manifest.xml	pins every Repo project of t
 input	android/lineage-24/metadata/lineage.env	the source snapshot, the product and the build variant, all of which the manifest records
 input	android/lineage-24/metadata/magisk.env	the pinned Magisk release that the root/ files are made from
 excluded	android/lineage-24/metadata/accepted-release.env	records which release was accepted, after the release exists
+excluded	android/lineage-24/metadata/accepted-aot.env	records which AOT artifact of that release was accepted, after the artifact exists
 input	android/lineage-24/overlay	the device/kernarium/andarium product tree, synchronized as one unit
 input	android/lineage-24/patches	the route table and the generated series for each project it changes
 input	android/lineage-24/support/boot/kernel-command-line.txt	shipped in the release as it is

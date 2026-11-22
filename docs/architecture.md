@@ -625,11 +625,13 @@ AArch32 `cacheflush()` writes nothing and calls
 An arm64 guest that rewrites code and synchronizes it (`IC IVAU`, broadcast on
 hardware and keyed by the physical address) changes what every process running
 the frame executes, but a store or a publication reaches only its own address
-space's generation. So each frame of a mapped backing has a holder word
-(`darwin/memory/mmu/code_holders.hpp`): the arm64 instruction-fetch path
-registers the fetching generation in it before it reads the frame's bytes, and
-a guest code synchronization or the kernel's remote-write paths take the word
-and publish a whole-space code change in every generation they named. Both
+space's generation. A guest's code synchronization is made in the generation of
+the execution context its thread has entered, not in the generation the thread
+last activated for the kernel's calls. So each frame of a mapped backing has a
+holder word (`darwin/memory/mmu/code_holders.hpp`): the arm64 instruction-fetch
+path registers the fetching generation in it before it reads the frame's
+bytes, and a guest code synchronization or the kernel's remote-write paths take
+the word and publish a whole-space code change in every generation they named. Both
 also move the frame's code-page stamp (version and epoch) where some mapping
 executes the frame: through the publisher's own view of the frame, whether or
 not that view can execute, or, for a frame the kernel names that the target
