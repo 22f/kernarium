@@ -822,10 +822,42 @@ class PatcherTests(unittest.TestCase):
         # Magisk's script unmounts and moves system directories when it aborts outside
         # a booted system, which is harmless for a build user and not for uid 0.
         apk = self.fixture.apk(script=patch_script())
+        real = self.directory / "uid_map"
+        real.write_text("         0          0 4294967295\n")
+        tool = self.load_tool()
+        tool.UID_MAP = str(real)
         with mock.patch.object(os, "geteuid", lambda: 0), \
                 self.assertRaisesRegex(SystemExit, "must not run as root"):
-            self.patch_in_process(self.load_tool(), apk, self.fixture.pin(apk))
+            self.patch_in_process(tool, apk, self.fixture.pin(apk))
         self.assertFalse(self.output.exists())
+
+    def test_a_root_of_a_user_namespace_is_not_root(self) -> None:
+        # The build host runs the producer's image steps in a user namespace that maps
+        # the build user to uid 0. That uid is root of the namespace only: nothing the
+        # script unmounts or moves there is the host's. Real root, and a system that
+        # does not say, stay refused.
+        apk = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(apk)
+        tool = self.load_tool()
+        namespace = self.directory / "uid_map-namespace"
+        namespace.write_text("         0       1000          1\n")
+        real = self.directory / "uid_map-real"
+        real.write_text("         0          0 4294967295\n")
+        for label, uid_map, refused in (
+            ("a user namespace", namespace, False),
+            ("real root", real, True),
+            ("no uid_map", self.directory / "uid_map-missing", True),
+        ):
+            with self.subTest(label), mock.patch.object(os, "geteuid", lambda: 0):
+                tool.UID_MAP = str(uid_map)
+                shutil.rmtree(self.output, ignore_errors=True)
+                if refused:
+                    with self.assertRaisesRegex(SystemExit, "must not run as root"):
+                        self.patch_in_process(tool, apk, pin)
+                else:
+                    self.patch_in_process(tool, apk, pin)
+                    self.assertEqual(
+                        (self.output / "init_boot-magisk.img").read_bytes(), self.fixture.patched_reference())
 
     def test_the_tail_of_a_failing_step_shows_the_scripts_own_words(self) -> None:
         script = patch_script(exit_status=3).replace(

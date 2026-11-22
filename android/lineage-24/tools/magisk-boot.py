@@ -54,6 +54,7 @@ RUNS = 2
 STEP_TIMEOUT_SECONDS = 300
 # How much of a failing step's own output the refusal repeats.
 TAIL_LINES = 40
+UID_MAP = "/proc/self/uid_map"
 TOOL_PATH = "/usr/bin:/bin"
 PATCHED_NAME = Path(magisk_image.PATCHED_PATH).name
 NEW_IMAGE = "new-boot.img"
@@ -73,6 +74,25 @@ STAGED = (
 
 def error(message: str) -> SystemExit:
     return SystemExit(f"Magisk boot patcher: {message}")
+
+
+def root_of_the_system() -> bool:
+    """Whether euid 0 is root of the machine: a user namespace maps it to a user."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        lines = Path(UID_MAP).read_text().splitlines()
+    except OSError:
+        return True
+    for line in lines:
+        fields = line.split()
+        try:
+            inside, outside, count = (int(field) for field in fields)
+        except ValueError:
+            return True
+        if len(fields) == 3 and inside <= 0 < inside + count:
+            return outside == 0
+    return True
 
 
 def run_step(arguments: list[str], work: Path, env: dict[str, str], label: str) -> str:
@@ -166,9 +186,9 @@ def write_new(path: Path, data: bytes) -> None:
 
 
 def patch(arguments: argparse.Namespace) -> None:
-    if os.geteuid() == 0:
+    if root_of_the_system():
         # Magisk's script unmounts and moves system directories when it aborts
-        # outside a booted system.
+        # outside a booted system. In a user namespace those are the namespace's.
         raise error("the patcher must not run as root: run it as the build user")
     pin = magisk_image.read_pin(arguments.pin, error)
     apk = arguments.magisk_apk
