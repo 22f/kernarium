@@ -1415,13 +1415,13 @@ void addBoundaryBunchedFrames(
     std::sort(frames.begin(), frames.end());
 }
 
-/* Frames that arrive within one tick are one frame to the display, which
- * shows two of them at most at the 60 step's ticks and one at the 120 step's.
- * A guest of 63 frames a second with 3 to 12 of them within three milliseconds
- * of a second's boundary offers the display 62 or fewer, and a guest at 60
- * that catches up with a burst once a second offers it 61: neither takes the
- * 120 step. The count that held them on the 60 step for 4 to 7 s before the
- * burst was over, and took the 120 step in the end, counted every frame. */
+/* A tick counts two of the frames that arrive within it at most, at the 60
+ * step's ticks as at the 120 step's. A guest of 63 frames a second with 3 to
+ * 12 of them within three milliseconds of a second's boundary offers the
+ * display 62 or fewer, and a guest at 60 that catches up with a burst once a
+ * second offers it 61: neither takes the 120 step. The count that held them on
+ * the 60 step for 4 to 7 s before the burst was over, and took the 120 step in
+ * the end, counted every frame. */
 void aGuestWhoseExtraFramesBunchInOneTickStaysOnTheSixtyStep()
 {
     for (const int bunched : {3, 4, 6, 9, 12}) {
@@ -1484,11 +1484,41 @@ void aGuestWhoseFramesAreSpreadOverTicksRisesAtTheDwell()
     }
 }
 
+/* A guest that speeds up from 30 to 90 or 120 frames a second with 3 to 12 of
+ * them within three milliseconds of each second's boundary is followed within
+ * the dwell and the window, as an evenly spaced one is: a burst is two frames
+ * at most to the count, and the rest of the guest's frames are far over the
+ * threshold. */
+void aGuestThatSpeedsUpWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow()
+{
+    for (const int perSecond : {90, 120}) {
+        for (const int bunched : {3, 6, 12}) {
+            for (const double phase : {0.0, 0.003, 0.006}) {
+                std::vector<double> frames = slowLead(3.0);
+                const auto down = firstChangeTo(stepChangesOf(frames, 3.0), 60, 0.0);
+                require(down.has_value());
+                const double epoch = *down + phase;
+                frames.erase(std::remove_if(frames.begin(), frames.end(),
+                                 [&](double at) { return at >= epoch; }),
+                    frames.end());
+                addBoundaryBunchedFrames(frames, epoch, 8, perSecond, bunched);
+                const auto rose = firstChangeTo(stepChangesOf(frames, epoch + 8.0), 120, epoch);
+                require(rose.has_value(), "a guest of 90 or more with a burst did not rise");
+                if (*rose - epoch > 2.1)
+                    std::fprintf(stderr,
+                        "%d a second, %d bunched, phase %.3f: the 120 step at %.3f s\n",
+                        perSecond, bunched, phase, *rose - epoch);
+                require(*rose - epoch <= 2.1, "the rise took longer than the dwell");
+            }
+        }
+    }
+}
+
 /* A guest that falls from 120 to 60 with 3 of its frames within a millisecond
  * of each second's boundary is followed within the dwell and the window, for
  * every tick length the display can have: the count that held it on the 120
  * step for five seconds counted the frames of the bunch as frames of the
- * display, which only one of the three per tick is. */
+ * display, which only two of the three per tick are. */
 void aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow()
 {
     for (const double highTick : {1.0 / 120.00001, 1.0 / 120.0, 1.0 / 119.88, 1.0 / 119.98}) {
@@ -1539,6 +1569,31 @@ void aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow
                 std::fprintf(stderr, "tick %.9f phase %.3f: the 60 step after %.3f s\n",
                     highTick, phase, low - epoch);
             require(low - epoch <= 2.1, "the fall took longer than the dwell and a window");
+        }
+    }
+}
+
+/* A guest whose bursts of two or more frames, each within a millisecond, come
+ * 31 or more times a second keeps the step it has: a tick counts two of a burst
+ * at the 60 step's ticks and at the 120 step's, so the stream that rises at the
+ * 60 step is not below the fall's measure at the 120 step. A count that took
+ * one of a burst at the 120 step's ticks and two at the 60 step's changed the
+ * step every four seconds. */
+void aGuestWhoseBurstsComeThirtyOneOrMoreTimesASecondKeepsTheHighStep()
+{
+    for (const int burst : {2, 3, 4, 6}) {
+        for (const double perSecond : {31.5, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0}) {
+            std::vector<double> frames;
+            const double period = 1.0 / perSecond;
+            for (int n = 0; n * period < 30.0; ++n)
+                for (int k = 0; k < burst; ++k)
+                    frames.push_back(1.0 + n * period + 0.0003 * k);
+            const auto changes = stepChangesOf(frames, 31.0);
+            if (!changes.empty())
+                std::fprintf(stderr,
+                    "bursts of %d, %.1f a second: %zu changes, the first at %.2f s\n", burst,
+                    perSecond, changes.size(), changes[0].at);
+            require(changes.empty(), "a steady stream of bursts changed the step");
         }
     }
 }
@@ -1621,8 +1676,12 @@ int main(int argc, char** argv)
             aGuestWhoseExtraFramesBunchInOneTickStaysOnTheSixtyStep},
         {"aGuestWhoseFramesAreSpreadOverTicksRisesAtTheDwell",
             aGuestWhoseFramesAreSpreadOverTicksRisesAtTheDwell},
+        {"aGuestThatSpeedsUpWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow",
+            aGuestThatSpeedsUpWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow},
         {"aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow",
             aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow},
+        {"aGuestWhoseBurstsComeThirtyOneOrMoreTimesASecondKeepsTheHighStep",
+            aGuestWhoseBurstsComeThirtyOneOrMoreTimesASecondKeepsTheHighStep},
     };
     try {
         for (const Row& row : rows) {

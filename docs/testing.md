@@ -392,7 +392,8 @@ fits and the mode's rate told to the display (a size beyond 60 Hz included);
 check also reads;
 `gpu-present-pacer` runs the display link's decisions (the 60 and 120 steps as
 the guest's rate changes, steady, speeding-up and alternating guests, frames
-early and late in groups, the two seconds between changes and the bound on the
+early and late in groups, bursts that bunch in a tick and the time to follow a
+change however they bunch, the two seconds between changes and the bound on the
 changes, the wake, the sleep, the bounded retry of a present that
 found no drawable, and the bound on its waits for one (a frame's budget is the
 frame claimed, across a link made again and a frame that arrives while a tick
