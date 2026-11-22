@@ -875,8 +875,12 @@ struct TextMessageTests {
 
     // MARK: Where it is offered
 
-    @Test func theApplicationThatDoesNotCarryItOffersNoEntranceAndOpensNoBar() async throws {
-        let rig = try rig(capabilities: .device)
+    /// The device carries text messages. A set of capabilities without them (a
+    /// runtime that has no service to send to) offers no entrance and opens no bar.
+    @Test func aRuntimeWithoutTextMessagesOffersNoEntranceAndOpensNoBar() async throws {
+        var without = Capabilities.device
+        without.textMessages = false
+        let rig = try rig(capabilities: without)
         defer { rig.cleanUp() }
         #expect(!rig.model.offersTextMessage)
         rig.model.openTextMessage()
@@ -892,13 +896,11 @@ struct TextMessageTests {
         #expect(!rig.state.isOpen)
     }
 
-    @Test func aDevelopmentLaunchOffersItOnlyToANormalRun() throws {
-        var capabilities = Capabilities.device
-        capabilities.textMessages = true
-        let normal = try rig(capabilities: capabilities)
+    @Test func theDeviceOffersItOnlyToANormalRun() throws {
+        let normal = try rig(capabilities: .device)
         defer { normal.cleanUp() }
         #expect(normal.model.offersTextMessage)
-        let recovery = try rig(capabilities: capabilities, mode: .recovery)
+        let recovery = try rig(capabilities: .device, mode: .recovery)
         defer { recovery.cleanUp() }
         #expect(!recovery.model.offersTextMessage)
         recovery.model.openTextMessage()
@@ -1407,15 +1409,15 @@ struct TextMessageTests {
     }
 
     @Test func settingsHasTheRowOnlyWhereTheApplicationCarriesTextMessages() async throws {
-        let held = try rig(capabilities: .device)
+        var without = Capabilities.device
+        without.textMessages = false
+        let held = try rig(capabilities: without)
         defer { held.cleanUp() }
         let heldLabels = try await draw(SessionSettingsSheet(large: true).environment(held.model), height: 2600).labels
         #expect(heldLabels.contains { $0.contains("ADB over network") })
         #expect(!heldLabels.contains { $0.contains(SmsMessages.row) }, "\(heldLabels)")
 
-        var capabilities = Capabilities.device
-        capabilities.textMessages = true
-        let offered = try rig(capabilities: capabilities)
+        let offered = try rig(capabilities: .device)
         defer { offered.cleanUp() }
         let offeredLabels = try await draw(SessionSettingsSheet(large: true).environment(offered.model), height: 2600).labels
         #expect(offeredLabels.contains { $0.contains(SmsMessages.row) }, "\(offeredLabels)")

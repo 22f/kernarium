@@ -12,23 +12,6 @@ struct LaunchEnvironmentTests {
         #expect(Set(names).count == LaunchOverrides.Setting.allCases.count)
     }
 
-    /// The device offers no text message until an accepted image has the
-    /// service; the launch setting is the one way to see it, and it says "1".
-    @Test func textMessagesAreOnlyOnForADevelopmentLaunchThatSaysSo() {
-        #expect(TextMessagesLaunch.environmentName == "ANDARIUM_TEXT_MESSAGES")
-        #expect(!TextMessagesLaunch.capabilities(in: [:]).textMessages)
-        for value in ["", "0", "true", "yes", "2", " 1"] {
-            #expect(!TextMessagesLaunch.capabilities(in: ["ANDARIUM_TEXT_MESSAGES": value]).textMessages, Comment(rawValue: value))
-        }
-        #expect(!TextMessagesLaunch.capabilities(in: ["KERNARIUM_TEXT_MESSAGES": "1"]).textMessages)
-        let on = TextMessagesLaunch.capabilities(in: ["ANDARIUM_TEXT_MESSAGES": "1"])
-        #expect(on.textMessages)
-        // Nothing else of the device changes.
-        var rest = on
-        rest.textMessages = false
-        #expect(rest == Capabilities.device)
-    }
-
     @Test func readsTheNamesOfKernariumAndAndarium() {
         let overrides = LaunchOverrides(
             environment: [

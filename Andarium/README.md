@@ -914,11 +914,10 @@ address space holds, so this is a fallback.
   prints, at most about twice a second, the Core Motion sample behind the
   guest's field with iOS's own attitude and heading.
 - **Text messages.** The Developer section of Settings has Send text
-  message… under ADB over network, in every build configuration, but the
-  device application holds the capability back until an accepted release image
-  carries the service (`Capabilities.device`); no shipped configuration offers
-  it. Pressed, the row closes Settings and a bar rises over the running
-  Android, above the keyboard, which does not move Android. The bar has a
+  message… under ADB over network, in every build configuration, while Android
+  runs in a normal start (`Capabilities.device`). Pressed, the row closes
+  Settings and a bar rises over the running Android, above the keyboard, which
+  does not move Android. The bar has a
   title (the row's symbol, "Text message" as the heading VoiceOver starts on,
   and a line saying Android receives it as an incoming text) with Close, a
   sender (the last one used, else Andarium; it is cleaned before it is judged),
@@ -939,7 +938,9 @@ address space holds, so this is a fallback.
   message goes to the guest over vsock port 5560 (`GuestSmsChannel`), not over
   adb. The sender and text rules and the limits are `GuestSms`'s; the system
   image must include the
-  [SMS service](../android/lineage-24/README.md#text-messages).
+  [SMS service](../android/lineage-24/README.md#text-messages). The row does
+  not check for it: a running image without the service leaves the connection
+  unanswered, and the bar says the message was not sent after about 5 s.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
@@ -1383,9 +1384,6 @@ an image without the command.
 `ANDARIUM_ANDROID_APPS_PROBE=1`, with the probe, gives its session the played list of
 made-up Android apps that Add to Home Screen's preview screens use, in the cache and
 the App Shortcuts, so that Apple's Shortcuts shows their tiles under Andarium.
-`ANDARIUM_TEXT_MESSAGES=1` turns on the Text message entrance that the device
-application holds back until an accepted release image carries the service
-(`Capabilities.device`); tests and proof images use it.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`
