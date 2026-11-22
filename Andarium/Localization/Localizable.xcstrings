@@ -2617,29 +2617,6 @@
         }
       }
     },
-    "Android’s system libraries run from translated code, which is faster. Turn this off only to troubleshoot." : {
-      "comment" : "Under the AOT switch on Home. AOT is a name and stays as it is. Says that Android's system libraries run from machine code translated ahead of time, that this is faster, and that the switch is for trouble-shooting.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Androidのシステムライブラリは変換されたコードで実行され、より高速です。問題の調査時のみオフにしてください。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Android的系统库以转译后的代码运行，速度更快。仅在排查问题时才关闭。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Android的系統程式庫以轉譯後的程式碼執行，速度更快。僅在排解問題時關閉。"
-          }
-        }
-      }
-    },
     "Android, LineageOS, Linux and the other names and marks here belong to their owners. They identify the software built into Andarium and imply no endorsement." : {
       "localizations" : {
         "ja" : {
@@ -13228,6 +13205,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "轉譯的系統程式庫"
+          }
+        }
+      }
+    },
+    "Translated system libraries run faster. Turn off only to troubleshoot." : {
+      "comment" : "The note beneath the AOT group on Home, in the footer style. AOT is a name and stays as it is. Says that the translated system libraries (Android's own libraries, run from machine code translated ahead of time) make Android faster, and that the switch is only for trouble-shooting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "変換済みのシステムライブラリで高速化します。問題の調査時のみオフにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "转译后的系统库运行更快。仅在排查问题时关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轉譯後的系統程式庫執行更快。僅在排解問題時關閉。"
           }
         }
       }

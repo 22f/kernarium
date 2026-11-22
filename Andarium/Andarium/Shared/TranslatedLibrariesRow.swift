@@ -9,11 +9,11 @@ enum TranslatedLibrariesWords {
     /// says what it is.
     static let title = "AOT"
 
-    /// The line under the title while the switch works: what the libraries
-    /// are, that this is faster, and when to turn it off.
+    /// The line beneath the group while the switch works: that the libraries
+    /// run faster, and when to turn it off.
     static let note = String(
-        localized: "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot.",
-        comment: "Under the AOT switch on Home. AOT is a name and stays as it is. Says that Android's system libraries run from machine code translated ahead of time, that this is faster, and that the switch is for trouble-shooting.")
+        localized: "Translated system libraries run faster. Turn off only to troubleshoot.",
+        comment: "The note beneath the AOT group on Home, in the footer style. AOT is a name and stays as it is. Says that the translated system libraries (Android's own libraries, run from machine code translated ahead of time) make Android faster, and that the switch is only for trouble-shooting.")
 
     /// The line beneath the AOT group: the note, or while the next start runs
     /// on the JIT engine, which does not use them, why the switch is dimmed.

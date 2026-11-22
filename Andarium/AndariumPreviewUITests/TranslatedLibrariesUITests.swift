@@ -10,8 +10,7 @@ import XCTest
 final class TranslatedLibrariesUITests: XCTestCase {
     private static let identifier = "home-aot-switch"
     private static let title = "AOT"
-    private static let note =
-        "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot."
+    private static let note = "Translated system libraries run faster. Turn off only to troubleshoot."
     private static let jitNote = "Not used while JIT is on."
 
     override func setUp() {

@@ -246,7 +246,7 @@ struct TranslatedLibrariesRowTests {
         // that uses them, and the switch works.
         model.jitOn = false
         #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
-        let note = "AOT, Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot."
+        let note = "AOT, Translated system libraries run faster. Turn off only to troubleshoot."
         let working = await aotRow(in: controller.view, expecting: note)
         #expect(Set(working.compactMap(\.accessibilityLabel)) == [note], "\(working.map(\.accessibilityLabel))")
         #expect(working.allSatisfy { ($0.accessibilityHint ?? "").isEmpty }, "the note is also a hint")
@@ -352,8 +352,7 @@ struct TranslatedLibrariesRowTests {
     @Test func theLineUnderTheTitleIsTheNoteOrTheReasonItIsNotUsed() {
         #expect(TranslatedLibrariesWords.title == "AOT")
         #expect(
-            TranslatedLibrariesWords.note
-                == "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot.")
+            TranslatedLibrariesWords.note == "Translated system libraries run faster. Turn off only to troubleshoot.")
         #expect(TranslatedLibrariesWords.notUsedWithJit == "Not used while JIT is on.")
     }
 
