@@ -302,6 +302,30 @@ struct SnapshotsRow: View {
     }
 }
 
+/// Whether the next start of Android asks for the 120 Hz display
+/// (`AppModel.highRefreshOn`, kept for the install, off at first). It is read
+/// when Android starts and never during a run, so it is on Home, which shows
+/// only while no guest runs; the row is drawn only where the screen can show
+/// it (`AppModel.highRefreshOffered`), in Performance (`HomePerformanceSection`).
+struct HighRefreshRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        OptionRow(
+            title: String(localized: "120 Hz"), symbol: "speedometer",
+            detail: String(localized: "Smoother motion, more battery use.")
+        ) {
+            Toggle("120 Hz", isOn: Binding(
+                get: { model.highRefreshOn },
+                set: { model.setHighRefresh($0) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("home-high-refresh-switch")
+        }
+        .id("high-refresh")
+    }
+}
+
 // MARK: Capabilities
 
 /// What the guest may use of this device: the location, the microphone and the
@@ -524,30 +548,48 @@ extension View {
     func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
 }
 
-// MARK: JIT
+// MARK: Performance
+
+/// Performance: what the guest runs with, in one section. "120 Hz" is drawn
+/// where the screen can show it (`AppModel.highRefreshOffered`) and JIT where a
+/// build can have it (`AppModel.jitAvailable`); the section is drawn when at
+/// least one of them is, and neither draws it at all. JIT is the row next to
+/// the note beneath the panel, which says what JIT does at the next start
+/// (`JitStatus.footer`); with no JIT row there is no note.
+struct HomePerformanceSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.guest != nil, model.highRefreshOffered || model.jitAvailable {
+            HomeSection(title: "Performance") {
+                if model.highRefreshOffered {
+                    HighRefreshRow()
+                    if model.jitAvailable { RowDivider() }
+                }
+                if model.jitAvailable { JitRow() }
+            } footer: {
+                if model.jitAvailable { SectionNote(model.jitStatus.footer) }
+            }
+            .id("performance")
+        }
+    }
+}
 
 /// Whether the guest runs on the JIT engine, which a debugger the person
 /// attached (StikDebug) makes possible, and what the next start can do about
 /// it. It applies when the guest next starts.
-struct JitSection: View {
+struct JitRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.jitAvailable, model.guest != nil {
-            HomeSection(verbatim: "JIT") {
-                OptionRow(title: "JIT", symbol: "bolt.fill") {
-                    Toggle(isOn: Binding(
-                        get: { model.jitOn },
-                        set: { model.setJit($0) }
-                    )) { Text(verbatim: "JIT") }
-                    .labelsHidden()
-                }
-            } footer: {
-                SectionNote(model.jitStatus.footer)
-            }
-            .id("jit")
-            .task { model.refreshJit() }
+        OptionRow(title: "JIT", symbol: "bolt.fill") {
+            Toggle(isOn: Binding(
+                get: { model.jitOn },
+                set: { model.setJit($0) }
+            )) { Text(verbatim: "JIT") }
+            .labelsHidden()
         }
+        .task { model.refreshJit() }
     }
 }
 

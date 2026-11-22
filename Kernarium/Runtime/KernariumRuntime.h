@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 43U
+#define KERNARIUM_RUNTIME_API_VERSION 44U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -72,6 +72,16 @@ enum {
      * orientation that navigation applications take their heading from;
      * without the bit it lists none and declares none. */
     KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS = 1u << 2,
+    /* The application asks for a 120 Hz display (runtime API 44). The runtime
+     * decides once at boot, against the boot view's own screen (at least 100
+     * frames a second) and the boot size (the EDID must carry the 120 Hz
+     * timing), and on a Mac or Vision Pro always refuses. Granted, it
+     * advertises one 120 Hz mode in place of the 60 Hz one and paces its
+     * presents to the guest's rate, and the guest then runs the 120 Hz
+     * configuration of Android's frame scheduler; refused, or without the bit,
+     * the display and the guest are what they have always been. The
+     * statistics' display_refresh_hz says what the run was granted. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH = 1u << 3,
 };
 
 /* What the camera does for an Android guest this run (runtime API 37), the
@@ -569,6 +579,14 @@ typedef struct kernarium_runtime_statistics {
      * there is no budget: no GPU yet, or a runtime that gives its guest none. */
     uint64_t gpu_memory_budget_bytes;
     uint64_t gpu_memory_used_bytes;
+    /* The refresh rate the host granted the run's display (runtime API 44):
+     * 120 when the run was given the 120 Hz mode, 60 for the 60 Hz display, and
+     * 0 while there is no display. It is decided once, before the guest boots
+     * (ANDROID_HOST_HIGH_REFRESH), and the guest's own mode follows it only
+     * while a display size can state it. The application learns from it
+     * whether a run has the 120 Hz display, whatever it asked. */
+    uint32_t display_refresh_hz;
+    uint32_t reserved;
 } kernarium_runtime_statistics;
 /* Fills `statistics` (the caller sets struct_size) with the running guest's
  * host-side figures. Returns 0, -ENODEV with no guest running (before its

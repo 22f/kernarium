@@ -21,6 +21,8 @@
 	<key>UpdateSourcePath</key>
 	<string>$(UPDATE_SOURCE_PATH)</string>
 #endif
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>GCSupportedGameControllers</key>
 	<array>
 		<dict>

@@ -23,6 +23,52 @@ nonisolated enum ThermalSource {
     }
 }
 
+/// Gives iOS's Low Power Mode to its reader the way `ThermalMonitor` gives the
+/// thermal state: now, on every change the system announces, and on `refresh`.
+@MainActor
+final class LowPowerMonitor {
+    private let read: @MainActor () -> Bool
+    private let deliver: @MainActor (Bool) -> Void
+    private let center: NotificationCenter
+    private var observer: NSObjectProtocol?
+
+    init(
+        center: NotificationCenter = .default,
+        read: @escaping @MainActor () -> Bool = { ProcessInfo.processInfo.isLowPowerModeEnabled },
+        deliver: @escaping @MainActor (Bool) -> Void
+    ) {
+        self.center = center
+        self.read = read
+        self.deliver = deliver
+    }
+
+    deinit {
+        if let observer { center.removeObserver(observer) }
+    }
+
+    func start() {
+        if observer == nil {
+            observer = center.addObserver(
+                forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        }
+        refresh()
+    }
+
+    func refresh() {
+        deliver(read())
+    }
+
+    func stop() {
+        if let observer { center.removeObserver(observer) }
+        observer = nil
+        // A run that has ended holds nothing.
+        deliver(false)
+    }
+}
+
 /// Gives the thermal state to its reader: now, on every change the system
 /// announces, and whenever `refresh` is called (the application returns to the
 /// foreground, where a change may have gone unseen). The guest runs only in
