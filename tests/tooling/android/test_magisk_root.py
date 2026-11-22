@@ -911,6 +911,26 @@ class PatcherTests(unittest.TestCase):
         self.assertRegex(relative.stderr, "MAGISK_BOOT_LOG_DIR must be an absolute")
         self.assertFalse(self.output.exists())
 
+    def test_the_script_is_told_it_runs_from_a_booted_system(self) -> None:
+        # util_functions.sh decides from `ps | grep zygote` whether it runs from a booted
+        # system, and a builder has no zygote: the script then writes its messages to a
+        # recovery's output descriptor, which is not there, and its abort unmounts system
+        # directories. Said as BOOTMODE=true, the messages go to the output the log keeps,
+        # and an abort only exits. A caller's own BOOTMODE is not passed on.
+        shown = patch_script().replace(b"./magiskboot unpack", b'echo "BOOTMODE=$BOOTMODE"\n./magiskboot unpack')
+        apk = self.fixture.apk(script=shown)
+        kept = self.directory / "kept-bootmode"
+        shutil.rmtree(self.output, ignore_errors=True)
+        result = subprocess.run(
+            [sys.executable, "-B", str(TOOLS / "magisk-boot.py"), "patch", "--magisk-apk", str(apk),
+             "--disk", str(self.fixture.disk), "--layout", str(self.fixture.layout),
+             "--output-dir", str(self.output), "--pin", str(self.fixture.pin(apk))],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
+            env={**os.environ, "MAGISK_BOOT_LOG_DIR": str(kept), "BOOTMODE": "false"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for run in ("run1", "run2"):
+            self.assertIn("BOOTMODE=true\n", (kept / f"{run}-boot_patch.sh.log").read_text())
+
     def test_runs_that_differ_say_where_and_keep_both_images(self) -> None:
         # The two runs of the patcher must agree. When they do not, the refusal names
         # the first byte that differs and both images are kept for a comparison.

@@ -183,6 +183,10 @@ def patch_in(archive, stock: bytes, preinit: str, work: Path, keep: Keeper | Non
         "PATH": TOOL_PATH,
         "HOME": str(work),
         "LC_ALL": "C",
+        # util_functions.sh looks for a zygote to tell a booted system from a recovery:
+        # on a builder it would take this for a recovery, write its messages to an output
+        # descriptor that is not there, and unmount system directories when it aborts.
+        "BOOTMODE": "true",
         **dict(magisk_image.PATCH_FLAGS),
         "PREINITDEVICE": preinit,
     }
