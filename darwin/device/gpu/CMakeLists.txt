@@ -100,6 +100,7 @@ set(_uml_gpu_display_sources
     metal_presentation.mm
     metal_scanout_shader.mm
     native_display_common.cpp
+    present_pacer.cpp
     scanout_framebuffer.cpp)
 if(UML_TARGET_MACOS)
     list(APPEND _uml_gpu_display_sources

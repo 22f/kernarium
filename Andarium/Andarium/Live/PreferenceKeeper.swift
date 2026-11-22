@@ -4,9 +4,9 @@ import AndariumCore
 import Foundation
 import Observation
 
-/// Keeps what the person sets across launches: the display options chosen on
-/// Home, Settings' "Show on screen", "Use the pointer as touch" and "When hot"
-/// and Home's JIT row. Each is written when it changes. A
+/// Keeps what the person sets across launches: Home's "120 Hz" and JIT rows,
+/// the display options chosen on Home, and Settings' "Show on screen", "Use
+/// the pointer as touch" and "When hot". Each is written when it changes. A
 /// value the launch decided for its own run is not written, so a harness
 /// launch never replaces what the person stored (`AppModel.displayOptionsToKeep`,
 /// `showStatsToKeep`).
@@ -33,6 +33,7 @@ final class PreferenceKeeper {
         if let on = model.showStatsToKeep { StatsPreference(defaults: defaults).keep(on) }
         if let on = model.pointerAsTouchToKeep { PointerPreference(defaults: defaults).keep(on) }
         if let on = model.heatLimitToKeep { HeatLimitPreference(defaults: defaults).keep(on) }
+        if let on = model.highRefreshToKeep { HighRefreshPreference(defaults: defaults).keep(on) }
         if let on = model.jitToKeep { JitPreference(defaults: defaults).keep(on) }
     }
 
@@ -40,6 +41,7 @@ final class PreferenceKeeper {
         guard let model else { return }
         withObservationTracking {
             _ = (model.displayOptionsToKeep, model.showStatsToKeep, model.pointerAsTouchToKeep, model.heatLimitToKeep)
+            _ = model.highRefreshToKeep
             _ = model.jitToKeep
         } onChange: { [weak self] in
             // The model belongs to the main actor, so the change begins there;

@@ -1108,6 +1108,29 @@
         }
       }
     },
+    "120 Hz" : {
+      "comment" : "The switch in Home's Performance section, above JIT, on a screen that can show more than 60 frames a second: the display Android gets is 120 Hz. The unit is kept by every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "120 Hz"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "120 Hz"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "120 Hz"
+          }
+        }
+      }
+    },
     "A file with that name is already there." : {
       "localizations" : {
         "ja" : {
@@ -8106,7 +8129,7 @@
       }
     },
     "Performance" : {
-      "comment" : "The header of the section of a running session's Settings after Stats. It holds one row, When hot, which decides whether Android is told that the device is hot and so limits the frame rate.",
+      "comment" : "The header of two sections. In Home it holds the 120 Hz and JIT rows. In a running session's Settings, after Stats, it holds one row, When hot, which decides whether Android is told that the device is hot and so limits the frame rate.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -9503,6 +9526,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "略過"
+          }
+        }
+      }
+    },
+    "Smoother motion, more battery use." : {
+      "comment" : "The footnote of the 120 Hz row in Home's Performance section: what it does and what it costs, in one short line. Home shows only while Android is stopped, so the row says nothing of a restart.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "より滑らかな表示。バッテリー消費は増えます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "画面更流畅，更耗电。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "畫面更流暢，更耗電。"
           }
         }
       }
