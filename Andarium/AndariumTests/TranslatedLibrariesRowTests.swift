@@ -282,6 +282,8 @@ struct TranslatedLibrariesRowTests {
         let aotRow = try #require(rows.first { ($0.accessibilityLabel ?? "").hasPrefix("AOT, ") })
         #expect(refreshRow.accessibilityUserInputLabels == ["120 Hz"], "\(String(describing: refreshRow.accessibilityUserInputLabels))")
         #expect(aotRow.accessibilityUserInputLabels == ["AOT"], "\(String(describing: aotRow.accessibilityUserInputLabels))")
+        // With the 120 Hz group there, its note is drawn (a loose line while VoiceOver is off).
+        #expect(all.contains(HighRefreshWords.note), "\(all)")
         let header = try #require(all.firstIndex(of: "Performance"), "\(all)")
         let refresh = try #require(all.firstIndex { $0.hasSuffix(", 120 Hz") }, "\(all)")
         let aot = try #require(all.firstIndex { $0.hasPrefix("AOT, ") }, "\(all)")
@@ -291,6 +293,17 @@ struct TranslatedLibrariesRowTests {
         // The three switches are in three panels: more than a row apart.
         let frames = switches(in: controller.view).map { $0.convert($0.bounds, to: controller.view) }
         #expect(frames[1].minY - frames[0].maxY > 40 && frames[2].minY - frames[1].maxY > 40, "\(frames)")
+    }
+
+    @Test func onASixtyHertzScreenThereIsNoHundredAndTwentyHertzGroupOrNote() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (model, _) = fixture(carried: true)
+        let controller = try await hosted(model, switches: 2, in: lease)
+        #expect(await eventually { labels(in: controller.view).contains { $0.hasPrefix("AOT, ") } })
+        let all = labels(in: controller.view)
+        #expect(!all.contains(HighRefreshWords.note), "the 120 Hz note is there on a 60 Hz screen: \(all)")
+        #expect(!all.contains { $0.contains("120 Hz") }, "the 120 Hz group is there on a 60 Hz screen: \(all)")
     }
 
     @Test func theReadyNoteIsDrawnOnlyWhileJitIsOn() async throws {
