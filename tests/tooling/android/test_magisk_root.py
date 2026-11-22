@@ -933,6 +933,30 @@ class PatcherTests(unittest.TestCase):
         for run in ("run1", "run2"):
             self.assertIn("BOOTMODE=true\n", (kept / f"{run}-boot_patch.sh.log").read_text())
 
+    def test_a_log_file_is_never_opened_through_a_link(self) -> None:
+        # The log directory is the caller's, and a link in it must not carry a write to
+        # another file: the logs are opened without following one, so a run that finds a
+        # link where a log goes fails (logging on only) and changes nothing the link names.
+        # A log directory that is itself a link is refused first.
+        apk = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(apk)
+        victim = self.directory / "victim.txt"
+        victim.write_text("untouched\n")
+        kept = self.directory / "kept-linked"
+        kept.mkdir()
+        (kept / "run1-boot_patch.sh.log").symlink_to(victim)
+        refused = self.run_with_log_directory(apk, pin, kept)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(victim.read_text(), "untouched\n")
+        self.assertFalse(self.output.exists())
+        directory_link = self.directory / "kept-link-to-a-directory"
+        directory_link.symlink_to(self.directory)
+        refused = self.run_with_log_directory(apk, pin, directory_link)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertRegex(refused.stderr, "MAGISK_BOOT_LOG_DIR must be a real directory")
+        self.assertEqual(victim.read_text(), "untouched\n")
+        self.assertFalse(any(path.suffix == ".log" for path in self.directory.iterdir()))
+
     def test_runs_that_differ_say_where_and_keep_both_images(self) -> None:
         # The two runs of the patcher must agree. When they do not, the refusal names
         # the first byte that differs and both images are kept for a comparison.
