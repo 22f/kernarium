@@ -177,6 +177,24 @@ struct MagiskAppOpeningTests {
         #expect(!MagiskApp.hasFocus(output(stale)), "a stale line alone names no focus")
     }
 
+    @Test func theAppsFieldMustBeInsideTheCurrentRecordsOwnValue() {
+        // One line: Home is current, and the exact token belongs to the previous task after the current value closed.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #1 type=home} previous_topDisplayFocusedRootTask=Task{2 #9 A=10126:com.topjohnwu.magisk}\n")))
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #1 type=home}\tA=10126:com.topjohnwu.magisk\n")))
+        #expect(!MagiskApp.hasFocus(output("  topDisplayFocusedRootTask=Task{1 #1 type=home} A=10126:com.topjohnwu.magisk}\n")))
+        // The same line the other way round: the app's own value closed first, a stale field follows.
+        #expect(MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 #9 type=standard A=10126:com.topjohnwu.magisk} previous_topDisplayFocusedRootTask=Task{1 #1 type=home}\n")))
+        // A nested brace does not end the value early.
+        #expect(MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 #9 x={1} type=standard A=10126:com.topjohnwu.magisk}\n")))
+        // A value that never closes counts only when no other current key follows in it.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #1 type=home previous_topDisplayFocusedRootTask=Task{2 #9 A=10126:com.topjohnwu.magisk\n")))
+        // The record is a Task value.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=A=10126:com.topjohnwu.magisk\n")))
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask= Task{2 #9 A=10126:com.topjohnwu.magisk}\n")))
+        // Leading spaces and tabs, as the dump indents.
+        #expect(MagiskApp.hasFocus(output("\t  \ttopDisplayFocusedRootTask=Task{2 #9 type=standard\tA=10126:com.topjohnwu.magisk}\n")))
+    }
+
     @Test func aQueryThatDidNotSucceedIsNoFocus() {
         #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: 1)))
         #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: 255)))

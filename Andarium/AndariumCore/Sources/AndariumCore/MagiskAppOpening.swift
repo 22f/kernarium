@@ -161,9 +161,11 @@ extension MagiskApp {
     /// only when the query succeeded and exactly one line is the current
     /// record, `topDisplayFocusedRootTask=Task{... A=10126:com.topjohnwu.magisk}`
     /// (the key begins the line, never the tail of another key such as
-    /// `previous_topDisplayFocusedRootTask`), and that record holds the exact
-    /// `A=<uid>:<package>` field. Anything else, a second current record
-    /// included, is not focus.
+    /// `previous_topDisplayFocusedRootTask`), and the exact `A=<uid>:<package>`
+    /// field is inside that record's own `Task{...}` value, up to its closing
+    /// brace: whatever follows on the line belongs to other fields. A value
+    /// that never closes counts only when no other current key follows in it.
+    /// Anything else, a second current record included, is not focus.
     static func hasFocus(_ output: GuestShellOutput) -> Bool {
         guard output.exitCode == 0 else { return false }
         let key = "topDisplayFocusedRootTask="
@@ -171,10 +173,29 @@ extension MagiskApp {
             let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
             return trimmed.hasPrefix(key) ? trimmed.dropFirst(key.count) : nil
         }
-        guard records.count == 1, let record = records.first else { return false }
-        return record.split(whereSeparator: { $0 == " " || $0 == "\t" }).contains { token in
-            var field = token
-            if field.last == "}" { field = field.dropLast() }
+        guard records.count == 1, let record = records.first, record.hasPrefix("Task{") else { return false }
+        let body = record.dropFirst("Task{".count)
+        var depth = 1
+        var closing: Substring.Index?
+        for index in body.indices {
+            if body[index] == "{" {
+                depth += 1
+            } else if body[index] == "}" {
+                depth -= 1
+                if depth == 0 {
+                    closing = index
+                    break
+                }
+            }
+        }
+        let value: Substring
+        if let closing {
+            value = body[..<closing]
+        } else {
+            guard !body.contains(key) else { return false }
+            value = body
+        }
+        return value.split(whereSeparator: { $0 == " " || $0 == "\t" }).contains { field in
             guard field.hasPrefix("A=") else { return false }
             let rest = field.dropFirst(2)
             guard let colon = rest.firstIndex(of: ":") else { return false }

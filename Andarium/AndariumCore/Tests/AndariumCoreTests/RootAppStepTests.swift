@@ -26,6 +26,17 @@ struct RootAppStepTests {
     /// What the opening does when it has to try again: no waits are made.
     private let noWait: @Sendable (Duration) async -> Void = { _ in }
 
+    /// Whether `entered` was bumped within `seconds` of real time: a step that
+    /// never reaches the command fails its test promptly instead of waiting for ever.
+    private static func waitForEntry(_ entered: RootCounter, seconds: Double = 10) async -> Bool {
+        let end = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < end {
+            if await entered.value > 0 { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return await entered.value > 0
+    }
+
     private func shell(_ probe: String, exit: Int = 0) -> RootScriptedShell {
         RootScriptedShell { command in
             switch command {
@@ -253,13 +264,14 @@ struct RootAppStepTests {
             await RootAppStep.run(
                 shell: hungStart, release: release, state: state, installing: {}, install: {}, clocking: clocking)
         }
-        while await entered.value == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        let reached = await Self.waitForEntry(entered)
+        if !reached { Issue.record("the hung start was never entered") }
         clock.advance(to: RootAppStep.limit)
         let started = ContinuousClock.now
         let outcome = await task.value
         guard case .installed(let learned) = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
-        let reached = await entered.value
-        #expect(reached == 1, "the hung start was entered once")
+        let enteredTimes = await entered.value
+        #expect(enteredTimes == 1, "the hung start was entered once")
         #expect(learned.appInstall?.opened == false, "an open the bound ended is not an open")
         #expect(ContinuousClock.now - started < .seconds(20), "the open waited past the bound")
     }
@@ -273,7 +285,8 @@ struct RootAppStepTests {
         guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
         #expect(state.appInstall?.opened == true)
         let deadline = clock.instant(at: .seconds(45))
-        let asked = clock.requested
+        // Both timer tasks register their wait when they first run, which may be after the step returned.
+        let asked = await clock.requested(atLeast: 2)
         #expect(asked.count == 2, "one timer for the check and the install, one for the opening")
         #expect(asked.allSatisfy { $0 == deadline }, "a timer was set for another instant than the step's deadline")
     }
@@ -305,7 +318,12 @@ struct RootAppStepTests {
             await finished.bump()
             return outcome
         }
-        while await entered.value == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        guard await Self.waitForEntry(entered) else {
+            Issue.record("the hung start was never entered")
+            clock.advance(to: .seconds(45))
+            _ = await task.value
+            return
+        }
         clock.advance(to: .seconds(44))
         try? await Task.sleep(for: .milliseconds(150))
         let early = await finished.value
@@ -424,8 +442,15 @@ final class ScriptedClock: @unchecked Sendable {
 
     init(tick: Duration = .zero) { self.tick = tick }
 
-    /// The instants every wait was set for.
-    var requested: [ContinuousClock.Instant] { lock.withLock { asked } }
+    /// The instants every wait was set for, once `count` waits have registered
+    /// or `seconds` of real time have passed.
+    func requested(atLeast count: Int, seconds: Double = 5) async -> [ContinuousClock.Instant] {
+        let end = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < end, lock.withLock({ asked.count }) < count {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return lock.withLock { asked }
+    }
 
     func instant(at time: Duration) -> ContinuousClock.Instant { base.advanced(by: time) }
 
@@ -458,7 +483,8 @@ final class ScriptedClock: @unchecked Sendable {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 lock.lock()
-                if deadline <= base.advanced(by: offset) {
+                // A cancel that came before the waiter was registered finds nobody to end, so it is seen here.
+                if Task.isCancelled || deadline <= base.advanced(by: offset) {
                     lock.unlock()
                     continuation.resume()
                 } else {
