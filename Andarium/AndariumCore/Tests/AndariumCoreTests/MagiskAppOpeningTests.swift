@@ -195,6 +195,23 @@ struct MagiskAppOpeningTests {
         #expect(MagiskApp.hasFocus(output("\t  \ttopDisplayFocusedRootTask=Task{2 #9 type=standard\tA=10126:com.topjohnwu.magisk}\n")))
     }
 
+    @Test func onlyAFieldAtTheRecordsOwnDepthCountsAndNeverOneInsideANestedValue() {
+        // The launcher is current; the app's token sits in a nested value that belongs to another task.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #1 type=home A=1000:com.android.launcher3 previous=Task{2 #9 A=10126:com.topjohnwu.magisk U=0}}\n")))
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #1 type=home previous=Task{2 #9 A=10126:com.topjohnwu.magisk}}\n")))
+        // The real line a guest printed for the app in front.
+        #expect(MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{a38ded #9 type=standard A=10126:com.topjohnwu.magisk}\n")))
+        // A nested value first, then the app's own token at the record's depth.
+        #expect(MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 previous=Task{1 #1 type=home A=1000:com.android.launcher3} #9 type=standard A=10126:com.topjohnwu.magisk}\n")))
+        // A token that touches a nested value is no field of this record.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 #9 A=10126:com.topjohnwu.magisk{x}}\n")))
+        // Two fields at the record's depth are ambiguous whatever they name, so the app is not taken to be in front.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 #9 A=1000:com.android.launcher3 A=10126:com.topjohnwu.magisk}\n")))
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 #9 A=10126:com.topjohnwu.magisk A=10126:com.topjohnwu.magisk}\n")))
+        // A field of another package at the record's depth and the app's only inside a nested value.
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{2 #9 A=1000:com.android.launcher3 x=Task{3 A=10126:com.topjohnwu.magisk}}\n")))
+    }
+
     @Test func aQueryThatDidNotSucceedIsNoFocus() {
         #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: 1)))
         #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: 255)))

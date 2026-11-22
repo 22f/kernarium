@@ -161,11 +161,14 @@ extension MagiskApp {
     /// only when the query succeeded and exactly one line is the current
     /// record, `topDisplayFocusedRootTask=Task{... A=10126:com.topjohnwu.magisk}`
     /// (the key begins the line, never the tail of another key such as
-    /// `previous_topDisplayFocusedRootTask`), and the exact `A=<uid>:<package>`
-    /// field is inside that record's own `Task{...}` value, up to its closing
-    /// brace: whatever follows on the line belongs to other fields. A value
-    /// that never closes counts only when no other current key follows in it.
-    /// Anything else, a second current record included, is not focus.
+    /// `previous_topDisplayFocusedRootTask`), and the record's own value, up to
+    /// its closing brace, holds exactly one `A=<uid>:<package>` field, at the
+    /// value's own depth, naming the package: what follows the closing brace
+    /// belongs to other fields, and what is inside a nested value belongs to
+    /// another task. Two fields of that kind are ambiguous whatever they
+    /// name. A value that never closes counts only when no other current key
+    /// follows in it. Anything else, a second current record included, is not
+    /// focus.
     static func hasFocus(_ output: GuestShellOutput) -> Bool {
         guard output.exitCode == 0 else { return false }
         let key = "topDisplayFocusedRootTask="
@@ -175,33 +178,31 @@ extension MagiskApp {
         }
         guard records.count == 1, let record = records.first, record.hasPrefix("Task{") else { return false }
         let body = record.dropFirst("Task{".count)
+        // The characters of the value's own depth. A nested value is left out and
+        // leaves `{}` behind, so a token that touches one is no field of this task.
+        var own = ""
         var depth = 1
-        var closing: Substring.Index?
-        for index in body.indices {
-            if body[index] == "{" {
+        for character in body {
+            if character == "{" {
+                if depth == 1 { own += "{}" }
                 depth += 1
-            } else if body[index] == "}" {
+            } else if character == "}" {
                 depth -= 1
-                if depth == 0 {
-                    closing = index
-                    break
-                }
+                if depth == 0 { break }
+            } else if depth == 1 {
+                own.append(character)
             }
         }
-        let value: Substring
-        if let closing {
-            value = body[..<closing]
-        } else {
+        if depth > 0 {
+            // The value never closed.
             guard !body.contains(key) else { return false }
-            value = body
         }
-        return value.split(whereSeparator: { $0 == " " || $0 == "\t" }).contains { field in
-            guard field.hasPrefix("A=") else { return false }
-            let rest = field.dropFirst(2)
-            guard let colon = rest.firstIndex(of: ":") else { return false }
-            let uid = rest[..<colon]
-            return !uid.isEmpty && uid.allSatisfy(\.isASCII) && uid.allSatisfy(\.isNumber)
-                && rest[rest.index(after: colon)...] == package
-        }
+        let fields = own.split(whereSeparator: { $0 == " " || $0 == "\t" }).filter { $0.hasPrefix("A=") }
+        guard fields.count == 1, let field = fields.first else { return false }
+        let rest = field.dropFirst(2)
+        guard let colon = rest.firstIndex(of: ":") else { return false }
+        let uid = rest[..<colon]
+        return !uid.isEmpty && uid.allSatisfy(\.isASCII) && uid.allSatisfy(\.isNumber)
+            && rest[rest.index(after: colon)...] == package
     }
 }
