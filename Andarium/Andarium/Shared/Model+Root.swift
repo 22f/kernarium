@@ -119,12 +119,16 @@ extension AppModel {
         guest?.root.attention = nil
     }
 
-    /// The paused card's "Try with root again".
+    /// The paused card's "Try with root again": the pause ends and Android
+    /// starts with root, through the Start button's path (`start`), with its
+    /// admission and its refusals. A start that cannot begin leaves the pause
+    /// ended and says what Start would say.
     func tryRootAgain() {
         guard guest != nil else { return }
         guest?.root.tryAgain()
         rootPeriod &+= 1
         persistNow()
+        start(.normal)
     }
 
     /// The cards' close button, for the two that only inform.

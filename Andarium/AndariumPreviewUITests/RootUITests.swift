@@ -135,18 +135,14 @@ final class RootUITests: XCTestCase {
     }
 
     @MainActor
-    func testThePausedCardOffersTryAgainAndTurnOffAndTryAgainEndsThePause() {
+    func testThePausedCardOffersTryAgainAndTurnOffAndTryAgainStartsAndroid() {
         let app = launch("home-root-notice-paused")
         XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForExistence(timeout: 20), "no paused card")
         XCTAssertTrue(app.buttons["Turn off root"].firstMatch.exists)
         app.buttons["Try with root again"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForNonExistence(timeout: 5), "the card stayed")
-        // Root stays on, and nothing says paused any more.
-        let toggle = rootSwitch(app)
-        app.swipeUp()
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
-        XCTAssertEqual(toggle.value as? String, "1")
-        XCTAssertFalse(app.staticTexts["Paused after a failed start"].exists)
+        // The pause ends and the start leaves Home for the boot screen, as Start does.
+        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForNonExistence(timeout: 10), "the card stayed")
+        XCTAssertTrue(app.staticTexts["Startup"].firstMatch.waitForExistence(timeout: 20), "Android did not start")
     }
 
     /// The card shows its text and both buttons as one block; the second

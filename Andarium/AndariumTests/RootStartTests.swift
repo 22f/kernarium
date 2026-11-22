@@ -410,14 +410,16 @@ final class RootStartTests {
         #expect(model.guest?.root.attention == nil)
     }
 
-    @Test func tryAgainEndsThePauseAndStartWithoutRootBootsStockOnce() {
+    @Test func tryAgainEndsThePauseAndStartsAndroidWithRoot() {
         let (model, driver) = model(rootOn: true)
         model.guest?.root.attention = .failedStart
         model.tryRootAgain()
         #expect(model.guest?.root.attention == nil)
         #expect(model.guest?.root.on == true)
-        model.start(.normal)
+        // The same start as the Start button's: one run, with the Magisk ramdisk.
+        #expect(driver.begun.count == 1)
         #expect(driver.begunGuests.last?.root.startRooted == true)
+        #expect(driver.savedWhenBegun.last.flatMap { $0 }?.root.attention == nil)
 
         let (stopped, stoppedDriver) = self.model(rootOn: true)
         stopped.guest?.root.attention = .stoppedStart
@@ -425,6 +427,27 @@ final class RootStartTests {
         #expect(stoppedDriver.begunGuests.last?.root.startRooted == false)
         #expect(stopped.guest?.root.attention == nil)
         #expect(stopped.guest?.root.on == true)
+    }
+
+    @Test func aTryAgainThatCannotBeginAStartStillEndsThePauseAndSaysWhatStartSays() {
+        let (model, driver) = model(rootOn: true)
+        model.guest?.root.attention = .failedStart
+        // Too little room on the device: Start would say so, and so does the card's button.
+        model.host = HostDevice(
+            name: "iPad", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 0)
+        model.tryRootAgain()
+        #expect(model.guest?.root.attention == nil && model.guest?.root.on == true)
+        #expect(driver.begun.isEmpty)
+        #expect(model.startBlocked)
+    }
+
+    @Test func aTryAgainWhoseSettingsCannotBeSavedBeginsWithoutRootAsStartDoes() {
+        let (model, driver) = model(rootOn: true)
+        model.guest?.root.attention = .failedStart
+        driver.saveError = InstanceError.refused("The disk is full.")
+        model.tryRootAgain()
+        #expect(driver.begunGuests.last?.root.startRooted == false)
+        #expect(model.alert?.title == "Settings not saved")
     }
 
     @Test func turnOffRootFromTheCardEndsThePauseAndTheSwitch() {

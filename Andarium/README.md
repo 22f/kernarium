@@ -678,7 +678,8 @@ address space holds, so this is a fallback.
   the boot goes on with root on. A start with root that ends before Android
   boots (a guest panic or exit the previous session's record shows, a restart
   loop, or a Stop by the person) is the fallback's: starts boot without root
-  until the person chooses, and a Home card offers Try with root again and Turn
+  until the person chooses, and a Home card offers Try with root again, which
+  also starts Android with root through the Start button's path, and Turn
   off root (or, after a Stop, Start without root); a panic ends the process, so
   the next launch reads the previous session's record, which names the ramdisk
   of the boot that ended (`SessionRecord.ramdisk`) and how far it got: a boot

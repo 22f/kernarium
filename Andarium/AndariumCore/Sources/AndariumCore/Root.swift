@@ -193,7 +193,8 @@ public struct RootState: Equatable, Codable, Sendable {
         if let install = learned.appInstall { appInstall = install }
     }
 
-    /// "Try with root again": the pause ends and the next start boots Magisk.
+    /// "Try with root again": the pause ends and the start that follows boots
+    /// Magisk (`AppModel.tryRootAgain` makes it at once).
     public mutating func tryAgain() {
         on = true
         attention = nil
