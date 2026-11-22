@@ -519,9 +519,11 @@ final class LiveRuntime: RuntimeDriver {
         if launchWasStopped(generation) { return }
         preparing = false
         model?.preparingDisk = false
-        var extras = StartExtras()
-        extras.jit = await prepareJit(for: run)
+        let jit = await prepareJit(for: run)
         if launchWasStopped(generation) { return }
+        // The row as it stands at this start: the runtime states the release for
+        // the translated libraries or leaves it out.
+        let extras = StartExtras(jit: jit, translatedLibraries: Self.translatedLibrariesStart(of: model, jitInUse: jit))
         guard let view, let geometry else {
             end(startFailure: "the display is not ready")
             return
@@ -583,6 +585,23 @@ final class LiveRuntime: RuntimeDriver {
     /// development build, whether the guest boots on the JIT engine.
     private struct StartExtras: Sendable {
         var jit = false
+        /// What the start does about the translated libraries. It has no
+        /// default, so that a start cannot forget to ask the row.
+        var translatedLibraries: TranslatedLibrariesStart
+    }
+
+    /// What a start does about the translated libraries, from the row as it
+    /// stands; a start with no model (none runs) has no framework to use.
+    static func translatedLibrariesStart(of model: AppModel?, jitInUse: Bool) -> TranslatedLibrariesStart {
+        model?.translatedLibrariesStart(jitInUse: jitInUse)
+            ?? TranslatedLibrariesStart(buildCarries: false, optionOn: true, jitInUse: jitInUse)
+    }
+
+    /// What the boot request says of the translated libraries
+    /// (`android_aot_disabled`): 1 keeps the release out of the launch, where a
+    /// build with the framework has the switch off, and 0 states it.
+    nonisolated static func aotDisabled(for start: TranslatedLibrariesStart) -> UInt32 {
+        start.statesRelease ? 0 : 1
     }
 
     private func launch(
@@ -677,6 +696,14 @@ final class LiveRuntime: RuntimeDriver {
         // it while its own automatic time zone is on.
         let timeZone = GuestTimeZone.current()
         let sessionRecordPath = sessionRecord?.path
+        // What this start chose, beside the runtime's record of the session, for
+        // a bug report to say.
+        if let sessionRecord {
+            StartRecord(
+                translatedLibraries: extras.translatedLibraries.word, processID: Int(getpid()), at: Date())
+                .write(to: sessionRecord.deletingLastPathComponent().appendingPathComponent(BugReportAttachments.startRecord))
+        }
+        print("Andarium: AOT \(extras.translatedLibraries.word.rawValue)")
         // The run occupies its thread for the guest's whole life and the GPU
         // service reaches the main queue while it starts, so it must not be
         // the main thread. It owns a thread outright rather than a place on
@@ -746,6 +773,9 @@ final class LiveRuntime: RuntimeDriver {
                                 // colour data a Bayer still teaches is kept.
                                 request.android_camera_mode = cameraMode
                                 request.android_camera_calibration_path = calibration
+                                // The translated libraries need the release stated to the
+                                // emulator; a person who turned them off keeps it out.
+                                request.android_aot_disabled = aotDisabled(for: extras.translatedLibraries)
                                 // The JIT engine, once its memory is prepared; gadgets otherwise.
                                 request.use_jit = extras.jit ? 1 : 0
                                 return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }

@@ -1275,8 +1275,9 @@ bool select(::uml::cpu::AotSelection selection,
 	/* The decision of this run, taken before any executor of it exists (the
 	 * executors read it once, when they are made, so a run's own executors
 	 * all agree). A run that restarts in the process decides again: one the
-	 * blob no longer fits is off, never entering it. A process that ran
-	 * without the component does not turn it on later: a launch under
+	 * blob no longer fits is off, never entering it. A session that ran
+	 * without the component does not turn it on later (end_session() starts
+	 * the next one afresh): a launch under
 	 * `automatic` then runs on the engine, which is always correct, and one
 	 * that insists on it does not start. */
 	auto state = g_state.load(std::memory_order_relaxed);
@@ -1299,6 +1300,21 @@ bool select(::uml::cpu::AotSelection selection,
 			    std::memory_order_relaxed))
 			return true;
 	}
+}
+
+void end_session() noexcept
+{
+	g_state.store(-1, std::memory_order_relaxed);
+}
+
+int choice() noexcept
+{
+	return g_state.load(std::memory_order_relaxed);
+}
+
+void restore_choice(int choice) noexcept
+{
+	g_state.store(choice, std::memory_order_relaxed);
 }
 
 void note_refusal(Refusal reason) noexcept

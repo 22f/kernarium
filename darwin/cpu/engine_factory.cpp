@@ -64,6 +64,21 @@ bool select_aot(AotSelection selection, const AotRelease *release) noexcept
 	return arm64::detail::select_aot(selection, release);
 }
 
+void end_aot_session() noexcept
+{
+	arm64::detail::end_aot_session();
+}
+
+int aot_choice() noexcept
+{
+	return arm64::detail::aot_choice();
+}
+
+void restore_aot_choice(int choice) noexcept
+{
+	arm64::detail::restore_aot_choice(choice);
+}
+
 bool set_translation_cache_budget(std::size_t total_bytes,
 	unsigned executors, std::size_t per_executor_bytes) noexcept
 {

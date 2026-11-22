@@ -384,7 +384,10 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest (the high-refresh bit included). The 120 Hz
+request carries to an Android guest (the high-refresh bit included), and
+`kernarium-aot-release` (unit) the boot request's word that keeps the
+ahead-of-time component out of a launch and the release argument a start then
+gives the emulator. The 120 Hz
 display is covered without a device: `gpu-device-command-atomicity` has the
 EDID's 60 Hz bytes unchanged, the 120 Hz timing only where its pixel clock
 fits and the mode's rate told to the display (a size beyond 60 Hz included);
@@ -473,6 +476,13 @@ and the keys the build writes (`UPDATE_SOURCE_HOST=example.com` and
 `UpdateNoticeUITests` of `AndariumPreviewUITests` tap the same screens in the
 preview, where a made-up version file is read by the real rules.
 `HomePlainInfoTests` checks that Home's toolbar holds the plain Info button.
+`TranslatedLibrariesRowTests` and `TranslatedLibrariesUITests` (of
+`AndariumPreviewUITests`) check Home's AOT row: there only in a build that
+carries the translated-code framework, below JIT in the same section, on by
+default and the person's choice, dimmed with its reason while the next start
+runs on JIT, and what a start states to the runtime; `TranslatedLibrariesTests`
+(`AndariumCoreTests`) the preference, the start decision and the start record
+the bug report carries.
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest
 service's tests read too, and run the exchange over socket pairs and a scripted
@@ -805,8 +815,12 @@ blocker in every one of them.
   on; another release ID, manifest digest or system-partition digest is off
   under `auto` and fails under `on`; a launch that states no release has no
   component and no tables; a restart in the process decides again, so a
-  release the blob no longer fits runs on the engine), each case in a process
-  of its own;
+  release the blob no longer fits runs on the engine; a session that ran
+  without the component keeps it off until it ends, and the next session, in
+  the same process, chooses afresh, for the release it states), each case in a
+  process of its own; `runtime-release-reselects-aot` (a build with the
+  component) boots the test kernel, powers it off, releases its guest, and
+  checks that the next session can take the component;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
   `aot-archive-switch` (tooling) selects the accepted artifact for each Apple

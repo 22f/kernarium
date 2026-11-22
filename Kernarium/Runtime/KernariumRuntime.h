@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 44U
+#define KERNARIUM_RUNTIME_API_VERSION 45U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -193,7 +193,17 @@ enum {
  * contain either value; what the guest itself reports (an Android bug report,
  * the kernel's echo of its command line) carries them as on any Android device.
  * The runtime reads them only from a request whose struct_size covers them; a
- * Linux guest ignores them. */
+ * Linux guest ignores them.
+ *
+ * android_aot_disabled (runtime API 45) keeps the ahead-of-time component out
+ * of an Android launch: a nonzero value leaves out the release identity that
+ * the runtime states to the emulator, without which the component never runs,
+ * so the guest runs on the execution engine alone. Zero, and a request whose
+ * struct_size does not cover the field, state the release as before, and the
+ * emulator then decides as it always has (the component runs only where the
+ * build has it and the release is the one it was made from). The word is read
+ * at each boot request, and a guest that restarts itself inside a run keeps the
+ * one its run was asked with. A Linux guest ignores it. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -220,6 +230,7 @@ typedef struct kernarium_runtime_boot {
     const char* android_camera_calibration_path;
     const char* android_serial_number;
     const char* android_ethernet_mac;
+    uint32_t android_aot_disabled;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for

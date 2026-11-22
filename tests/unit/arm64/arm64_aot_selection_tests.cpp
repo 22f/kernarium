@@ -6,7 +6,8 @@
  * child answers with its exit status. The component is on by default for the
  * release its blob was made from; the environment turns it off, a launch's
  * own word (--aot=) beats the environment, and no word runs a blob with a
- * release it was not made from. */
+ * release it was not made from. A session's end (the clean power-off whose
+ * guest is released) lets the next session in the process choose again. */
 #include "cpu/aot_selection.hpp"
 #include "cpu/arm64/aot/aot_runtime.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
@@ -290,6 +291,89 @@ int a_late_on_is_refused_after_off()
 	return 0;
 }
 
+/* A process that ran without the component stays off for the rest of that
+ * session, a restart included, but a session ends with Android's clean
+ * power-off and the release of its guest (the loader then reuses the process
+ * for the next start). That end gives the next session its own choice: a
+ * person who turned the component off and then on again gets it at the next
+ * start, in the same process. */
+int a_new_session_after_an_off_start_can_select_the_component()
+{
+	/* The off start: a launch that states no release (the person's choice). */
+	require(aot::select(AotSelection::automatic, nullptr));
+	require(!aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor off;
+	require(!off.aot_selected());
+	/* A restart inside the session decides the same. */
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
+	require(!aot::enabled());
+	require(!aot::select(AotSelection::on, &release));
+	/* The session ends; the next one states the release. */
+	aot::end_session();
+	require(aot::select(AotSelection::automatic, &release));
+	require(aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor on;
+	require(on.aot_selected());
+	return 0;
+}
+
+int a_new_session_after_an_off_start_can_insist_on_the_component()
+{
+	require(aot::select(AotSelection::automatic, nullptr));
+	aot::end_session();
+	const auto release = same_release();
+	require(aot::select(AotSelection::on, &release));
+	require(aot::enabled());
+	return 0;
+}
+
+/* The other way: the component ran, the person turned it off, and the next
+ * session runs on the engine; turned on again, the one after has it. */
+int a_new_session_after_an_on_start_can_be_off_and_on_again()
+{
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
+	require(aot::enabled());
+	aot::end_session();
+	require(aot::select(AotSelection::automatic, nullptr));
+	require(!aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor off;
+	require(!off.aot_selected());
+	aot::end_session();
+	require(aot::select(AotSelection::automatic, &release));
+	require(aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor on;
+	require(on.aot_selected());
+	return 0;
+}
+
+/* A new session takes the component only for the release it was made from,
+ * after an off start as at any boot: the release is validated at every boot,
+ * the session's end only lets the choice be made again. */
+template<AotRelease (*Release)()>
+int a_new_session_after_an_off_start_still_checks_the_release()
+{
+	require(aot::select(AotSelection::automatic, nullptr));
+	aot::end_session();
+	const auto other = Release();
+	require(!aot::select(AotSelection::on, &other));
+	require(aot::select(AotSelection::automatic, &other));
+	require(!aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor mismatched;
+	require(!mismatched.aot_selected());
+	/* That session ran without it, and so stays: a restart does not turn it
+	 * on. The session after it can. */
+	const auto same = same_release();
+	require(aot::select(AotSelection::automatic, &same));
+	require(!aot::enabled());
+	require(!aot::select(AotSelection::on, &same));
+	aot::end_session();
+	require(aot::select(AotSelection::on, &same));
+	require(aot::enabled());
+	return 0;
+}
+
 const Case cases[]{
 	{"blob_names_a_release", nullptr, the_blob_names_a_release},
 	{"same_release_is_on", nullptr, same_release_is_on},
@@ -329,6 +413,20 @@ const Case cases[]{
 	{"restart_that_says_off_runs_on_the_engine", nullptr,
 		a_restart_that_says_off_runs_on_the_engine},
 	{"late_on_after_off", "1", a_late_on_is_refused_after_off},
+	{"new_session_after_off_selects", nullptr,
+		a_new_session_after_an_off_start_can_select_the_component},
+	{"new_session_after_off_insists", nullptr,
+		a_new_session_after_an_off_start_can_insist_on_the_component},
+	{"new_session_after_on_can_be_off_and_on_again", nullptr,
+		a_new_session_after_an_on_start_can_be_off_and_on_again},
+	{"new_session_after_off_checks_other_id", nullptr,
+		a_new_session_after_an_off_start_still_checks_the_release<other_id>},
+	{"new_session_after_off_checks_other_system", nullptr,
+		a_new_session_after_an_off_start_still_checks_the_release<
+			other_system>},
+	{"new_session_after_off_checks_other_manifest", nullptr,
+		a_new_session_after_an_off_start_still_checks_the_release<
+			other_manifest>},
 };
 
 int run_child(const Case &test)

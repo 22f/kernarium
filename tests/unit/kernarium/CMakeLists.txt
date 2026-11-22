@@ -110,6 +110,20 @@ uml_add_unit_test(NAME kernarium-host-features
     COMMAND uml_kernarium_host_features_tests
     LABELS kernarium)
 
+# Whether an Android launch states its release to the emulator, which the
+# ahead-of-time component needs: the boot request's word that keeps it out, and
+# the argument the runtime then gives (or does not give) the emulator.
+add_executable(uml_kernarium_aot_release_tests aot_release_tests.cpp)
+target_link_libraries(uml_kernarium_aot_release_tests PRIVATE UML::Emulator)
+target_include_directories(uml_kernarium_aot_release_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin
+    ${PROJECT_SOURCE_DIR}/darwin/device
+    ${PROJECT_SOURCE_DIR}/darwin/emulator/src)
+uml_add_unit_test(NAME kernarium-aot-release
+    COMMAND uml_kernarium_aot_release_tests
+    LABELS kernarium)
+
 # The installation identity an Android guest is given: the boot request's
 # statements and the file beside the data disk.
 add_executable(uml_kernarium_identity_tests identity_tests.cpp)

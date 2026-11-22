@@ -1109,7 +1109,7 @@
       }
     },
     "120 Hz" : {
-      "comment" : "The switch in Home's Performance section, above JIT, on a screen that can show more than 60 frames a second: the display Android gets is 120 Hz. The unit is kept by every language.",
+      "comment" : "The title of the first group in Home's Performance section, above AOT and JIT, on a screen that can show more than 60 frames a second: the display Android gets is 120 Hz. The unit is kept by every language.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -8129,7 +8129,7 @@
       }
     },
     "Performance" : {
-      "comment" : "The header of two sections. In Home it holds the 120 Hz and JIT rows. In a running session's Settings, after Stats, it holds one row, When hot, which decides whether Android is told that the device is hot and so limits the frame rate.",
+      "comment" : "The header of two sections. In Home it is one heading over a group for each setting, 120 Hz, AOT and JIT, each with its note beneath its panel. In a running session's Settings, after Stats, it holds one row, When hot, which decides whether Android is told that the device is hot and so limits the frame rate.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -9531,7 +9531,7 @@
       }
     },
     "Smoother motion, more battery use." : {
-      "comment" : "The footnote of the 120 Hz row in Home's Performance section: what it does and what it costs, in one short line. Home shows only while Android is stopped, so the row says nothing of a restart.",
+      "comment" : "The note beneath the 120 Hz group in Home's Performance section: what it does and what it costs, in one short line. Home shows only while Android is stopped, so the note says nothing of a restart.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -13205,6 +13205,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "轉譯的系統程式庫"
+          }
+        }
+      }
+    },
+    "Translated system libraries run faster. Turn off only to troubleshoot." : {
+      "comment" : "The note beneath the AOT group on Home, in the footer style. AOT is a name and stays as it is. Says that the translated system libraries (Android's own libraries, run from machine code translated ahead of time) make Android faster, and that the switch is only for trouble-shooting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "変換済みのシステムライブラリで高速化します。問題の調査時のみオフにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "转译后的系统库运行更快。仅在排查问题时关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轉譯後的系統程式庫執行更快。僅在排解問題時關閉。"
           }
         }
       }

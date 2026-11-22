@@ -277,6 +277,49 @@ final class AppModel {
     /// What is kept of Settings' "Show on screen" across launches
     /// (`StatsPreference`); nil where the launch decided it.
     var showStatsToKeep: Bool? { statsDecidedByLaunch ? nil : session.showStats }
+    // AOT (Home's AOT row): Android's system libraries run from the code
+    // translated from them ahead of time. The switch applies to the next start,
+    // and only a build that carries the translated-code framework has it.
+    /// This build carries the translated-code framework (what Acknowledgements
+    /// reads, `Acknowledgements.carries`), so Home shows the row.
+    var translatedLibrariesAvailable = false
+    /// Whether the person wants them. On is the default. Kept for the install
+    /// (`TranslatedLibrariesPreference`).
+    var translatedLibrariesOn = true
+    /// The launch decided it (automation): the value belongs to that run and
+    /// is not kept.
+    var translatedLibrariesDecidedByLaunch = false
+    /// What is kept of the row across launches; nil where the launch decided
+    /// it.
+    var translatedLibrariesToKeep: Bool? { translatedLibrariesDecidedByLaunch ? nil : translatedLibrariesOn }
+    /// The person turns the translated libraries on or off. It changes nothing
+    /// until Android next starts: the choice is read at each start.
+    func setTranslatedLibraries(_ on: Bool) {
+        translatedLibrariesOn = on
+    }
+    /// The note under Performance's panel: what JIT does at the next start
+    /// (`JitStatus.footer`). The ready sentence shows only while the JIT row is
+    /// on; the sentences that say how to enable it, that the guest changed
+    /// after it was prepared, or that a start ran without it show whatever the
+    /// row says.
+    var jitNote: String? {
+        let status = jitStatus
+        return status.readyForNextStart && !jitOn ? nil : status.footer
+    }
+    /// The next start runs on the JIT engine, which does not use the translated
+    /// libraries: the JIT is on and the note under its row says it is ready
+    /// (its memory is, or can be, prepared for the guest, and no earlier start
+    /// fell back), so that this row and that note agree.
+    var jitInUseForNextStart: Bool {
+        jitAvailable && jitOn && jitStatus.readyForNextStart
+    }
+    /// What a start does about the translated libraries, for the runtime's boot
+    /// request and the start record. `jitInUse` is whether this start runs on
+    /// the JIT engine.
+    func translatedLibrariesStart(jitInUse: Bool) -> TranslatedLibrariesStart {
+        TranslatedLibrariesStart(
+            buildCarries: translatedLibrariesAvailable, optionOn: translatedLibrariesOn, jitInUse: jitInUse)
+    }
     // JIT (Home's JIT row): the guest runs on the JIT engine when the person
     // turned it on and a debugger they attached has prepared the executable
     // memory.

@@ -576,8 +576,11 @@ address space holds, so this is a fallback.
   qualify), where the display size the next start would have can carry the 120
   Hz mode, and never on a Mac or Vision Pro; Settings has no row of it,
   because Home, which shows only while no guest runs, is where the guest's
-  configuration is. The section is drawn when one of its two rows is, and its
-  note beneath the panel is JIT's.
+  configuration is. The section is one heading over a group for each setting
+  that has an explanation (120 Hz, AOT, JIT), each a panel of the switch with
+  its note beneath it, closer together than two sections are. The heading is
+  drawn when one of the groups is, and a group that is not offered leaves out
+  its note too.
   Turned on, the next start of Android asks the runtime for the 120 Hz display
   ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
   change applies at that start. The runtime
@@ -778,7 +781,8 @@ address space holds, so this is a fallback.
   memory prepared at launch (or waits for the attempt, with "Preparing JIT" on
   the boot screen) and boots on the JIT engine; without a debugger, or if the
   preparation fails, it boots on gadgets and says why on the boot screen and
-  under the row. A guest changed after the memory was prepared needs Andarium
+  under the row. The note's ready sentence shows only while the row is on. A
+  guest changed after the memory was prepared needs Andarium
   opened from StikDebug again, and the memory stays wired for the process
   whether the start uses it or not (the runtime's GPU plan counts it). No
   debugger request is made while none is attached, and one that goes unanswered
@@ -791,6 +795,31 @@ address space holds, so this is a fallback.
   ([cold code](../darwin/cpu/arm64/jit/README.md#cold-code)), so an Android
   guest's boot, application launches and background work run several times
   slower than on gadgets, and a long single-process computation runs faster.
+- **AOT.** Android's system libraries and boot image run from machine code
+  translated ahead of time
+  ([`docs/architecture.md`](../docs/architecture.md#ahead-of-time-code)). A
+  build that embeds `UmlArm64Aot.framework` (what Acknowledgements reads) has an
+  AOT group in Home's Performance section, between the 120 Hz group and the
+  JIT group: a switch, on by default and kept for the install
+  (`TranslatedLibrariesPreference`), with the note beneath its panel; a fresh
+  install and an update start on, and a harness launch starts on and keeps
+  nothing. The choice is read at each start. Off, the boot request keeps the
+  release out of the launch (`android_aot_disabled`,
+  [Kernarium](../Kernarium/README.md#automation-runs)) and Android runs on
+  the engine alone, as in a build without the framework; a running Android is
+  not changed. While the next start runs on the JIT, which does not use the
+  translated code, the row is dimmed, its switch cannot be changed and the line
+  beneath the group says so. Each start writes what it chose beside the session
+  record (`start.txt`, `StartRecord`), kept with it at the next launch, and a
+  bug report carries both as `andarium/start-current.txt` and
+  `andarium/start-previous.txt`: `translated-libraries` is `on`, `off`,
+  `not-used-with-jit` or `unavailable` (a build without the framework). The
+  record names the process and the second of its start, and is a session's
+  only when that session's record names the same process and began no earlier;
+  a choice whose start left no session record is copied as
+  `andarium/start-current-unmatched.txt` or
+  `andarium/start-previous-unmatched.txt`, and the session records are always
+  copied.
 - **Motion.** The guest has the device's accelerometer and gyroscope wherever
   the device has them, with no setting and no permission. An iPad app on a Mac
   and the Simulator have none, so nothing is read there, and Android still

@@ -42,6 +42,13 @@ using AotSelection = ::uml::cpu::AotSelection;
 using AotRelease = ::uml::cpu::AotRelease;
 [[nodiscard]] bool select_aot(AotSelection selection,
 	const AotRelease *release) noexcept;
+/* The end of a session of the process: its guest was released after a clean
+ * power-off, so the next run's select_aot chooses afresh. */
+void end_aot_session() noexcept;
+/* The session's choice as it stands, and putting it back: a start that took
+ * the choice and failed before its guest ran leaves it as it was. */
+[[nodiscard]] int aot_choice() noexcept;
+void restore_aot_choice(int choice) noexcept;
 
 [[nodiscard]] bool acquire_translation_cache_run_session() noexcept;
 void release_translation_cache_run_session() noexcept;
