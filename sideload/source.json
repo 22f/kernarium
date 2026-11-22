@@ -21,7 +21,7 @@
           "date": "2026-11-23",
           "localizedDescription": "New: root access with Magisk, Android's system libraries translated ahead of time, 120 Hz on ProMotion devices, Add to Home Screen, VoiceOver support, a frame rate that drops only when the device is very hot, text messages you write, and a notice when a newer version is out.\n\nFixed: Wi-Fi dropping when you return to Andarium, face scans in some apps that use the front camera, connections hanging after a move from Wi-Fi to cellular data, apps failing to reach servers after the network returns. VP9 videos now play with the hardware decoder.",
           "downloadURL": "https://github.com/imxieyi/Kernarium/releases/download/andarium-1.1/Andarium-1.1-16.ipa",
-          "size": 1248440828,
+          "size": 1248669708,
           "minOSVersion": "26.0"
         }
       ]
