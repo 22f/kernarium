@@ -22,7 +22,7 @@ enum TranslatedLibrariesWords {
     }
 
     static let chosenTitle = Title.aot
-    static let chosenNote = Note.short
+    static let chosenNote = Note.explained
 
     static func text(for title: Title) -> String {
         switch title {
@@ -72,7 +72,9 @@ struct TranslatedLibrariesRow: View {
             ? TranslatedLibrariesWords.notUsedWithJit
             : TranslatedLibrariesWords.text(for: model.translatedLibrariesNote)
         let spoken: String = "\(title), \(detail)"
-        OptionRow(title: title, symbol: "books.vertical.fill", detail: detail, dimmed: unused) {
+        // The note says what the libraries are and is longer than any other
+        // row's: it takes three lines where the others take two.
+        OptionRow(title: title, symbol: "books.vertical.fill", detail: detail, detailLines: 3, dimmed: unused) {
             Toggle(isOn: Binding(
                 get: { model.translatedLibrariesOn },
                 set: { model.setTranslatedLibraries($0) }

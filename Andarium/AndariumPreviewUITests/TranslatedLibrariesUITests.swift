@@ -11,10 +11,10 @@ import XCTest
 final class TranslatedLibrariesUITests: XCTestCase {
     private static let identifier = "home-aot-switch"
     private static let title = "AOT"
-    private static let note = "Faster. Turn this off only to troubleshoot."
-    private static let explainedTitle = "Translated system libraries"
-    private static let explainedNote =
+    private static let note =
         "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot."
+    private static let otherTitle = "Translated system libraries"
+    private static let otherNote = "Faster. Turn this off only to troubleshoot."
     private static let jitNote = "Not used while JIT is on."
 
     override func setUp() {
@@ -99,13 +99,12 @@ final class TranslatedLibrariesUITests: XCTestCase {
 
     @MainActor
     func testThePreviewShowsTheOtherWordsTheOwnerChoosesBetween() {
-        let app = launch("home-aot", words: ["-aotTitle", "translated", "-aotNote", "explained"])
+        let app = launch("home-aot", words: ["-aotTitle", "translated", "-aotNote", "short"])
         let toggle = app.switches[Self.identifier].firstMatch
         reveal(toggle, in: app)
-        XCTAssertEqual(
-            toggle.label, "\(Self.explainedTitle), \(Self.explainedNote)", "the switch's label is \(toggle.label)")
-        XCTAssertTrue(text(Self.explainedNote, in: app).exists, "the longer note is missing")
-        XCTAssertFalse(text(Self.note, in: app).exists, "the short note shows beside the longer one")
+        XCTAssertEqual(toggle.label, "\(Self.otherTitle), \(Self.otherNote)", "the switch's label is \(toggle.label)")
+        XCTAssertTrue(text(Self.otherNote, in: app).exists, "the short note is missing")
+        XCTAssertFalse(text(Self.note, in: app).exists, "the longer note shows beside the short one")
     }
 
     @MainActor

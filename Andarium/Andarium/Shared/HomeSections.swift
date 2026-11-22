@@ -65,6 +65,9 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
+    /// The most lines the line under the title shows. Two, as every Home row
+    /// has; the AOT row's note is longer and takes three.
+    var detailLines = 2
     /// What the line under the title does when it is touched; the line then
     /// reads as a button. None leaves it plain text.
     var detailAction: (() -> Void)?
@@ -100,7 +103,7 @@ struct OptionRow<Control: View>: View {
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(detailLines)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

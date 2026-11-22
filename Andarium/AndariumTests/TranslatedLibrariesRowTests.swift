@@ -246,7 +246,7 @@ struct TranslatedLibrariesRowTests {
         // that uses them, and the switch works.
         model.jitOn = false
         #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
-        let note = "AOT, Faster. Turn this off only to troubleshoot."
+        let note = "AOT, Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot."
         let working = await aotRow(in: controller.view, expecting: note)
         #expect(Set(working.compactMap(\.accessibilityLabel)) == [note], "\(working.map(\.accessibilityLabel))")
         #expect(working.allSatisfy { ($0.accessibilityHint ?? "").isEmpty }, "the note is also a hint")
@@ -317,9 +317,9 @@ struct TranslatedLibrariesRowTests {
         let model = fixture(carried: true).model
         #expect(model.translatedLibrariesTitle == TranslatedLibrariesWords.chosenTitle)
         #expect(model.translatedLibrariesNote == TranslatedLibrariesWords.chosenNote)
-        // The chosen pair is the default the owner was shown: AOT, and the short note.
+        // The chosen pair is the owner's: AOT, and the note that says what the libraries are.
         #expect(TranslatedLibrariesWords.chosenTitle == .aot)
-        #expect(TranslatedLibrariesWords.chosenNote == .short)
+        #expect(TranslatedLibrariesWords.chosenNote == .explained)
     }
 
     @Test func aStartStatesTheReleaseOnlyWhileTheSwitchIsOnInABuildThatCarriesIt() {
