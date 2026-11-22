@@ -340,7 +340,9 @@ guest's write-back before it (`RunStop`, `StopSettle`), and the update notice
 (the version file's reading and every rule that decides what is offered or
 opened, the one request against an in-process network with no real address,
 the daily schedule and the record (a record edited on the device included), the
-model's moments, and its words in each language), and
+model's moments, and its words in each language, and the tracked
+`sideload/source.json` read through that reader for the version and build the
+project builds), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the hardware input's plug policy and pointer
 capture, the snapshot store on APFS clones of sparse
