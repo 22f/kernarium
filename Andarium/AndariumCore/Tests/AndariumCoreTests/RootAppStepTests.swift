@@ -229,7 +229,10 @@ struct RootAppStepTests {
     }
 
     @Test func openingTheAppIsInsideTheBoundAndSaysNothingOfTheInstall() async {
-        // The guest is unlocked and names the launcher, so the start is reached and then hangs.
+        // The guest is unlocked and names the launcher, so the start is reached and then hangs. The bound is
+        // counted on a clock the test moves once the start is entered, so no load on this machine can end it
+        // before the start is reached.
+        let clock = ScriptedClock()
         let entered = RootCounter()
         let hungStart = RootScriptedShell { command in
             switch command {
@@ -243,13 +246,21 @@ struct RootAppStepTests {
                 return GuestShellOutput(text: "", exitCode: 0)
             }
         }
+        let release = release
+        let state = rooted
+        let clocking = clock.clocking
+        let task = Task {
+            await RootAppStep.run(
+                shell: hungStart, release: release, state: state, installing: {}, install: {}, clocking: clocking)
+        }
+        while await entered.value == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        clock.advance(to: RootAppStep.limit)
         let started = ContinuousClock.now
-        let outcome = await RootAppStep.run(
-            shell: hungStart, release: release, state: rooted, installing: {}, install: {}, limit: .seconds(2))
-        guard case .installed(let state) = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
+        let outcome = await task.value
+        guard case .installed(let learned) = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
         let reached = await entered.value
-        #expect(reached == 1, "the hung start was never entered: the bound ended something else")
-        #expect(state.appInstall?.opened == false, "an open the bound ended is not an open")
+        #expect(reached == 1, "the hung start was entered once")
+        #expect(learned.appInstall?.opened == false, "an open the bound ended is not an open")
         #expect(ContinuousClock.now - started < .seconds(20), "the open waited past the bound")
     }
 
