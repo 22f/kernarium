@@ -77,7 +77,7 @@ struct WhatsNewTests {
 
     /// Build 16 as written.
     private static let buildSixteenIDs = [
-        "root-access", "jit", "aot", "high-refresh", "add-to-home-screen", "voiceover-talkback",
+        "root-access", "aot", "high-refresh", "add-to-home-screen", "voiceover-talkback",
         "frame-rate-when-hot", "update-notice", "build-16-fixes",
     ]
 
@@ -186,7 +186,7 @@ struct WhatsNewTests {
         let releases = WhatsNewCatalog.load()
         let sixteenTitles = try #require(releases.first).entries.map(\.title)
         #expect(sixteenTitles == [
-            "Root access", "JIT", "AOT", "120 Hz", "Add to Home Screen", "VoiceOver and TalkBack",
+            "Root access", "AOT", "120 Hz", "Add to Home Screen", "VoiceOver and TalkBack",
             "Frame rate when hot", "Update notice", "Fixes and improvements",
         ])
         let twelveTitles = try #require(releases.first { $0.build == 12 }).entries.map(\.title)
@@ -205,8 +205,8 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(titles, naming: 0) == "9 new features")
         #expect(
             WhatsNewRibbon.summary(sixteenTitles, naming: 3)
-                == "Root access\(separator)JIT\(separator)AOT\(separator)6 more")
-        #expect(WhatsNewRibbon.summary(sixteenTitles, naming: 0) == "9 new features")
+                == "Root access\(separator)AOT\(separator)120 Hz\(separator)5 more")
+        #expect(WhatsNewRibbon.summary(sixteenTitles, naming: 0) == "8 new features")
         #expect(WhatsNewRibbon.summary(twelveTitles, naming: 0) == "2 new features")
     }
 
@@ -221,9 +221,9 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(["A", "B", "C"], naming: 1, language: "ja") == "A \u{00B7} 2 more")
     }
 
-    /// The ribbon lists what the device is told, in the order written: nineteen
+    /// The ribbon lists what the device is told, in the order written: eighteen
     /// entries each (an update from build 9 carries builds 16, 12 and 11), but
-    /// not the same nineteen.
+    /// not the same eighteen.
     @Test func theRibbonNamesWhatAnIPhoneAndAnIPadAreTold() {
         func ribbon(on host: HostDevice, naming named: Int) -> String {
             withDefaultsReturning { defaults in
@@ -235,18 +235,18 @@ struct WhatsNewTests {
         }
         let separator = "\u{00A0}\u{00B7} "
         let sixteen = [
-            "Root access", "JIT", "AOT", "120 Hz", "Add to Home Screen", "VoiceOver and TalkBack",
+            "Root access", "AOT", "120 Hz", "Add to Home Screen", "VoiceOver and TalkBack",
             "Frame rate when hot", "Update notice", "Fixes and improvements",
         ]
         let twelve = ["Old app compatibility", "Fixes and improvements"]
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 14) == (sixteen + twelve + [
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 13) == (sixteen + twelve + [
             "Snapshots", "Resolution", "Keyboard, mouse and controllers", "5 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 14) == (sixteen + twelve + [
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 13) == (sixteen + twelve + [
             "Snapshots", "Resolution", "Rotation on iPad", "5 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "19 new features")
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "19 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "18 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "18 new features")
     }
 
     @Test func eachKindOfDeviceIsToldItsOwnEntries() {
@@ -359,14 +359,14 @@ struct WhatsNewTests {
         }
         let ios26 = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false)
         let separator = "\u{00A0}\u{00B7} "
-        #expect(ribbon(framesPerSecond: 120, padApp: Self.iPadApp, naming: 0) == "9 new features")
-        #expect(ribbon(framesPerSecond: 60, padApp: Self.iPadApp, naming: 0) == "8 new features")
-        #expect(ribbon(framesPerSecond: 120, padApp: ios26, naming: 0) == "8 new features")
-        #expect(ribbon(framesPerSecond: 60, padApp: ios26, naming: 0) == "7 new features")
+        #expect(ribbon(framesPerSecond: 120, padApp: Self.iPadApp, naming: 0) == "8 new features")
+        #expect(ribbon(framesPerSecond: 60, padApp: Self.iPadApp, naming: 0) == "7 new features")
+        #expect(ribbon(framesPerSecond: 120, padApp: ios26, naming: 0) == "7 new features")
+        #expect(ribbon(framesPerSecond: 60, padApp: ios26, naming: 0) == "6 new features")
         // Where neither shows, the names skip both.
         #expect(
-            ribbon(framesPerSecond: 60, padApp: ios26, naming: 4)
-                == ["Root access", "JIT", "AOT", "VoiceOver and TalkBack", "3 more"].joined(separator: separator))
+            ribbon(framesPerSecond: 60, padApp: ios26, naming: 3)
+                == ["Root access", "AOT", "VoiceOver and TalkBack", "3 more"].joined(separator: separator))
     }
 
     /// The launch decides the ribbon before the scene connects and reads its

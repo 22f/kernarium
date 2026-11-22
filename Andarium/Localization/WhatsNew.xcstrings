@@ -806,29 +806,6 @@
         }
       }
     },
-    "JIT" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "JIT"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "JIT"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "JIT"
-          }
-        }
-      }
-    },
     "Keyboard, mouse and controllers" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1262,29 +1239,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "穩定性修正"
-          }
-        }
-      }
-    },
-    "Turn on JIT in Performance on Home and open Andarium from StikDebug. Heavy work in apps can run faster, but Android starts and opens apps more slowly." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "“ホーム”の“パフォーマンス”でJITをオンにし、StikDebugからAndariumを開きます。アプリの重い処理が速くなることがありますが、Androidの起動やアプリを開く動作は遅くなります。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在“主页”的“性能”中开启JIT，并从StikDebug打开Andarium。应用中的繁重任务可能会更快，但Android启动和打开应用会变慢。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在「首頁」的「效能」中開啟JIT，並從StikDebug打開Andarium。應用程式中的繁重工作可能會更快，但Android啟動和打開應用程式會變慢。"
           }
         }
       }

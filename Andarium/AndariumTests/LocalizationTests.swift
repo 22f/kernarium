@@ -72,7 +72,7 @@ struct LocalizationTests {
     /// The notes that every language writes as English does: a term and a unit.
     /// `Localization/english-only.json` lists them as identical (the check of
     /// `scripts/localization.py` refuses any other that is).
-    private static let notesEveryLanguageKeeps: Set<String> = ["JIT", "AOT", "120 Hz"]
+    private static let notesEveryLanguageKeeps: Set<String> = ["AOT", "120 Hz"]
 
     @Test(arguments: LocalizationTests.languages)
     func everyNoteOfTheReleasesIsTranslated(language: String) throws {

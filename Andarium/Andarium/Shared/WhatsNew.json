@@ -10,12 +10,6 @@
         "symbol": "key.fill"
       },
       {
-        "id": "jit",
-        "title": "JIT",
-        "text": "Turn on JIT in Performance on Home and open Andarium from StikDebug. Heavy work in apps can run faster, but Android starts and opens apps more slowly.",
-        "symbol": "bolt.fill"
-      },
-      {
         "id": "aot",
         "title": "AOT",
         "text": "Android’s system libraries now run from code translated ahead of time, so Android runs faster. It is on by default, in Performance on Home.",
