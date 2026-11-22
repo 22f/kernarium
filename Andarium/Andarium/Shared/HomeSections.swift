@@ -361,6 +361,8 @@ struct HighRefreshRow: View {
         // VoiceOver says the note, which is beneath the group, and then the
         // name, as it did when the note was in the cell.
         .accessibilityLabel(HighRefreshWords.spoken)
+        // Voice Control matches the name alone, as it is on the screen.
+        .accessibilityInputLabels([String(localized: "120 Hz")])
         .id("high-refresh")
     }
 }

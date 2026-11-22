@@ -56,6 +56,8 @@ struct TranslatedLibrariesRow: View {
         // with hints off; the switch's own state follows. The label is a
         // String, so that no catalog key is extracted from it.
         .accessibilityLabel(spoken)
+        // Voice Control matches the name alone, as it is on the screen.
+        .accessibilityInputLabels([title])
         .id("aot")
     }
 }

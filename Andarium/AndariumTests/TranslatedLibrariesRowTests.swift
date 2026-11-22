@@ -276,6 +276,12 @@ struct TranslatedLibrariesRowTests {
         #expect(await eventually { labels(in: controller.view).contains(ready) })
         let all = labels(in: controller.view)
         #expect(all.filter { $0 == "Performance" }.count == 1, "one heading: \(all)")
+        // Voice Control matches the names as they are on the screen.
+        let rows = nodes(in: controller.view)
+        let refreshRow = try #require(rows.first { ($0.accessibilityLabel ?? "").hasSuffix(", 120 Hz") })
+        let aotRow = try #require(rows.first { ($0.accessibilityLabel ?? "").hasPrefix("AOT, ") })
+        #expect(refreshRow.accessibilityUserInputLabels == ["120 Hz"], "\(String(describing: refreshRow.accessibilityUserInputLabels))")
+        #expect(aotRow.accessibilityUserInputLabels == ["AOT"], "\(String(describing: aotRow.accessibilityUserInputLabels))")
         let header = try #require(all.firstIndex(of: "Performance"), "\(all)")
         let refresh = try #require(all.firstIndex { $0.hasSuffix(", 120 Hz") }, "\(all)")
         let aot = try #require(all.firstIndex { $0.hasPrefix("AOT, ") }, "\(all)")
