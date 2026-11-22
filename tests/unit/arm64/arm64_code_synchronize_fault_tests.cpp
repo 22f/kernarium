@@ -184,7 +184,6 @@ void another_generation_active(uml::cpu::EngineKind kind, unsigned long &next)
 		{
 			const Map other_view{other, alias_base, data.descriptor(),
 				PROT_READ | PROT_WRITE, false};
-			const auto app_before = darwin_uml_static_vm_code_changes(app);
 			const auto other_before =
 				darwin_uml_static_vm_code_changes(other);
 			arm64::CpuState cpu{};
@@ -206,12 +205,16 @@ void another_generation_active(uml::cpu::EngineKind kind, unsigned long &next)
 				"the active generation heard of another guest's IC IVAU");
 			const Map app_view{app, alias_base, data.descriptor(),
 				PROT_READ | PROT_WRITE, false};
+			/* The faulting run already published to the guest's generation
+			 * (an IC IVAU at an unmapped page still is a code change), so
+			 * the retry is measured from here. */
+			const auto retry_before = darwin_uml_static_vm_code_changes(app);
 			const auto again = run_with_active(*engine, app, other, cpu);
 			expect(again.reason == uml::cpu::ExitReason::system_call &&
 				cpu.registers[0] == 7, engine_label,
 				"the instruction did not run once the guest mapped its "
 				"page");
-			expect(darwin_uml_static_vm_code_changes(app) > app_before,
+			expect(darwin_uml_static_vm_code_changes(app) > retry_before,
 				engine_label,
 				"the guest's generation did not hear of its IC IVAU");
 		}

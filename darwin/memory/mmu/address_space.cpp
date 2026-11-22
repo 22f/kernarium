@@ -2032,9 +2032,9 @@ public:
 	}
 
 	/* Gives the thread's entered context back to the one `context` replaced.
-	 * Begin and end are strictly nested on a thread, so `context` is the
-	 * innermost; a context that is not (an end out of order) leaves the
-	 * thread's alone. */
+	 * Contexts end innermost first, and no production path nests them; a
+	 * caller that ends an outer context first leaves the chain pointing at a
+	 * context that has ended, which is the caller's contract to keep. */
 	static void unlink_entered(ExecutionContext *context) noexcept
 	{
 		if (entered_thread_context() == context)
@@ -3788,7 +3788,8 @@ extern "C" void darwin_uml_static_vm_invalidate_code(unsigned long address)
 
 extern "C" int darwin_uml_static_vm_synchronize_code(unsigned long address)
 {
-	/* A host that cannot say (no address space) has nothing to fault in. */
+	/* No address space for the thread makes the bridge answer -1, which the
+	 * helper takes for an unmapped address, as it does any non-zero answer. */
 	return with_address_space([&](auto &space) {
 		return space.invalidate_code(address) ? 0 : 1;
 	});

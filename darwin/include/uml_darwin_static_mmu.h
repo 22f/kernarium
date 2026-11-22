@@ -211,7 +211,9 @@ void darwin_uml_static_vm_invalidate_code(unsigned long address);
  * page table entry the walker has not installed yet. Hardware faults such an
  * instruction like a load; the caller reports that fault so the kernel maps
  * the page, and runs the instruction again. Everything else publishes as
- * darwin_uml_static_vm_invalidate_code() does and answers 0. */
+ * darwin_uml_static_vm_invalidate_code() does and answers 0. A host with no
+ * address space for the thread answers -1, and the helper treats any non-zero
+ * answer as an unmapped address and faults. */
 int darwin_uml_static_vm_synchronize_code(unsigned long address);
 int darwin_uml_static_vm_invalidate_code_generation(
 	unsigned long generation, unsigned long address, unsigned long length);

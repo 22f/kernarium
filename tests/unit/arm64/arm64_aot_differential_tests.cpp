@@ -14,6 +14,7 @@
 
 #include "cpu/arm64/aot/aot_diagnostics.hpp"
 #include "cpu/arm64/aot/aot_runtime.hpp"
+#include "cpu/arm64/code_synchronization.hpp"
 #include "cpu/arm64/engine_adapters.hpp"
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
@@ -619,6 +620,11 @@ std::size_t g_faults_reported_as_continued = 0;
 [[nodiscard]] Outcome run_selected(GadgetExecutor &executor,
 	StaticGuestMemory &memory, unsigned long generation, CpuState &cpu)
 {
+	/* The engine's entry loop takes a pending IC IVAU note after each block
+	 * and drops a stale one when a run starts. This runs a block outside it,
+	 * so a note an earlier case armed is dropped here, or the executor would
+	 * end every later run early at its first stepped instruction. */
+	arm64::discard_unmapped_code_synchronization();
 	require(executor.begin_execution(generation, cpu.pc));
 	std::size_t executed = 0;
 	const auto event = aot_runtime::enabled() ?
@@ -3217,6 +3223,7 @@ std::size_t run_until_stub(GadgetExecutor &executor, StaticGuestMemory &memory,
 	std::size_t blocks = 0;
 	for (;; ++blocks) {
 		require(blocks < 20'000'000);
+		arm64::discard_unmapped_code_synchronization();
 		require(executor.begin_execution(generation, cpu.pc));
 		std::size_t executed = 0;
 		const auto event =
@@ -5860,6 +5867,20 @@ void the_dispatch_choice_is_made_when_the_executor_is_made(
  * retires and publishes the change in the running generation alone. The
  * active generation maps the address in one arm and not in the others, so
  * an instruction resolved there takes the wrong turn in two of the three.
+ *
+ * What the row proves about the executor's early exit, run_aot leaving at an
+ * instruction whose helper armed the note: the fault is at the IC IVAU and the
+ * retry hint is left there, so the retry (rewritten code still on) is the
+ * ordinary engine's one instruction. Without the exit that run went on, the
+ * engine's own check of the guest's code sequence ended it at the next
+ * instruction, and the retry entered rewritten code and stepped the IC IVAU
+ * again; the row fails on that.
+ * What it cannot prove: the exit also matters where the bridge answers
+ * non-zero and moves no code sequence of the running generation (no address
+ * space for the thread, an exception inside the call, an entered context of
+ * another address space's lifetime), and that answer cannot be made from a
+ * test without a hook that fails the bridge in the middle of a run. That
+ * case is covered by reading the exit, not by this row.
  * Returns how many sites the library has. */
 [[gnu::noinline]]
 std::size_t code_synchronization_in_rewritten_code(const LibraryImage &image,
