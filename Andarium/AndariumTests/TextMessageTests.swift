@@ -594,6 +594,7 @@ struct TextMessageTests {
             #expect(await eventually { !model.textMessageSceneActive })
             #expect(await send(rig, "two", .handedOver(1)))
             await settle()
+            try #require(rig.driver.smsSent.count == 2)
             let identifier = rig.driver.smsSent[1].identifier
             #expect(state.awaiting == .result(identifier))
             // ... and is, once the application is active again.
