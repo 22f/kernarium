@@ -395,7 +395,8 @@ fits and the mode's rate told to the display (a size beyond 60 Hz included);
 check also reads;
 `gpu-present-pacer` runs the display link's decisions (the 60 and 120 steps as
 the guest's rate changes, steady, speeding-up and alternating guests, frames
-early and late in groups, the two seconds between changes and the bound on the
+early and late in groups, bursts that bunch in a tick and the time to follow a
+change however they bunch, the two seconds between changes and the bound on the
 changes, the wake, the sleep, the bounded retry of a present that
 found no drawable, and the bound on its waits for one (a frame's budget is the
 frame claimed, across a link made again and a frame that arrives while a tick
@@ -443,7 +444,9 @@ mock data, `Andarium` the device application,
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
 FOLLOW_X_HANDLE=example_handle UPDATE_SOURCE_HOST=example.com UPDATE_SOURCE_PATH=/source.json`;
-the scheme without the filter also runs `AndariumUITests`). A row that asserts
+the scheme without the filter also runs `AndariumUITests`). The scheme runs the
+bundle's suites one at a time, because they share the application's one window
+and its main actor. A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
 UIKit elements) is disabled there with its reason and shows as skipped. The

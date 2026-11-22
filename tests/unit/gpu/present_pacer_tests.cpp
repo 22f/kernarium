@@ -1307,6 +1307,364 @@ void aWakeForgetsTheEvidenceOfTheLastBurst()
     require(link.rate() == 120);
 }
 
+/* The link as the display runs it on a 120 Hz vsync grid, driven by the times
+ * a guest's frames arrive (sorted): it sleeps when no frame waits, wakes at
+ * the next frame, and ticks at the step it asked for (every vsync at the 120
+ * step, every second one at the 60 step). Returns when the step changed and to
+ * what, the first request included. With `vsyncsPerTick`, a link that ticks that
+ * many vsyncs apart at either step, as one does when its thread is busy. */
+struct StepChange {
+    double at;
+    unsigned to;
+};
+
+std::vector<StepChange> stepChangesOf(
+    const std::vector<double>& frames, double seconds, double vsyncsPerTick = 0.0)
+{
+    constexpr double vsync = 1.0 / 120.0;
+    std::vector<StepChange> changes;
+    PresentPacer pacer;
+    std::uint64_t offered = 0;
+    std::size_t next = 0;
+    bool awake = false;
+    bool waiting = false;
+    double now = 0.0;
+    double asked = 60.0;
+    unsigned noted = 0;
+    const auto note = [&](double at, unsigned rate) {
+        if (noted != 0 && rate != noted)
+            changes.push_back({at, rate});
+        noted = rate;
+    };
+    while (true) {
+        if (!awake) {
+            if (next >= frames.size() || frames[next] >= seconds)
+                break;
+            const double arrival = frames[next];
+            while (next < frames.size() && frames[next] <= arrival) {
+                ++offered;
+                ++next;
+            }
+            waiting = true;
+            asked = pacer.wake(arrival, offered, 120.0).preferred;
+            note(arrival, pacer.rate());
+            awake = true;
+            now = std::ceil(arrival / vsync + 1e-9) * vsync;
+        }
+        if (now >= seconds)
+            break;
+        while (next < frames.size() && frames[next] <= now) {
+            ++offered;
+            ++next;
+            waiting = true;
+        }
+        const bool had = waiting;
+        waiting = false;
+        const auto decision = pacer.tick(now, offered, had, 120.0);
+        if (decision.range)
+            asked = decision.range->preferred;
+        note(now, pacer.rate());
+        if (decision.present)
+            pacer.drew(false);
+        if (decision.sleep) {
+            awake = false;
+            continue;
+        }
+        now += vsyncsPerTick > 0.0 ? vsyncsPerTick * vsync : std::round(120.0 / asked) * vsync;
+    }
+    return changes;
+}
+
+/* When the step first became `to` after `after`, or nothing. */
+std::optional<double> firstChangeTo(
+    const std::vector<StepChange>& changes, unsigned to, double after)
+{
+    for (const StepChange& change : changes)
+        if (change.at > after && change.to == to)
+            return change.at;
+    return std::nullopt;
+}
+
+/* A guest of 30 frames a second, which leaves the link on the 60 step, and the
+ * time that step was reached. */
+std::vector<double> slowLead(double seconds)
+{
+    std::vector<double> frames;
+    for (int i = 1; i / 30.0 < seconds; ++i)
+        frames.push_back(i / 30.0);
+    return frames;
+}
+
+/* `perSecond` frames in each calendar second from `epoch`, of which `bunched`
+ * arrive within three milliseconds of the second's boundaries (each boundary
+ * holds one early frame fewer and one late one more, until none is early), and
+ * the others are evenly spaced: the frames of a guest that catches up in one
+ * go once a second. */
+void addBoundaryBunchedFrames(
+    std::vector<double>& frames, double epoch, int seconds, int perSecond, int bunched)
+{
+    for (int s = 0; s < seconds; ++s) {
+        const double start = epoch + s;
+        const int evenly = perSecond - bunched;
+        for (int j = 0; j < evenly; ++j)
+            frames.push_back(start + (j + 0.5) / evenly);
+        const int early = std::max(0, bunched - s);
+        for (int i = 0; i < early; ++i)
+            frames.push_back(start + 0.0001 + 0.0007 * i);
+        for (int i = 0; i < bunched - early; ++i)
+            frames.push_back(start + 0.9999 - 0.0007 * i);
+    }
+    std::sort(frames.begin(), frames.end());
+}
+
+/* A tick counts two of the frames that arrive within it at most, at the 60
+ * step's ticks as at the 120 step's. A guest of 63 frames a second with 3 to
+ * 12 of them within three milliseconds of a second's boundary offers the
+ * display 62 or fewer, and a guest at 60 that catches up with a burst once a
+ * second offers it 61: neither takes the 120 step. The count that held them on
+ * the 60 step for 4 to 7 s before the burst was over, and took the 120 step in
+ * the end, counted every frame. */
+void aGuestWhoseExtraFramesBunchInOneTickStaysOnTheSixtyStep()
+{
+    for (const int bunched : {3, 4, 6, 9, 12}) {
+        for (const double phase : {0.0, 0.002, 0.004, 0.006}) {
+            std::vector<double> frames = slowLead(3.0);
+            const auto lead = stepChangesOf(frames, 3.0);
+            const auto down = firstChangeTo(lead, 60, 0.0);
+            require(down.has_value(), "the slow lead did not reach the 60 step");
+            const double epoch = *down + phase;
+            frames.erase(std::remove_if(frames.begin(), frames.end(),
+                             [&](double at) { return at >= epoch; }),
+                frames.end());
+            addBoundaryBunchedFrames(frames, epoch, 20, 63, bunched);
+            const auto changes = stepChangesOf(frames, epoch + 20.0);
+            const auto rose = firstChangeTo(changes, 120, epoch);
+            if (rose)
+                std::fprintf(stderr, "bunched %d phase %.3f: the 120 step at %.3f s\n",
+                    bunched, phase, *rose - epoch);
+            require(!rose.has_value(), "a burst of frames in one tick took the 120 step");
+        }
+    }
+    /* A guest at 60 that catches up with 20 frames in one tick each second. */
+    std::vector<double> frames = slowLead(3.0);
+    const auto down = firstChangeTo(stepChangesOf(frames, 3.0), 60, 0.0);
+    require(down.has_value());
+    const double epoch = *down + 0.002;
+    frames.erase(std::remove_if(frames.begin(), frames.end(),
+                     [&](double at) { return at >= epoch; }),
+        frames.end());
+    addBoundaryBunchedFrames(frames, epoch, 20, 80, 20);
+    require(!firstChangeTo(stepChangesOf(frames, epoch + 20.0), 120, epoch).has_value(),
+        "a guest at 60 with a burst of 20 frames in one tick took the 120 step");
+}
+
+/* Frames spread over ticks are followed as before: a guest of 63, 64 or 66
+ * frames a second evenly spaced takes the 120 step as soon as the dwell since
+ * the fall has passed, as its second of frames has been counted by then. */
+void aGuestWhoseFramesAreSpreadOverTicksRisesAtTheDwell()
+{
+    for (const int perSecond : {63, 64, 66}) {
+        for (const double phase : {0.0, 0.003, 0.006}) {
+            std::vector<double> frames = slowLead(3.0);
+            const auto down = firstChangeTo(stepChangesOf(frames, 3.0), 60, 0.0);
+            require(down.has_value());
+            const double epoch = *down + phase;
+            frames.erase(std::remove_if(frames.begin(), frames.end(),
+                             [&](double at) { return at >= epoch; }),
+                frames.end());
+            for (int s = 0; s < 8; ++s)
+                for (int j = 0; j < perSecond; ++j)
+                    frames.push_back(epoch + s + (j + 0.5) / perSecond);
+            std::sort(frames.begin(), frames.end());
+            const auto rose = firstChangeTo(stepChangesOf(frames, epoch + 8.0), 120, epoch);
+            require(rose.has_value(), "an evenly spaced guest above 62.5 did not rise");
+            if (*rose - epoch > 2.1)
+                std::fprintf(stderr, "%d a second, phase %.3f: the 120 step at %.3f s\n",
+                    perSecond, phase, *rose - epoch);
+            require(*rose - epoch <= 2.1, "the rise took longer than the dwell");
+        }
+    }
+}
+
+/* A guest that speeds up from 30 to 90 or 120 frames a second with 3 to 12 of
+ * them within three milliseconds of each second's boundary is followed within
+ * the dwell and the window, as an evenly spaced one is: a burst is two frames
+ * at most to the count, and the rest of the guest's frames are far over the
+ * threshold. */
+void aGuestThatSpeedsUpWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow()
+{
+    for (const int perSecond : {90, 120}) {
+        for (const int bunched : {3, 6, 12}) {
+            for (const double phase : {0.0, 0.003, 0.006}) {
+                std::vector<double> frames = slowLead(3.0);
+                const auto down = firstChangeTo(stepChangesOf(frames, 3.0), 60, 0.0);
+                require(down.has_value());
+                const double epoch = *down + phase;
+                frames.erase(std::remove_if(frames.begin(), frames.end(),
+                                 [&](double at) { return at >= epoch; }),
+                    frames.end());
+                addBoundaryBunchedFrames(frames, epoch, 8, perSecond, bunched);
+                const auto rose = firstChangeTo(stepChangesOf(frames, epoch + 8.0), 120, epoch);
+                require(rose.has_value(), "a guest of 90 or more with a burst did not rise");
+                if (*rose - epoch > 2.1)
+                    std::fprintf(stderr,
+                        "%d a second, %d bunched, phase %.3f: the 120 step at %.3f s\n",
+                        perSecond, bunched, phase, *rose - epoch);
+                require(*rose - epoch <= 2.1, "the rise took longer than the dwell");
+            }
+        }
+    }
+}
+
+/* A link that ticks several vsyncs apart (as one does while its thread is busy)
+ * counts the frames of the time each tick holds: a tick that follows 4 vsyncs
+ * counts 4 frames of a guest at 120, where a count of two a tick (or of what a
+ * 60 Hz display shows) takes the guest for one at 60, drops it to the 60 step
+ * from a wake and holds it there. The count is rounded up from a quarter of a
+ * vsync: a guest whose frames come in lumps of ten every second tick of a link
+ * that ticks 5.3, 6.3 or 8.3 vsyncs apart counts 6, 7 or 9 a lump, 68, 67 or 65
+ * a second, and a count rounded down from the half or the whole counts 5, 6 or
+ * 8 a lump, 57 or 58, and does not rise or falls. */
+void aSlowLinkCountsTheFramesOfTheTimeEachTickHolds()
+{
+    /* A guest evenly spaced at 90 or 120 frames a second: the 120 step from a
+     * wake, and from the 60 step within the dwell and the window. */
+    for (const double vsyncs : {4.0, 6.0}) {
+        for (const double perSecond : {90.0, 120.0}) {
+            std::vector<double> frames;
+            for (int i = 0; 1.0 + i / perSecond < 9.0; ++i)
+                frames.push_back(1.0 + i / perSecond);
+            require(stepChangesOf(frames, 9.0, vsyncs).empty(),
+                "a guest of 90 or 120 on a slow link did not keep the 120 step from a wake");
+            frames = slowLead(3.0);
+            const auto down = firstChangeTo(stepChangesOf(frames, 3.0, vsyncs), 60, 0.0);
+            require(down.has_value(), "the slow lead did not reach the 60 step");
+            const double epoch = *down + 0.002;
+            frames.erase(std::remove_if(frames.begin(), frames.end(),
+                             [&](double at) { return at >= epoch; }),
+                frames.end());
+            for (int i = 0; epoch + i / perSecond < epoch + 8.0; ++i)
+                frames.push_back(epoch + i / perSecond);
+            const auto rose = firstChangeTo(stepChangesOf(frames, epoch + 8.0, vsyncs), 120, epoch);
+            require(rose.has_value(), "a guest of 90 or 120 on a slow link did not rise");
+            if (*rose - epoch > 2.2)
+                std::fprintf(stderr, "%.0f vsyncs, %.0f a second: the 120 step at %.3f s\n",
+                    vsyncs, perSecond, *rose - epoch);
+            require(*rose - epoch <= 2.2, "the rise on a slow link took longer than the dwell");
+        }
+    }
+    /* A guest whose frames come in lumps of ten every second tick. */
+    for (const double vsyncs : {5.3, 6.3, 8.3}) {
+        const double tick = vsyncs / 120.0;
+        std::vector<double> frames;
+        for (int i = 0; 1.0 + 2 * i * tick < 9.0; ++i)
+            for (int j = 0; j < 10; ++j)
+                frames.push_back(1.0 + 2 * i * tick + 0.0001 * j);
+        require(stepChangesOf(frames, 9.0, vsyncs).empty(),
+            "a lumpy guest on a slow link did not keep the 120 step from a wake");
+        frames = slowLead(3.0);
+        const auto down = firstChangeTo(stepChangesOf(frames, 3.0, vsyncs), 60, 0.0);
+        require(down.has_value(), "the slow lead did not reach the 60 step");
+        const double epoch = *down;
+        frames.erase(std::remove_if(frames.begin(), frames.end(),
+                         [&](double at) { return at >= epoch; }),
+            frames.end());
+        for (int i = 0; epoch + (2 * i + 0.5) * tick < epoch + 8.0; ++i)
+            for (int j = 0; j < 10; ++j)
+                frames.push_back(epoch + (2 * i + 0.5) * tick + 0.0001 * j);
+        const auto rose = firstChangeTo(stepChangesOf(frames, epoch + 8.0, vsyncs), 120, epoch);
+        require(rose.has_value(), "a lumpy guest on a slow link did not rise");
+        if (*rose - epoch > 2.5)
+            std::fprintf(stderr, "%.1f vsyncs, lumps: the 120 step at %.3f s\n", vsyncs,
+                *rose - epoch);
+        require(*rose - epoch <= 2.5, "the rise of a lumpy guest on a slow link took too long");
+    }
+}
+
+/* A guest that falls from 120 to 60 with 3 of its frames within a millisecond
+ * of each second's boundary is followed within the dwell and the window, for
+ * every tick length the display can have: the count that held it on the 120
+ * step for five seconds counted the frames of the bunch as frames of the
+ * display, which only two of the three per tick are. */
+void aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow()
+{
+    for (const double highTick : {1.0 / 120.00001, 1.0 / 120.0, 1.0 / 119.88, 1.0 / 119.98}) {
+        for (const double phase : {0.002, 0.004, 0.006}) {
+            PresentPacer pacer;
+            (void)pacer.wake(0.0, 0, 120.0);
+            std::vector<double> frames;
+            for (int i = 1; i <= 120; ++i)
+                frames.push_back(i / 30.0);
+            for (int i = 1; i <= 120; ++i)
+                frames.push_back(4.0 + i / 120.0);
+            std::size_t count = 0;
+            double epoch = -1.0;
+            double low = -1.0;
+            int k = 1;
+            while (k * highTick < 13.0) {
+                const double now = k * highTick;
+                const std::size_t before = count;
+                while (count < frames.size() && frames[count] <= now)
+                    ++count;
+                const auto decision = pacer.tick(now, count, count != before, 120.0);
+                if (decision.present)
+                    pacer.drew(false);
+                if (epoch > 0.0 && decision.range && pacer.rate() == 60) {
+                    low = now;
+                    break;
+                }
+                if (now > 4.0 && epoch < 0.0 && decision.range && pacer.rate() == 120) {
+                    epoch = now + phase;
+                    frames.resize(count);
+                    for (int s = 0; s < 8; ++s) {
+                        const double start = epoch + s;
+                        for (int j = 0; j < 57; ++j)
+                            frames.push_back(start + (j + 0.5) / 57.0);
+                        const int early = s < 2 ? 0 : std::min(3, s - 1);
+                        for (int i = 0; i < early; ++i)
+                            frames.push_back(start + 0.0001 + 0.0007 * i);
+                        for (int i = 0; i < 3 - early; ++i)
+                            frames.push_back(start + 0.9999 - 0.0007 * i);
+                    }
+                    std::sort(frames.begin() + static_cast<std::ptrdiff_t>(count), frames.end());
+                }
+                k += pacer.rate() == 120 ? 1 : 2;
+            }
+            require(epoch > 0.0, "the guest never reached the 120 step");
+            require(low > 0.0, "the step never fell");
+            if (low - epoch > 2.1)
+                std::fprintf(stderr, "tick %.9f phase %.3f: the 60 step after %.3f s\n",
+                    highTick, phase, low - epoch);
+            require(low - epoch <= 2.1, "the fall took longer than the dwell and a window");
+        }
+    }
+}
+
+/* A guest whose bursts of two or more frames, each within a millisecond, come
+ * 31 or more times a second keeps the step it has: a tick counts two of a burst
+ * at the 60 step's ticks and at the 120 step's, so the stream that rises at the
+ * 60 step is not below the fall's measure at the 120 step. A count that took
+ * one of a burst at the 120 step's ticks and two at the 60 step's changed the
+ * step every four seconds. */
+void aGuestWhoseBurstsComeThirtyOneOrMoreTimesASecondKeepsTheHighStep()
+{
+    for (const int burst : {2, 3, 4, 6}) {
+        for (const double perSecond : {31.5, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0}) {
+            std::vector<double> frames;
+            const double period = 1.0 / perSecond;
+            for (int n = 0; n * period < 30.0; ++n)
+                for (int k = 0; k < burst; ++k)
+                    frames.push_back(1.0 + n * period + 0.0003 * k);
+            const auto changes = stepChangesOf(frames, 31.0);
+            if (!changes.empty())
+                std::fprintf(stderr,
+                    "bursts of %d, %.1f a second: %zu changes, the first at %.2f s\n", burst,
+                    perSecond, changes.size(), changes[0].at);
+            require(changes.empty(), "a steady stream of bursts changed the step");
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1381,6 +1739,18 @@ int main(int argc, char** argv)
             theCeilingCapsTheLinkAndItRisesAgainWhenTheCeilingRises},
         {"aWakeForgetsTheEvidenceOfTheLastBurst",
             aWakeForgetsTheEvidenceOfTheLastBurst},
+        {"aGuestWhoseExtraFramesBunchInOneTickStaysOnTheSixtyStep",
+            aGuestWhoseExtraFramesBunchInOneTickStaysOnTheSixtyStep},
+        {"aGuestWhoseFramesAreSpreadOverTicksRisesAtTheDwell",
+            aGuestWhoseFramesAreSpreadOverTicksRisesAtTheDwell},
+        {"aGuestThatSpeedsUpWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow",
+            aGuestThatSpeedsUpWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow},
+        {"aSlowLinkCountsTheFramesOfTheTimeEachTickHolds",
+            aSlowLinkCountsTheFramesOfTheTimeEachTickHolds},
+        {"aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow",
+            aGuestThatFallsToSixtyWithBunchedFramesIsFollowedWithinTheDwellAndTheWindow},
+        {"aGuestWhoseBurstsComeThirtyOneOrMoreTimesASecondKeepsTheHighStep",
+            aGuestWhoseBurstsComeThirtyOneOrMoreTimesASecondKeepsTheHighStep},
     };
     try {
         for (const Row& row : rows) {
