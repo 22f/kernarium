@@ -20,7 +20,28 @@ Specifically, your app allows users to replicate Android operating systems on iO
 
 An Android emulator app built on the Kernarium runtime is **no longer** available for download in App Store. Source code is available under [`Andarium/`](/Andarium/).
 
-If you want, you can sideload IPA from [releases](https://github.com/imxieyi/Kernarium/releases).
+#### Sideloading
+
+You can sideload the app with [AltStore](https://altstore.io) or [SideStore](https://sidestore.io).
+
+The easy way is to add the source, so updates show up in AltStore or SideStore:
+
+```
+https://raw.githubusercontent.com/imxieyi/Kernarium/main/sideload/source.json
+```
+
+Alternatively, install the IPA from [releases](https://github.com/imxieyi/Kernarium/releases) by hand:
+
+1. Download `Andarium-<version>.ipa` on the device. It's about 1 GB.
+2. Open AltStore or SideStore, tap `+` in **My Apps** and pick the IPA.
+
+A few things to know:
+
+- iOS 26 or later is required.
+- A free Apple ID works, but the app expires after 7 days and must be refreshed in AltStore or SideStore.
+- With a free Apple ID, Android gets less memory. AltStore 2.2 or later keeps the increased memory limit, SideStore doesn't by default. Extended virtual addressing needs a paid developer account.
+- JIT is optional. To use it, assign the universal script to Andarium in StikDebug once, then open Andarium from StikDebug.
+- To update by hand, install the new IPA with the same Apple ID and the same tool. It replaces the old version and keeps your virtual machine.
 
 ### Kernarium
 
