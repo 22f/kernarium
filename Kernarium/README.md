@@ -336,16 +336,21 @@ most, and with 4 ms of jitter in the interval between its frames it can change
 it up to five times in 12 s, at rates from about 60.05 to 62.05 frames a
 second. The rate is judged on the frames the display could show: a tick counts
 no more of the frames that arrived since the tick before than its time holds at
-120 Hz, and two at least, at the 60 step's ticks as at the 120 step's. A guest
-that catches up with a burst in one tick neither takes the 120 step nor holds
-it, whatever the number of frames in the burst, and a guest whose bursts of two
-or more frames come 31 or more times a second keeps its step. The time from a
-change of the guest's rate to the link following it is the later of the dwell
-since the last change (2 s) and the window after the change (1 s for a rise, 2 s
-for a fall), for any guest whose counted frames pass a threshold, however they
-bunch; one whose counted frames stay a frame under it (63 a second with three
-of them bunched counts 62) holds the old step as long as they are. Every time
-here is the time plus one tick of the link. The ceiling
+120 Hz, and two at least, at the 60 step's ticks as at the 120 step's. A burst
+within one on-time tick counts two at most (one that straddles two ticks, or
+arrives at a late tick, counts more). A guest at 60 with 20 frames at once at
+one point of each second, or at 63 with 3 to 12 of them bunched at one point of
+each second, counts 62 or fewer: it does not take the 120 step from the 60 step
+and keeps the 120 step it has (after a wake) while its count is 61 or more. A
+guest whose bursts of two or more frames, each within one tick, come 31 or more
+times a second takes the 120 step and keeps it. The time from a change of the
+guest's rate to the link following it is the later of the dwell since the last
+change (2 s) and the window after the change (1 s for a rise, 2 s for a fall)
+for any guest whose counted frames pass a threshold in every window of a second,
+however they bunch; just over the rise threshold the rise can come later (at 63
+counted a second by up to half a second, at 64 by about a tenth). One whose
+counted frames stay a frame under a threshold holds the old step as long as they
+are. Every time here is the time plus one tick of the link. The ceiling
 is the rate the EDID's timing states for the mode (the
 largest clock the field holds, for a size beyond it), the screen's maximum and
 Low Power Mode; from 100 it is the 120 step, and any lower rate, a mode of 47
