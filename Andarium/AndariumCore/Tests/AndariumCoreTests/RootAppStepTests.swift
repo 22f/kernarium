@@ -74,6 +74,29 @@ struct RootAppStepTests {
         #expect(waits.count == MagiskAppOpening.Policy.standard.attempts - 1)
     }
 
+    @Test func aLauncherActivityTheGuestCannotNameIsARecordedFailedOpenAndNothingIsStarted() async {
+        // A package whose launcher the resolver does not know: the open fails, the install stands, the start goes on.
+        let guest = MagiskGuest(.init(unresolvedAsks: .max))
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: rooted, installing: {}, install: {}, sleep: noWait)
+        guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(!outcome.isFailure)
+        #expect(state.appInstall == .init(reason: .absent, installed: true, opened: false))
+        #expect(!guest.commands.contains { $0.hasPrefix("am start") })
+    }
+
+    @Test func aHiddenAppIsNeitherInstalledAgainNorOpenedWithinThePeriod() async {
+        // "Hide the Magisk app" renames the package: the exact package is absent, and the period's record says it was put in.
+        var state = rooted
+        state.appVersionCode = 31_100
+        let guest = MagiskGuest(.init(presence: "package:com.example.hidden versionCode:31100\n"))
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: state, installing: { Issue.record("installed again") },
+            install: { Issue.record("installed again") }, sleep: noWait)
+        #expect(outcome == .notNeeded)
+        #expect(guest.commands == [MagiskApp.probeCommand], "nothing is started or waited for")
+    }
+
     @Test func anAppThatOpensOnlyAfterTheUnlockIsOpened() async {
         let guest = MagiskGuest(.init(lockedAsks: 4, refusedStarts: 1))
         let outcome = await RootAppStep.run(

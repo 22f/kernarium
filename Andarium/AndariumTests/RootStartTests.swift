@@ -24,7 +24,7 @@ final class RootStartTests {
     /// What the image answers to the commands that open the Magisk app once it
     /// is in: user 0 unlocked, the launcher activity, a start the activity
     /// manager takes and the app's task in focus. Nil for any other command.
-    private static func openingAnswer(_ command: String) -> GuestShellOutput? {
+    private nonisolated static func openingAnswer(_ command: String) -> GuestShellOutput? {
         if command.hasPrefix("am get-started-user-state") { return GuestShellOutput(text: "RUNNING_UNLOCKED\n", exitCode: 0) }
         if command.hasPrefix("cmd package resolve-activity") {
             return GuestShellOutput(text: "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.topjohnwu.magisk/.ui.MainActivity\n", exitCode: 0)
