@@ -88,6 +88,10 @@ struct AcknowledgementsTests {
     @Test func eachCarriesItsLicenceTextAndNamesWhereTheSourceIs() throws {
         let magisk = try #require(acknowledgements.project("magisk"))
         let busybox = try #require(acknowledgements.project("busybox"))
+        // The notice lines name the contributors and no person.
+        #expect(magisk.copyright == "The Magisk contributors" && magisk.license == "GNU GPL v3 or later")
+        #expect(magisk.spdx == "GPL-3.0-or-later")
+        #expect(busybox.copyright == "The BusyBox contributors" && busybox.license == "GNU GPL v2")
         let three = acknowledgements.blocks(of: magisk)
         let two = acknowledgements.blocks(of: busybox)
         #expect(three.contains { $0.title == "GNU General Public License, Version 3" && $0.text.contains("Version 3, 29 June 2007") })

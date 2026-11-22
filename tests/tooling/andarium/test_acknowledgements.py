@@ -239,6 +239,16 @@ class RootProjectsTests(unittest.TestCase):
                 self.assertTrue(self.document["licenses"][shared]["text"].strip())
         self.assertNotIn("requires_root", self.projects["linux"])
 
+    def test_the_notice_lines_name_the_contributors_and_no_person(self) -> None:
+        wanted = {
+            "magisk": ("The Magisk contributors", "GNU GPL v3 or later", "GPL-3.0-or-later"),
+            "busybox": ("The BusyBox contributors", "GNU GPL v2", "GPL-2.0-only"),
+        }
+        for identifier, (copyright, label, spdx) in wanted.items():
+            with self.subTest(project=identifier):
+                project = self.projects[identifier]
+                self.assertEqual((project["copyright"], project["license"], project["spdx"]), (copyright, label, spdx))
+
     def test_each_names_the_magisk_project_and_the_version_as_the_source(self) -> None:
         for identifier in ("magisk", "busybox"):
             with self.subTest(project=identifier):

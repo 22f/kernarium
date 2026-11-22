@@ -234,9 +234,9 @@
    "id": "magisk",
    "group": "system",
    "name": "Magisk",
-   "copyright": "John Wu and the Magisk contributors",
-   "license": "GNU GPL v3",
-   "spdx": "NOASSERTION",
+   "copyright": "The Magisk contributors",
+   "license": "GNU GPL v3 or later",
+   "spdx": "GPL-3.0-or-later",
    "requires_root": true
   },
   {
@@ -254,7 +254,7 @@
    "id": "busybox",
    "group": "system",
    "name": "BusyBox",
-   "copyright": "Erik Andersen, Rob Landley, Denys Vlasenko and the BusyBox contributors",
+   "copyright": "The BusyBox contributors",
    "license": "GNU GPL v2",
    "spdx": "GPL-2.0-only",
    "requires_root": true
