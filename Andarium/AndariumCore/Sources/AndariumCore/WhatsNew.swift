@@ -8,10 +8,10 @@ import Foundation
 /// nothing.
 public struct WhatsNewRelease: Identifiable, Hashable, Decodable, Sendable {
     /// The build (`CFBundleVersion`) that first carried these notes. The
-    /// Every build shares one marketing version, so the build orders
-    /// releases; every archive's is above the one before.
+    /// marketing version can change between releases ("1.0", then "1.1"), so
+    /// the build orders them; every archive's is above the one before.
     public let build: Int
-    /// The version as Info shows it: "1.0 (12)".
+    /// The version as Info shows it: "1.1 (16)".
     public let version: String
     /// The day the release came out, "2026-11-12"; left out where the day is
     /// not known when the notes are written.

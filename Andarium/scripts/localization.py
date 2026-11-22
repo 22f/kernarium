@@ -377,8 +377,9 @@ def check_english_only(root: pathlib.Path, problems: Problems) -> dict:
 
 
 def check_english_texts(root: pathlib.Path, english_only: dict, all_keys: dict[str, set[str]], problems: Problems) -> None:
-    """The user-visible strings decided to stay English: each is still in its file, and none is translated."""
-    translated = set().union(*all_keys.values()) if all_keys else set()
+    """The user-visible strings decided to stay English: each is still in its file, and none is translated.
+    The notes' table holds the release notes' texts, which no code looks up, so it translates none of them."""
+    translated = set().union(*(keys for name, keys in all_keys.items() if name != "WhatsNew")) if all_keys else set()
     for entry in english_only.get("english", []):
         text = entry.get("text", "")
         source = root / entry.get("file", "")
