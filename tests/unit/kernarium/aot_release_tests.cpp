@@ -54,14 +54,15 @@ void aRequestThatEndsBeforeTheWordNeverStatesIt()
     require(aotDisabled(boot));
 }
 
-void theWordIsTheLastMemberAndTheApiIsTheOneThatAddedIt()
+void theWordIsFollowedByTheRootWordAndTheApiIsTheOneThatAddedIt()
 {
-    /* A later field is a later API: nothing may follow the word unnoticed,
-     * because every request that ends before it would then state it too. */
-    require(bootSizeBeforeAotDisabled + sizeof(std::uint32_t) <=
-            sizeof(kernarium_runtime_boot));
-    require(sizeof(kernarium_runtime_boot) - bootSizeBeforeAotDisabled <=
-            sizeof(void*));
+    /* A later field is a later API: nothing may come between the word and
+     * the next one unnoticed, because every request that ends before it
+     * would then state it too. The root word (API 46) follows it directly;
+     * what follows that one is android_root_tests's to check. */
+    require(bootSizeBeforeAotDisabled +
+                sizeof(kernarium_runtime_boot::android_aot_disabled) ==
+            offsetof(kernarium_runtime_boot, android_root));
     require(KERNARIUM_RUNTIME_API_VERSION >= 45U);
 }
 
@@ -140,8 +141,8 @@ int main()
          anyNonzeroWordKeepsTheComponentOut},
         {"a-request-that-ends-before-the-word-never-states-it",
          aRequestThatEndsBeforeTheWordNeverStatesIt},
-        {"the-word-is-the-last-member-and-the-api-is-the-one-that-added-it",
-         theWordIsTheLastMemberAndTheApiIsTheOneThatAddedIt},
+        {"the-word-is-followed-by-the-root-word-and-the-api-is-the-one-that-added-it",
+         theWordIsFollowedByTheRootWordAndTheApiIsTheOneThatAddedIt},
         {"a-launch-that-states-nothing-gives-the-emulator-the-release",
          aLaunchThatStatesNothingGivesTheEmulatorTheRelease},
         {"a-launch-that-states-the-word-gives-the-emulator-no-release",
