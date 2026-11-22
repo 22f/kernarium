@@ -84,9 +84,11 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   calculator, PDF viewer, backup). There is no browser, app store or install
   restriction, and no Google apps, services or closed-source Google code;
   open-source components built from source are allowed and are the ones listed
-  here. Applications that need absent hardware or
-  LineageOS cloud services are excluded by name in the product makefile, and the
-  build and the verifier assert that list.
+  here. The two prebuilt files under `root/` ([Root files](#root-files)) are
+  admitted too: the official Magisk release the pin names, unmodified, and the
+  `init_boot` Magisk's own patcher makes from it. Applications that need absent
+  hardware or LineageOS cloud services are excluded by name in the product
+  makefile, and the build and the verifier assert that list.
 - **Signature spoofing.** The image ships no microG, and
   no guest interface names Google's services; Andarium names them only to say
   that they are left out on purpose ([No Google
@@ -1383,7 +1385,8 @@ verification, and `tools/verify-lineage-recovery.py` checks the recovery image.
 
 `support/release/release-manifest.schema.json` defines the compact rootfs
 release. It binds the system disk and its layout, boot ranges, command line,
-target-file support, and source provenance. The Android section records the
+target-file support, source provenance and, when the release has them, the
+[Magisk root files](#root-files). The Android section records the
 security patch level and the build number (`ro.build.version.incremental`),
 which a release sets to its release number (`build-aosp.sh --build-number N`:
 `r26` is 26 and `r10000` is 10000, up to ten digits), and so does every proof
@@ -1453,6 +1456,40 @@ outside `DIR`, and the tool requires the system's and the recovery's
 certificate. A presigned file keeps its upstream signature and is named in the
 build receipt. The key directory, its backup and the transfer to the builder are
 the maintainer's responsibility.
+
+### Root files
+
+A release can carry the Magisk root files of its own `init_boot` under `root/`:
+`init_boot-magisk.img`, that image as Magisk's patcher makes it, and the
+unmodified official `Magisk-<version>.apk`. The [`metadata/magisk.env`](metadata/magisk.env)
+pin names the Magisk release by name, version and the SHA-256 of its APK; it is a
+release input, the APK is given to the producer as a local file, and no Magisk
+file is in the repository.
+
+`build/assemble-image.sh --magisk-apk APK` makes the files on the builder after
+the disk is assembled (`tools/magisk-boot.py`), and `tools/publish-release.py`
+takes `--magisk-apk APK` or `--without-root`, never neither. A schema 8 manifest
+records them as its optional `root` object, which its
+[schema](support/release/release-manifest.schema.json) defines, and lists both
+files in its inventory. A release without root files is valid, as is every
+release of schema 6 and 7, which cannot carry them.
+
+`tools/verify-magisk-boot.py` is the one verifier. The producer, the installer
+and `Andarium/scripts/stage-system-image.py` run it, and it refuses by name a
+`root/` that is partial, holds anything beside the two files or is reached through
+a link, a file that is not the recorded one, and a patched image that is not its
+own disk's `init_boot` plus exactly what Magisk adds.
+
+A schema 8 accepted descriptor binds the root record
+(`LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256`: a digest of it, or `none` for a release
+without root files), so a release with root files and one without never share a
+descriptor. `install-release.py --print-acceptance` also checks the candidate's
+Magisk release against the tracked pin; an accepted release installed later is
+history and is checked against its descriptor alone.
+`scripts/check-embedded-artifacts.py` ties the staged and the packaged root files
+to the installed accepted release's, and that release to the descriptor: a
+schema 6 or 7 descriptor admits no root files, and a schema 8 one must name the
+installed record's digest, or `none`.
 
 ### Superseded releases
 
