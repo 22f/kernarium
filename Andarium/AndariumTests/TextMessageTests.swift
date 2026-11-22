@@ -565,6 +565,45 @@ struct TextMessageTests {
         #expect(await eventually { noticeText(rig) == header })
     }
 
+    /// The overlay as the application has it: a view in a hosting controller that UIKit owns, where SwiftUI's
+    /// `scenePhase` stays at .background and never says the application is active. The model must still learn
+    /// it from UIKit: the flag follows the application's own state at the overlay's first appearance and its
+    /// become-active and resign-active notifications, and a result on the open bar is told, which is what
+    /// lets Send take the next message.
+    @Test func theOverlayInAUIKitHostedViewKeepsTheModelsActiveFlagAndToldLinesFollow() async throws {
+        try #require(UIApplication.shared.applicationState == .active, "the test host is the active application")
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        // What a scene phase of .background left the flag as.
+        model.textMessageSceneActive = false
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        try await hosted(TextMessageBarOverlay().environment(model), in: lease, height: 900, width: 390) { _ in
+            #expect(await eventually { model.textMessageSceneActive }, "the overlay read the application's state")
+            // The result of a send on the open bar is told at once, and the identifier it was kept for goes.
+            model.openTextMessage()
+            #expect(await send(rig, "one", .handedOver(1)))
+            #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+            // Typing after a told result is a new message, which Send takes.
+            model.setTextMessageText("two")
+            #expect(model.canSendTextMessage)
+
+            // Resigning active: the next result is not told while the application is not active...
+            NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: UIApplication.shared)
+            #expect(await eventually { !model.textMessageSceneActive })
+            #expect(await send(rig, "two", .handedOver(1)))
+            await settle()
+            try #require(rig.driver.smsSent.count == 2)
+            let identifier = rig.driver.smsSent[1].identifier
+            #expect(state.awaiting == .result(identifier))
+            // ... and is, once the application is active again.
+            NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: UIApplication.shared)
+            #expect(await eventually { model.textMessageSceneActive })
+            #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+        }
+    }
+
     @Test func aLateAnswerOfAnEndedSessionTouchesNothingOfANewerSend() async throws {
         let rig = try rig()
         defer { rig.cleanUp() }
@@ -875,8 +914,12 @@ struct TextMessageTests {
 
     // MARK: Where it is offered
 
-    @Test func theApplicationThatDoesNotCarryItOffersNoEntranceAndOpensNoBar() async throws {
-        let rig = try rig(capabilities: .device)
+    /// The device carries text messages. A set of capabilities without them (a
+    /// runtime that has no service to send to) offers no entrance and opens no bar.
+    @Test func aRuntimeWithoutTextMessagesOffersNoEntranceAndOpensNoBar() async throws {
+        var without = Capabilities.device
+        without.textMessages = false
+        let rig = try rig(capabilities: without)
         defer { rig.cleanUp() }
         #expect(!rig.model.offersTextMessage)
         rig.model.openTextMessage()
@@ -892,13 +935,11 @@ struct TextMessageTests {
         #expect(!rig.state.isOpen)
     }
 
-    @Test func aDevelopmentLaunchOffersItOnlyToANormalRun() throws {
-        var capabilities = Capabilities.device
-        capabilities.textMessages = true
-        let normal = try rig(capabilities: capabilities)
+    @Test func theDeviceOffersItOnlyToANormalRun() throws {
+        let normal = try rig(capabilities: .device)
         defer { normal.cleanUp() }
         #expect(normal.model.offersTextMessage)
-        let recovery = try rig(capabilities: capabilities, mode: .recovery)
+        let recovery = try rig(capabilities: .device, mode: .recovery)
         defer { recovery.cleanUp() }
         #expect(!recovery.model.offersTextMessage)
         recovery.model.openTextMessage()
@@ -1407,15 +1448,15 @@ struct TextMessageTests {
     }
 
     @Test func settingsHasTheRowOnlyWhereTheApplicationCarriesTextMessages() async throws {
-        let held = try rig(capabilities: .device)
+        var without = Capabilities.device
+        without.textMessages = false
+        let held = try rig(capabilities: without)
         defer { held.cleanUp() }
         let heldLabels = try await draw(SessionSettingsSheet(large: true).environment(held.model), height: 2600).labels
         #expect(heldLabels.contains { $0.contains("ADB over network") })
         #expect(!heldLabels.contains { $0.contains(SmsMessages.row) }, "\(heldLabels)")
 
-        var capabilities = Capabilities.device
-        capabilities.textMessages = true
-        let offered = try rig(capabilities: capabilities)
+        let offered = try rig(capabilities: .device)
         defer { offered.cleanUp() }
         let offeredLabels = try await draw(SessionSettingsSheet(large: true).environment(offered.model), height: 2600).labels
         #expect(offeredLabels.contains { $0.contains(SmsMessages.row) }, "\(offeredLabels)")

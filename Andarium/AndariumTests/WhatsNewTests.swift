@@ -82,7 +82,7 @@ struct WhatsNewTests {
     /// Build 16 as written.
     private static let buildSixteenIDs = [
         "root-access", "aot", "high-refresh", "add-to-home-screen", "voiceover-talkback",
-        "frame-rate-when-hot", "update-notice", "build-16-fixes",
+        "frame-rate-when-hot", "text-messages", "update-notice", "build-16-fixes",
     ]
 
     /// Build 16 as a device without Add to Home Screen is told it.
@@ -111,10 +111,10 @@ struct WhatsNewTests {
         let sixteen = try #require(releases.first?.entries)
         #expect(sixteen.map(\.id) == Self.buildSixteenIDs)
         #expect(sixteen.first?.title == "Root access")
-        // The three entries about a row of Settings say where it is found.
+        // The four entries about a row of Settings say where it is found.
         #expect(
             sixteen.filter { $0.place == .sessionSettings }.map(\.id)
-                == ["add-to-home-screen", "voiceover-talkback", "frame-rate-when-hot"])
+                == ["add-to-home-screen", "voiceover-talkback", "frame-rate-when-hot", "text-messages"])
         // The fixes are five points under a title, with no sentence of their own.
         let sixteenFixes = try #require(sixteen.last)
         #expect(
@@ -187,7 +187,7 @@ struct WhatsNewTests {
         let sixteenTitles = try #require(releases.first).entries.map(\.title)
         #expect(sixteenTitles == [
             "Root access", "AOT", "120 Hz", "Add to Home Screen", "VoiceOver and TalkBack",
-            "Frame rate when hot", "Update notice", "Fixes and improvements",
+            "Frame rate when hot", "Text messages", "Update notice", "Fixes and improvements",
         ])
         let twelveTitles = try #require(releases.first { $0.build == 12 }).entries.map(\.title)
         #expect(twelveTitles == ["Old app compatibility", "Fixes and improvements"])
@@ -205,8 +205,8 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(titles, naming: 0) == "9 new features")
         #expect(
             WhatsNewRibbon.summary(sixteenTitles, naming: 3)
-                == "Root access\(separator)AOT\(separator)120 Hz\(separator)5 more")
-        #expect(WhatsNewRibbon.summary(sixteenTitles, naming: 0) == "8 new features")
+                == "Root access\(separator)AOT\(separator)120 Hz\(separator)6 more")
+        #expect(WhatsNewRibbon.summary(sixteenTitles, naming: 0) == "9 new features")
         #expect(WhatsNewRibbon.summary(twelveTitles, naming: 0) == "2 new features")
     }
 
@@ -221,9 +221,9 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(["A", "B", "C"], naming: 1, language: "ja") == "A \u{00B7} 2 more")
     }
 
-    /// The ribbon lists what the device is told, in the order written: eighteen
+    /// The ribbon lists what the device is told, in the order written: nineteen
     /// entries each (an update from build 9 carries builds 16, 12 and 11), but
-    /// not the same eighteen.
+    /// not the same nineteen.
     @Test func theRibbonNamesWhatAnIPhoneAndAnIPadAreTold() {
         func ribbon(on host: HostDevice, naming named: Int) -> String {
             withDefaultsReturning { defaults in
@@ -236,17 +236,17 @@ struct WhatsNewTests {
         let separator = "\u{00A0}\u{00B7} "
         let sixteen = [
             "Root access", "AOT", "120 Hz", "Add to Home Screen", "VoiceOver and TalkBack",
-            "Frame rate when hot", "Update notice", "Fixes and improvements",
+            "Frame rate when hot", "Text messages", "Update notice", "Fixes and improvements",
         ]
         let twelve = ["Old app compatibility", "Fixes and improvements"]
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 13) == (sixteen + twelve + [
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 14) == (sixteen + twelve + [
             "Snapshots", "Resolution", "Keyboard, mouse and controllers", "5 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 13) == (sixteen + twelve + [
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 14) == (sixteen + twelve + [
             "Snapshots", "Resolution", "Rotation on iPad", "5 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "18 new features")
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "18 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "19 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "19 new features")
     }
 
     @Test func eachKindOfDeviceIsToldItsOwnEntries() {
@@ -364,15 +364,15 @@ struct WhatsNewTests {
         }
         let separator = "\u{00A0}\u{00B7} "
         for framesPerSecond in [60, 120] {
-            #expect(ribbon(framesPerSecond: framesPerSecond, padApp: Self.iPadApp, naming: 0) == "8 new features")
+            #expect(ribbon(framesPerSecond: framesPerSecond, padApp: Self.iPadApp, naming: 0) == "9 new features")
             #expect(
                 ribbon(framesPerSecond: framesPerSecond, padApp: Self.iPadAppBeforeIOS27, naming: 0)
-                    == "7 new features")
+                    == "8 new features")
         }
         // Where Add to Home Screen is not shown, the names skip it.
         #expect(
             ribbon(framesPerSecond: 60, padApp: Self.iPadAppBeforeIOS27, naming: 5)
-                == ["Root access", "AOT", "120 Hz", "VoiceOver and TalkBack", "Frame rate when hot", "2 more"]
+                == ["Root access", "AOT", "120 Hz", "VoiceOver and TalkBack", "Frame rate when hot", "3 more"]
                 .joined(separator: separator))
     }
 
@@ -563,7 +563,7 @@ struct WhatsNewTests {
                 == Self.buildSixteenIDs + Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPhone
                     + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.map(\.entries.count) == [8, 2, 9, 3])
+            #expect(model.whatsNew.releases.map(\.entries.count) == [9, 2, 9, 3])
         }
     }
 
