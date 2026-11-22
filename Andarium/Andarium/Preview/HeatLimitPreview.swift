@@ -20,7 +20,7 @@ enum HeatLimitPreview {
     ]
 
     static func apply(screen: String, to model: AppModel) {
-        if screen.hasPrefix("home-performance") || screen.hasPrefix("home-aot") || screen == "settings-performance-120" {
+        if screen.hasPrefix("home-performance") || (screen.hasPrefix("home-aot") && screen != "home-aot-60hz") || screen == "settings-performance-120" {
             model.statedMaximumFramesPerSecond = 120
             model.screenDidChange(nativeScale: model.screenNativeScale, maximumFramesPerSecond: 120)
         }

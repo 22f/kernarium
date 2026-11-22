@@ -175,6 +175,7 @@ SHOTS: list[Shot] = [
     s("home-jit-fallback", "Home", "home-jit-fallback", "Home after a start that ran without the JIT it was asked for: the note says StikDebug was not connected."),
     s("home-aot", "Home", "home-aot", "Home scrolled to Performance on a screen that shows 120 frames a second, in a build that carries the translated libraries: 120 Hz off, the AOT row below it with its switch on (the default) and its note, then JIT.", dark=True),
     s("home-aot-off", "Home", "home-aot-off", "The AOT row with its switch off."),
+    s("home-aot-60hz", "Home", "home-aot-60hz", "Performance on a screen that shows 60 frames a second, in a build that carries the translated libraries: the AOT group and the JIT group only."),
     s("home-aot-jit", "Home", "home-aot-jit", "The AOT row while the next start runs on JIT: the row is dimmed and the line under the title says it is not used."),
     s("home-capabilities-mic-on", "Home", "home-mic-on", "Capabilities with Microphone on, iOS having allowed it."),
     s("home-capabilities-mic-denied", "Home", "home-mic-denied", "Capabilities after iOS refused the microphone or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),

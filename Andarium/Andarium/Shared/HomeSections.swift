@@ -25,11 +25,50 @@ struct HomeSection<Content: View, Footer: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            title
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
-                .accessibilityAddTraits(.isHeader)
+            title.homeSectionHeading()
+            VStack(spacing: 0) { content }
+                .glassEffect(.regular, in: .rect(cornerRadius: 26))
+            footer
+        }
+    }
+}
+
+extension View {
+    /// The small heading above a section's panel.
+    func homeSectionHeading() -> some View {
+        font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.leading, 18)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// A note beneath a group whose switch says it for VoiceOver: drawn, and with
+/// VoiceOver running not read a second time as a loose element.
+struct SpokenNote: View {
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverRunning
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        SectionNote(text).accessibilityHidden(voiceOverRunning)
+    }
+}
+
+/// One panel of a section that has several, with its note beneath and no
+/// heading of its own: the section's heading is above the first group.
+struct HomeGroup<Content: View, Footer: View>: View {
+    private let content: Content
+    private let footer: Footer
+
+    init(@ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.content = content()
+        self.footer = footer()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
             VStack(spacing: 0) { content }
                 .glassEffect(.regular, in: .rect(cornerRadius: 26))
             footer
@@ -65,9 +104,6 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
-    /// The most lines the line under the title shows. Two, as every Home row
-    /// has; the AOT row's note is longer and takes three.
-    var detailLines = 2
     /// What the line under the title does when it is touched; the line then
     /// reads as a button. None leaves it plain text.
     var detailAction: (() -> Void)?
@@ -103,7 +139,7 @@ struct OptionRow<Control: View>: View {
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(detailLines)
+                            .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -314,10 +350,7 @@ struct HighRefreshRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        OptionRow(
-            title: String(localized: "120 Hz"), symbol: "speedometer",
-            detail: String(localized: "Smoother motion, more battery use.")
-        ) {
+        OptionRow(title: String(localized: "120 Hz"), symbol: "speedometer") {
             Toggle("120 Hz", isOn: Binding(
                 get: { model.highRefreshOn },
                 set: { model.setHighRefresh($0) }
@@ -325,8 +358,23 @@ struct HighRefreshRow: View {
             .labelsHidden()
             .accessibilityIdentifier("home-high-refresh-switch")
         }
+        // VoiceOver says the note, which is beneath the group, and then the
+        // name, as it did when the note was in the cell.
+        .accessibilityLabel(HighRefreshWords.spoken)
         .id("high-refresh")
     }
+}
+
+/// The note beneath the 120 Hz group.
+enum HighRefreshWords {
+    static let note = String(localized: "Smoother motion, more battery use.")
+    /// What VoiceOver says for the row: the note and the name.
+    static let spoken: String = "\(note), \(String(localized: "120 Hz"))"
+}
+
+/// The note beneath the 120 Hz group.
+struct HighRefreshNote: View {
+    var body: some View { SpokenNote(HighRefreshWords.note) }
 }
 
 // MARK: Capabilities
@@ -553,16 +601,17 @@ extension View {
 
 // MARK: Performance
 
-/// Performance: what the guest runs with, in one section, top to bottom: "120 Hz"
-/// where the screen can show it (`AppModel.highRefreshOffered`), then AOT
-/// (`TranslatedLibrariesRow`) in a build that carries the translated-code
+/// Performance: what the guest runs with, in one section under one heading,
+/// as groups top to bottom, each a panel of one switch with its note beneath:
+/// "120 Hz" where the screen can show it (`AppModel.highRefreshOffered`), then
+/// AOT (`TranslatedLibrariesRow`) in a build that carries the translated-code
 /// framework (`AppModel.translatedLibrariesAvailable`), then JIT where a build
-/// can have it (`AppModel.jitAvailable`). The section is drawn when at least
-/// one of them is, and none draws it at all. JIT is the row next to the note
-/// beneath the panel, which says what JIT does at the next start
-/// (`AppModel.jitNote`); with no JIT row there is no note, and the ready
-/// sentence is there only while the JIT row is on, so a section with the row
-/// off and nothing to say ends at its panel.
+/// can have it (`AppModel.jitAvailable`). The heading is drawn once, above the
+/// first group that is drawn, and a group that is not offered leaves out its
+/// note with it; none offered draws nothing. The groups are closer together
+/// than two sections are. The note of JIT is its status
+/// (`AppModel.jitNote`): the ready sentence is there only while the row is on,
+/// so a group with the row off and nothing else to say ends at its panel.
 struct HomePerformanceSection: View {
     @Environment(AppModel.self) private var model
 
@@ -570,22 +619,29 @@ struct HomePerformanceSection: View {
         if model.guest != nil,
             model.highRefreshOffered || model.translatedLibrariesAvailable || model.jitAvailable
         {
-            HomeSection(title: "Performance") {
-                if model.highRefreshOffered {
-                    HighRefreshRow()
-                    if model.translatedLibrariesAvailable || model.jitAvailable { RowDivider() }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Performance").homeSectionHeading()
+                VStack(alignment: .leading, spacing: Self.groupSpacing) {
+                    if model.highRefreshOffered {
+                        HomeGroup { HighRefreshRow() } footer: { HighRefreshNote() }
+                    }
+                    if model.translatedLibrariesAvailable {
+                        HomeGroup { TranslatedLibrariesRow() } footer: { TranslatedLibrariesNote() }
+                    }
+                    if model.jitAvailable {
+                        HomeGroup { JitRow() } footer: {
+                            if let note = model.jitNote { SectionNote(note) }
+                        }
+                    }
                 }
-                if model.translatedLibrariesAvailable {
-                    TranslatedLibrariesRow()
-                    if model.jitAvailable { RowDivider() }
-                }
-                if model.jitAvailable { JitRow() }
-            } footer: {
-                if model.jitAvailable, let note = model.jitNote { SectionNote(note) }
             }
             .id("performance")
         }
     }
+
+    /// The space between two groups of the section: half what Home leaves
+    /// between two sections, so that the groups read as one section.
+    static let groupSpacing: CGFloat = 14
 }
 
 /// Whether the guest runs on the JIT engine, which a debugger the person

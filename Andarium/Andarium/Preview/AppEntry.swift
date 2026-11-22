@@ -116,6 +116,7 @@ struct AppEntry {
         "home-jit": "performance", "home-jit-no-debugger": "performance", "home-jit-fallback": "performance",
         "home-performance": "performance", "home-performance-on": "performance",
         "home-aot": "performance", "home-aot-off": "performance", "home-aot-jit": "performance",
+        "home-aot-60hz": "performance",
     ]
 
     /// Where Settings scrolls to for a screen that shows a lower section.
@@ -283,7 +284,7 @@ struct AppEntry {
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit",
              "home-location-ask", "home-camera-ask", "home-performance", "home-performance-on":
             break
-        case "home-aot":
+        case "home-aot", "home-aot-60hz":
             break
         case "home-aot-off":
             model.translatedLibrariesOn = false

@@ -257,6 +257,53 @@ struct TranslatedLibrariesRowTests {
         #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
     }
 
+    /// The accessibility labels under `view`, in the order the nodes come.
+    private func labels(in view: UIView) -> [String] {
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        return nodes(in: view).compactMap(\.accessibilityLabel)
+    }
+
+    @Test func performanceIsOneHeadingOverThreeGroupsEachWithItsNote() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (model, driver) = fixture(carried: true, highRefresh: true)
+        driver.debuggerAttached = true
+        model.jitOn = true
+        model.jitDebuggerAttached = true
+        let controller = try await hosted(model, switches: 3, in: lease)
+        let ready = JitStatus.ready
+        #expect(await eventually { labels(in: controller.view).contains(ready) })
+        let all = labels(in: controller.view)
+        #expect(all.filter { $0 == "Performance" }.count == 1, "one heading: \(all)")
+        let header = try #require(all.firstIndex(of: "Performance"), "\(all)")
+        let refresh = try #require(all.firstIndex { $0.hasSuffix(", 120 Hz") }, "\(all)")
+        let aot = try #require(all.firstIndex { $0.hasPrefix("AOT, ") }, "\(all)")
+        let jit = try #require(all.firstIndex(of: "JIT"), "\(all)")
+        let note = try #require(all.firstIndex(of: ready), "\(all)")
+        #expect(header < refresh && refresh < aot && aot < jit && jit < note, "heading, 120 Hz, AOT, JIT, its note: \(all)")
+        // The three switches are in three panels: more than a row apart.
+        let frames = switches(in: controller.view).map { $0.convert($0.bounds, to: controller.view) }
+        #expect(frames[1].minY - frames[0].maxY > 40 && frames[2].minY - frames[1].maxY > 40, "\(frames)")
+    }
+
+    @Test func theReadyNoteIsDrawnOnlyWhileJitIsOn() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (model, driver) = fixture(carried: true)
+        driver.debuggerAttached = true
+        model.jitDebuggerAttached = true
+        model.jitOn = false
+        let controller = try await hosted(model, switches: 2, in: lease)
+        #expect(await eventually { labels(in: controller.view).contains("JIT") })
+        try? await Task.sleep(for: .milliseconds(400))
+        #expect(!labels(in: controller.view).contains(JitStatus.ready), "the ready line is under a JIT switch that is off")
+        model.jitOn = true
+        #expect(await eventually { labels(in: controller.view).contains(JitStatus.ready) })
+        model.jitOn = false
+        #expect(await eventually { !labels(in: controller.view).contains(JitStatus.ready) })
+    }
+
     @Test func aStartThatFellBackLeavesTheRowWorkingWhileTheNoteUnderJitSaysSo() {
         let (model, driver) = fixture(carried: true)
         driver.debuggerAttached = true

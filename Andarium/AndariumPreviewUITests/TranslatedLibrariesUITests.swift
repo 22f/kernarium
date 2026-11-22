@@ -90,6 +90,16 @@ final class TranslatedLibrariesUITests: XCTestCase {
         XCTAssertTrue(jit.exists, "the JIT row is missing")
         XCTAssertLessThan(refresh.frame.maxY, toggle.frame.minY, "the AOT row is not below 120 Hz")
         XCTAssertLessThan(toggle.frame.maxY, jit.frame.minY, "the AOT row is not above the JIT row")
+        // Each setting is its own group, with its note beneath the panel.
+        let refreshNote = text("Smoother motion, more battery use.", in: app)
+        let aotNote = text(Self.note, in: app)
+        XCTAssertTrue(refreshNote.exists && aotNote.exists, "a note is missing")
+        XCTAssertTrue(
+            refresh.frame.maxY < refreshNote.frame.minY && refreshNote.frame.maxY < toggle.frame.minY,
+            "the 120 Hz note is not between its switch and the AOT switch")
+        XCTAssertTrue(
+            toggle.frame.maxY < aotNote.frame.minY && aotNote.frame.maxY < jit.frame.minY,
+            "the AOT note is not between its switch and the JIT switch")
         // One section: a single Performance heading above the three rows.
         XCTAssertEqual(app.staticTexts.matching(identifier: "Performance").count, 1)
     }
