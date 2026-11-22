@@ -84,9 +84,11 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   calculator, PDF viewer, backup). There is no browser, app store or install
   restriction, and no Google apps, services or closed-source Google code;
   open-source components built from source are allowed and are the ones listed
-  here. Applications that need absent hardware or
-  LineageOS cloud services are excluded by name in the product makefile, and the
-  build and the verifier assert that list.
+  here. The two prebuilt files under `root/` ([Root files](#root-files)) are
+  admitted too: the official Magisk release the pin names, unmodified, and the
+  `init_boot` Magisk's own patcher makes from it. Applications that need absent
+  hardware or LineageOS cloud services are excluded by name in the product
+  makefile, and the build and the verifier assert that list.
 - **Signature spoofing.** The image ships no microG, and
   no guest interface names Google's services; Andarium names them only to say
   that they are left out on purpose ([No Google
