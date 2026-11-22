@@ -302,7 +302,7 @@ struct MagiskAppTests {
 
     @Test func theCommandsNameOnlyThePackage() {
         #expect(MagiskApp.probeCommand == "pm list packages --show-versioncode com.topjohnwu.magisk")
-        #expect(MagiskApp.openCommand.hasSuffix("-p com.topjohnwu.magisk"))
+        #expect(MagiskApp.resolveCommand.hasSuffix(" com.topjohnwu.magisk"))
         #expect(MagiskApp.uninstallCommand.hasSuffix(" com.topjohnwu.magisk"))
     }
 }
@@ -547,6 +547,23 @@ actor RootCounter {
         #expect(decoded?.appInstall == state.appInstall)
         state.setOn(false)
         #expect(state.appInstall == nil)
+    }
+
+    @Test func theOpenAfterTheLastInstallIsInTheReportWhenOneWasTried() {
+        var state = RootState()
+        state.on = true
+        state.appInstall = .init(reason: .absent, installed: true)
+        #expect(!RootReport.text(state: state, release: release).contains("on the screen"), "no open was tried: no line")
+        state.appInstall = .init(reason: .absent, installed: true, opened: true)
+        #expect(RootReport.text(state: state, release: release).contains("Magisk app on the screen after that install: yes\n"))
+        state.appInstall = .init(reason: .absent, installed: true, opened: false)
+        #expect(RootReport.text(state: state, release: release).contains("Magisk app on the screen after that install: no\n"))
+        // Kept with the guest, and a state an older application saved reads back with no open recorded.
+        let decoded = try? JSONDecoder().decode(RootState.self, from: JSONEncoder().encode(state))
+        #expect(decoded?.appInstall == .init(reason: .absent, installed: true, opened: false))
+        let older = #"{"on":true,"appInstall":{"reason":"absent","installed":true}}"#
+        let read = try? JSONDecoder().decode(RootState.self, from: Data(older.utf8))
+        #expect(read?.appInstall == .init(reason: .absent, installed: true, opened: nil))
     }
 
     @Test func aPausedGuestSaysWhy() {

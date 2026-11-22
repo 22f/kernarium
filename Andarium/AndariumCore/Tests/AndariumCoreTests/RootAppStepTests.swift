@@ -23,9 +23,20 @@ struct RootAppStepTests {
         }
     }
 
+    /// What the opening does when it has to try again: no waits are made.
+    private let noWait: @Sendable (Duration) async -> Void = { _ in }
+
     private func shell(_ probe: String, exit: Int = 0) -> RootScriptedShell {
         RootScriptedShell { command in
-            command == MagiskApp.probeCommand ? GuestShellOutput(text: probe, exitCode: exit) : GuestShellOutput(text: "", exitCode: 0)
+            switch command {
+            case MagiskApp.probeCommand: return GuestShellOutput(text: probe, exitCode: exit)
+            case MagiskApp.userStateCommand: return GuestShellOutput(text: "RUNNING_UNLOCKED\n", exitCode: 0)
+            case MagiskApp.resolveCommand: return GuestShellOutput(text: MagiskGuest.resolved, exitCode: 0)
+            case MagiskApp.focusCommand: return GuestShellOutput(text: MagiskGuest.focused, exitCode: 0)
+            default:
+                return command.hasPrefix("am start")
+                    ? GuestShellOutput(text: MagiskGuest.started, exitCode: 0) : GuestShellOutput(text: "", exitCode: 0)
+            }
         }
     }
 
@@ -41,7 +52,47 @@ struct RootAppStepTests {
         let shown = await showed.value
         let done = await installed.value
         #expect(shown == 1 && done == 1)
-        #expect(shell.commands == [MagiskApp.probeCommand, MagiskApp.openCommand])
+        #expect(state.appInstall == .init(reason: .absent, installed: true, opened: true))
+        #expect(shell.commands == [
+            MagiskApp.probeCommand, MagiskApp.userStateCommand, MagiskApp.resolveCommand,
+            MagiskApp.startCommand(component: "com.topjohnwu.magisk/.ui.MainActivity"), MagiskApp.focusCommand,
+        ])
+    }
+
+    @Test func anAppThatDoesNotOpenIsRecordedAndIsNoFailure() async {
+        let guest = MagiskGuest(.init(refusedStarts: .max))
+        let sleeps = RecordedSleeps()
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: rooted, installing: {}, install: {},
+            sleep: { await sleeps.add($0) })
+        guard case .installed(let state) = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
+        #expect(!outcome.isFailure)
+        #expect(state.appVersionCode == 31_100 && state.appEverHandled && state.on, "the install is recorded whatever the open did")
+        #expect(state.appInstall == .init(reason: .absent, installed: true, opened: false))
+        #expect(guest.count(MagiskApp.startCommand(component: "com.topjohnwu.magisk/.ui.MainActivity")) == MagiskAppOpening.Policy.standard.attempts)
+        let waits = await sleeps.waits
+        #expect(waits.count == MagiskAppOpening.Policy.standard.attempts - 1)
+    }
+
+    @Test func anAppThatOpensOnlyAfterTheUnlockIsOpened() async {
+        let guest = MagiskGuest(.init(lockedAsks: 4, refusedStarts: 1))
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: rooted, installing: {}, install: {}, sleep: noWait)
+        guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(state.appInstall?.opened == true)
+        #expect(guest.count(MagiskApp.userStateCommand) == 5)
+    }
+
+    @Test func thePolicyTheStepIsGivenIsTheOneTheOpeningUses() async {
+        let guest = MagiskGuest(.init(refusedStarts: .max))
+        let few = MagiskAppOpening.Policy(
+            unlockPolls: 1, pollInterval: .milliseconds(1), attempts: 2, retryInterval: .milliseconds(1),
+            commandLimit: .seconds(1))
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: rooted, installing: {}, install: {}, opening: few, sleep: noWait)
+        guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(state.appInstall?.opened == false)
+        #expect(guest.count(MagiskApp.resolveCommand) == 2)
     }
 
     @Test func anAppTheApplicationPutInForThisReleaseIsLeftAlone() async {
@@ -70,7 +121,7 @@ struct RootAppStepTests {
             guard case .installed(let state) = outcome else { Issue.record("\(line): \(outcome)"); continue }
             let done = await installed.value
             #expect(done == 1, Comment(rawValue: line))
-            #expect(state.appInstall == .init(reason: .notRecorded, installed: true), Comment(rawValue: line))
+            #expect(state.appInstall == .init(reason: .notRecorded, installed: true, opened: true), Comment(rawValue: line))
             #expect(state.appVersionCode == 31_100)
             #expect(!shell.commands.contains { $0.contains("uninstall") }, "the person's app is never removed")
         }
@@ -108,7 +159,7 @@ struct RootAppStepTests {
             installing: {}, install: {})
         guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
         #expect(state.appVersionCode == 31_100)
-        #expect(state.appInstall == .init(reason: .older, installed: true))
+        #expect(state.appInstall == .init(reason: .older, installed: true, opened: true))
     }
 
     @Test func anAppThePersonRemovedStaysRemovedWithinThePeriod() async {
@@ -129,7 +180,8 @@ struct RootAppStepTests {
         let outcome = await RootAppStep.run(
             shell: shell, release: release, state: rooted, installing: {}, install: { throw Refused() })
         #expect(outcome.isFailure)
-        #expect(!shell.commands.contains(MagiskApp.openCommand), "nothing is opened after a failure")
+        #expect(!shell.commands.contains { $0.hasPrefix("am start") }, "nothing is opened after a failure")
+        #expect(!shell.commands.contains(MagiskApp.userStateCommand), "and no wait for the unlock is made")
     }
 
     @Test func theBoundEndsAnInstallThatNeverFinishes() async {
@@ -155,14 +207,39 @@ struct RootAppStepTests {
 
     @Test func openingTheAppIsInsideTheBoundAndSaysNothingOfTheInstall() async {
         let slowOpen = RootScriptedShell { command in
-            if command == MagiskApp.openCommand { await Self.waitThatACancelDoesNotEnd(seconds: 40) }
+            if command.hasPrefix("am start") { await Self.waitThatACancelDoesNotEnd(seconds: 40) }
             return GuestShellOutput(text: "", exitCode: 0)
         }
         let started = ContinuousClock.now
         let outcome = await RootAppStep.run(
             shell: slowOpen, release: release, state: rooted, installing: {}, install: {}, limit: .seconds(2))
-        guard case .installed = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
+        guard case .installed(let state) = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
+        #expect(state.appInstall?.opened == false, "an open the bound ended is not an open")
         #expect(ContinuousClock.now - started < .seconds(20), "the open waited past the bound")
+    }
+
+    @Test func theWaitsOfTheOpeningAreInsideTheBoundToo() async {
+        // Every try is refused and the policy waits a minute between tries: the step still ends with the bound.
+        let guest = MagiskGuest(.init(lockedAsks: .max, refusedStarts: .max))
+        let slow = MagiskAppOpening.Policy(
+            unlockPolls: 100, pollInterval: .seconds(60), attempts: 100, retryInterval: .seconds(60),
+            commandLimit: .seconds(1))
+        let started = ContinuousClock.now
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: rooted, installing: {}, install: {}, limit: .seconds(1), opening: slow)
+        guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(state.appInstall?.opened == false)
+        #expect(ContinuousClock.now - started < .seconds(20))
+    }
+
+    @Test func aBoundThatEndsDuringTheInstallOpensNothing() async {
+        let guest = MagiskGuest()
+        let outcome = await RootAppStep.run(
+            shell: guest, release: release, state: rooted, installing: {},
+            install: { try? await Task.sleep(for: .milliseconds(300)) }, limit: .milliseconds(100))
+        // The install itself ran past the bound: a failure, and nothing is opened.
+        #expect(outcome.isFailure)
+        #expect(!guest.commands.contains { $0.hasPrefix("am start") })
     }
 
     @Test func aCancelledCallerIsReleasedBeforeTheWorkEnds() async {

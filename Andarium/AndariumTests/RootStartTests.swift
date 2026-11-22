@@ -21,6 +21,23 @@ final class RootStartTests {
     private let release = RootRelease(versionName: "v31.1", versionCode: 31100, apkPath: "root/Magisk-v31.1.apk")
     private let apk = URL(fileURLWithPath: "/release/root/Magisk-v31.1.apk")
 
+    /// What the image answers to the commands that open the Magisk app once it
+    /// is in: user 0 unlocked, the launcher activity, a start the activity
+    /// manager takes and the app's task in focus. Nil for any other command.
+    private static func openingAnswer(_ command: String) -> GuestShellOutput? {
+        if command.hasPrefix("am get-started-user-state") { return GuestShellOutput(text: "RUNNING_UNLOCKED\n", exitCode: 0) }
+        if command.hasPrefix("cmd package resolve-activity") {
+            return GuestShellOutput(text: "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.topjohnwu.magisk/.ui.MainActivity\n", exitCode: 0)
+        }
+        if command.hasPrefix("am start") {
+            return GuestShellOutput(text: "Starting: Intent { cmp=com.topjohnwu.magisk/.ui.MainActivity }\n", exitCode: 0)
+        }
+        if command.hasPrefix("dumpsys activity activities") {
+            return GuestShellOutput(text: "  topDisplayFocusedRootTask=Task{4125ccd #6 type=standard A=10126:com.topjohnwu.magisk}\n", exitCode: 0)
+        }
+        return nil
+    }
+
     /// A guest shell that answers the package list with `listing` and
     /// remembers what it was asked.
     private final class Shell: GuestShell, @unchecked Sendable {
@@ -31,6 +48,7 @@ final class RootStartTests {
         var commands: [String] { lock.withLock { asked } }
         func run(_ command: String, limit: Duration) async throws -> GuestShellOutput {
             lock.withLock { asked.append(command) }
+            if let answer = RootStartTests.openingAnswer(command) { return answer }
             return GuestShellOutput(text: command.hasPrefix("pm list") ? listing : "", exitCode: 0)
         }
     }
@@ -64,7 +82,7 @@ final class RootStartTests {
                 lock.withLock { opening = true }
                 while !lock.withLock({ open }) { try? await Task.sleep(for: .milliseconds(5)) }
             }
-            return GuestShellOutput(text: "", exitCode: 0)
+            return RootStartTests.openingAnswer(command) ?? GuestShellOutput(text: "", exitCode: 0)
         }
         func release() { lock.withLock { open = true } }
         func waitUntilOpening() async {
@@ -131,6 +149,8 @@ final class RootStartTests {
         #expect(driver.rootInstalls == 1)
         #expect(model.rootAppInstalling)
         #expect(model.guest?.root.appVersionCode == 31100)
+        #expect(model.guest?.root.appInstall?.opened == true)
+        #expect(shell.commands.contains { $0.hasPrefix("am start") && $0.contains(" -n 'com.topjohnwu.magisk/") })
         #expect(model.alert == nil)
         // The next start's boot, with the app there at the carried version, installs nothing more.
         var again = 0

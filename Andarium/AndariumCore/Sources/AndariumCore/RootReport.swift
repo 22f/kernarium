@@ -43,6 +43,9 @@ public enum RootReport {
             case .notRecorded: why = "the app there was not recorded as put in by the application for this release"
             }
             lines.append("last Magisk app install: \(install.installed ? "done" : "did not finish"), \(why)")
+            if let opened = install.opened {
+                lines.append("Magisk app on the screen after that install: \(opened ? "yes" : "no")")
+            }
         }
         return lines.joined(separator: "\n") + "\n"
     }

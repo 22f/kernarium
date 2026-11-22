@@ -5,13 +5,14 @@ import Foundation
 /// The boot screen's Magisk app step: after Android has booted with root, the
 /// application asks the guest whether the official Magisk app is there and puts
 /// it in when it is not (`RootInstallRule`). The check, the install and the
-/// opening of the app are bounded together by `limit`; past it, or on a
-/// failure, the boot goes on with root on and no app, and Home says so. A
-/// cancelled caller is released at once.
+/// opening of the app (`MagiskAppOpening`) are bounded together by `limit`;
+/// past it, or on a failure, the boot goes on with root on and no app, and
+/// Home says so. An app that was put in and did not open is not a failure: the
+/// state records it. A cancelled caller is released at once.
 public enum RootAppStep {
     /// The hard bound on the check and the install together.
     public static let limit = Duration.seconds(45)
-    /// The bound on each of the short commands (the check, opening the app).
+    /// The bound on the short command that checks for the app.
     static let commandLimit = Duration.seconds(10)
 
     public enum Outcome: Equatable, Sendable {
@@ -31,12 +32,16 @@ public enum RootAppStep {
 
     /// Runs the step. `installing` is told once, when an install is about to
     /// begin and not before, so that the screen adds its step only for a boot
-    /// that installs. `install` puts the carried app in the guest.
+    /// that installs. `install` puts the carried app in the guest. `opening`
+    /// and `sleep` are how the app is then opened and how it waits between
+    /// tries, which a test replaces.
     public static func run(
         shell: any GuestShell, release: RootRelease, state: RootState,
         installing: @escaping @Sendable () async -> Void,
         install: @escaping @Sendable () async throws -> Void,
-        limit: Duration = RootAppStep.limit
+        limit: Duration = RootAppStep.limit,
+        opening: MagiskAppOpening.Policy = .standard,
+        sleep: @escaping @Sendable (Duration) async -> Void = MagiskAppOpening.pause
     ) async -> Outcome {
         let attempt = Attempt(state)
         let clock = ContinuousClock()
@@ -62,15 +67,19 @@ public enum RootAppStep {
             return .installed(done)
         }
         guard let outcome else { return .failed(attempt.state) }
-        // Opening the app is inside the same bound, with what is left of it,
-        // and says nothing of the install it follows.
-        if case .installed = outcome, RootInstallRule.opensAppAfterInstall {
-            let remaining = clock.now.duration(to: deadline)
-            if remaining > .zero {
-                _ = await bounded(remaining) { await MagiskApp.open(shell: shell, limit: commandLimit) }
-            }
+        // Opening the app is inside the same bound, with what is left of it.
+        // It says nothing of the install it follows but whether the app was
+        // seen on the screen: an app that did not open is recorded, not failed.
+        guard case .installed(var learned) = outcome, RootInstallRule.opensAppAfterInstall else { return outcome }
+        let remaining = clock.now.duration(to: deadline)
+        var opened = false
+        if remaining > .zero {
+            opened = await bounded(remaining) {
+                await MagiskAppOpening.run(shell: shell, policy: opening, sleep: sleep)
+            } ?? false
         }
-        return outcome
+        learned.appInstall?.opened = opened
+        return .installed(learned)
     }
 
     /// The state with the install the step has begun, for a bound that passes
