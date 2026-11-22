@@ -52,7 +52,14 @@ enum WhatsNewPreview {
         "whatsnew-fresh",          // a new install: no guest, nothing announced
         "whatsnew-info",           // Info, with What's New
         "whatsnew-history",        // Info's What's New page
+        "whatsnew-unsupported",    // a 60 Hz screen on iOS 26: no 120 Hz or Add to Home Screen entry
+        "whatsnew-unsupported-open", // its notes, opened from the ribbon
     ]
+
+    /// The screens of a device that shows neither the "120 Hz" switch nor Add to
+    /// Home Screen. Every other What's New screen is a ProMotion screen on iOS
+    /// 27, which shows both.
+    private static let unsupportedScreens: Set<String> = ["whatsnew-unsupported", "whatsnew-unsupported-open"]
 
     /// The record a screen's launch finds, and whether the install has a
     /// guest: a record of build 12 is the update to 16, of build 5 the update
@@ -98,6 +105,13 @@ enum WhatsNewPreview {
         if screen == "whatsnew-update" {
             model.plan = .update(from: PreviewData.previousSystemRelease, to: PreviewData.systemRelease)
         }
+        // What the scene reads of the screen and what the system offers decide
+        // the entries about the 120 Hz switch and Add to Home Screen.
+        let shown = !unsupportedScreens.contains(screen)
+        model.statedMaximumFramesPerSecond = shown ? 120 : 60
+        model.screenDidChange(nativeScale: model.screenNativeScale, maximumFramesPerSecond: shown ? 120 : 60)
+        model.playedPadAppHost = IPadAppHost(
+            isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: shown)
         let host = model.host
         let vCPUs = model.guest?.cores ?? host.processorCount
         model.whatsNew.launch(

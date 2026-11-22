@@ -25,14 +25,20 @@
         "id": "high-refresh",
         "title": "120 Hz",
         "text": "On a ProMotion iPhone or iPad, Android can now run at 120 Hz for smoother motion, using more battery. It is off until you turn it on in Performance on Home.",
-        "symbol": "speedometer"
+        "symbol": "speedometer",
+        "requirement": {
+          "feature": "highRefresh"
+        }
       },
       {
         "id": "add-to-home-screen",
         "title": "Add to Home Screen",
         "text": "On iPhone and iPad with iOS 27, put an Android app’s icon on the Home Screen, and open the app from there, from Shortcuts or with Siri.",
         "symbol": "plus.app.fill",
-        "place": "sessionSettings"
+        "place": "sessionSettings",
+        "requirement": {
+          "feature": "addToHomeScreen"
+        }
       },
       {
         "id": "voiceover-talkback",

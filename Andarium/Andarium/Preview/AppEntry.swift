@@ -787,7 +787,7 @@ struct AppEntry {
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
              "whatsnew-history", "info-acknowledgements-root", "info-license-magisk":
             model.sheet = .info
-        case "whatsnew-open", "whatsnew-skipped-open":
+        case "whatsnew-open", "whatsnew-skipped-open", "whatsnew-unsupported-open":
             model.sheet = .whatsNew
         case "start-low-space":
             model.start(.normal)

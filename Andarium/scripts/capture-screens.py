@@ -254,6 +254,7 @@ SHOTS: list[Shot] = [
     s("snapshots", "Snapshots", "snapshots", "The Snapshots sheet over Home with mock snapshots: the list newest first, the space they use and Take snapshot at the foot.", dark=True),
     s("snapshots-detail", "Snapshots", "snapshots-detail", "One snapshot's page: its name, when it was taken, what deleting frees, Restore and Delete."),
     s("whatsnew-open", "What's New", "whatsnew-open", "The notes of the update, opened from the ribbon above Start."),
+    s("whatsnew-open-unsupported", "What's New", "whatsnew-unsupported-open", "The notes of the update on a 60 Hz screen with iOS 26: the 120 Hz and Add to Home Screen entries, which that device does not show, are left out."),
     # The update notice of a sideloaded build (Preview/UpdatePreview.swift: a made-up version file read by the real rules)
     s("update-card", "Update notice", "update-card", "Home with the update card first among the notices: Update available, one line with the installed and the new version, Get Update and the close button.", dark=True),
     s("update-card-closed", "Update notice", "update-card-closed", "Home after the card was put away: no card, Home as always.", dark=True),

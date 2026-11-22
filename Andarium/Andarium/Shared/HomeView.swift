@@ -71,7 +71,7 @@ struct HomeView: View {
                 case .info: InfoSheet(page: hints.infoPage)
                 case .snapshots: SnapshotsSheet()
                 case .whatsNew:
-                    WhatsNewSheet(releases: model.whatsNew.pending)
+                    WhatsNewSheet(releases: model.whatsNew.announced)
                         .modifier(ZoomFrom(id: Self.ribbonID, namespace: whatsNewZoom, enabled: !reduceMotion))
                 case .appUpdate:
                     if let notice = model.appUpdate {

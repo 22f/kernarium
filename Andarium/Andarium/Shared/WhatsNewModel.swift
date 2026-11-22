@@ -12,18 +12,34 @@ final class WhatsNewModel {
     /// Every release's notes, newest first. Info lists them; without any,
     /// Info has no What's New row.
     private(set) var releases: [WhatsNewRelease] = []
-    /// What the ribbon offers, newest first; empty when it is not shown.
+    /// What this launch's rules offer the ribbon, newest first; empty when it
+    /// is not shown. The ribbon and its notes show `announced`.
     private(set) var pending: [WhatsNewRelease] = []
     /// The build this launch runs.
     private(set) var currentBuild = 0
     /// Writes the record for the next launch: the device keeps it in its
     /// defaults. Nil keeps nothing, as in a harness launch and the preview.
     @ObservationIgnored var keep: ((WhatsNewRecord) -> Void)?
+    /// Whether this device shows a feature now, by the feature's own rule
+    /// (`AppModel` states them: Home's "120 Hz" switch and Add to Home
+    /// Screen). The launch cannot ask it, since the screen the 120 Hz switch
+    /// depends on is known only once the scene connects, so it is asked each
+    /// time the ribbon and the notes are drawn.
+    @ObservationIgnored var showsFeature: (WhatsNewFeature) -> Bool = { _ in true }
 
-    var showsRibbon: Bool { !pending.isEmpty }
+    /// What the ribbon and its notes announce now: `pending` without the
+    /// entries about a feature this device does not show, and without a
+    /// release that leaves empty. The ribbon counts and names these only.
+    var announced: [WhatsNewRelease] {
+        pending
+            .map { $0.keeping { $0.requirement?.isShown(by: showsFeature) ?? true } }
+            .filter { !$0.entries.isEmpty }
+    }
 
-    /// The pending entries, newest release first, in each release's order.
-    var pendingEntries: [WhatsNewEntry] { pending.flatMap(\.entries) }
+    var showsRibbon: Bool { !announced.isEmpty }
+
+    /// The announced entries, newest release first, in each release's order.
+    var pendingEntries: [WhatsNewEntry] { announced.flatMap(\.entries) }
 
     /// Lists the notes in Info and announces nothing: a launch that is not
     /// the person's own shows no ribbon and keeps no record.
