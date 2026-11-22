@@ -772,7 +772,8 @@ address space holds, so this is a fallback.
   memory prepared at launch (or waits for the attempt, with "Preparing JIT" on
   the boot screen) and boots on the JIT engine; without a debugger, or if the
   preparation fails, it boots on gadgets and says why on the boot screen and
-  under the row. A guest changed after the memory was prepared needs Andarium
+  under the row. The note's ready sentence shows only while the row is on. A
+  guest changed after the memory was prepared needs Andarium
   opened from StikDebug again, and the memory stays wired for the process
   whether the start uses it or not (the runtime's GPU plan counts it). No
   debugger request is made while none is attached, and one that goes unanswered

@@ -168,6 +168,49 @@ struct JitStatusTests {
     }
 }
 
+/// The note under Home's Performance panel is JIT's status; its ready sentence
+/// shows only while the JIT row is on, and no other sentence follows the row.
+@MainActor
+struct JitNoteTests {
+    private let host = HostDevice(
+        name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
+    )
+
+    private func model(debugger: Bool, on: Bool) -> AppModel {
+        let model = AppModel(
+            guest: Guest.fresh(on: host), host: host,
+            system: SystemInfo(version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1"),
+            capabilities: .device, createRequirementBytes: 1
+        )
+        model.driver = StubDriver(plan: .normal)
+        model.jitAvailable = true
+        model.jitOn = on
+        model.jitDebuggerAttached = debugger
+        return model
+    }
+
+    @Test func theReadySentenceShowsOnlyWhileTheRowIsOn() {
+        let off = model(debugger: true, on: false)
+        #expect(off.jitStatus.footer == JitStatus.ready)
+        #expect(off.jitNote == nil)
+        let on = model(debugger: true, on: true)
+        #expect(on.jitNote == JitStatus.ready)
+    }
+
+    @Test func theOtherSentencesKeepTheirRules() {
+        // No debugger: how to enable it, with the row off or on.
+        for on in [false, true] {
+            #expect(model(debugger: false, on: on).jitNote == JitStatus.needsStikDebug)
+        }
+        // A start that ran without it, and a guest changed after it was prepared.
+        for on in [false, true] {
+            let fell = model(debugger: true, on: on)
+            fell.jitLastStart = .failed
+            #expect(fell.jitNote == JitAnswer.failed.fallbackSentence)
+        }
+    }
+}
+
 @MainActor
 struct JitStatusLaunchTests {
     private let guest = JitShape(memoryMiB: 4096, processorCount: 4)

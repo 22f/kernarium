@@ -297,6 +297,15 @@ final class AppModel {
     func setTranslatedLibraries(_ on: Bool) {
         translatedLibrariesOn = on
     }
+    /// The note under Performance's panel: what JIT does at the next start
+    /// (`JitStatus.footer`). The ready sentence shows only while the JIT row is
+    /// on; the sentences that say how to enable it, that the guest changed
+    /// after it was prepared, or that a start ran without it show whatever the
+    /// row says.
+    var jitNote: String? {
+        let status = jitStatus
+        return status.readyForNextStart && !jitOn ? nil : status.footer
+    }
     /// The next start runs on the JIT engine, which does not use the translated
     /// libraries: the JIT is on and the note under its row says it is ready
     /// (its memory is, or can be, prepared for the guest, and no earlier start

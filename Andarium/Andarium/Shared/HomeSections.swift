@@ -560,7 +560,9 @@ extension View {
 /// can have it (`AppModel.jitAvailable`). The section is drawn when at least
 /// one of them is, and none draws it at all. JIT is the row next to the note
 /// beneath the panel, which says what JIT does at the next start
-/// (`JitStatus.footer`); with no JIT row there is no note.
+/// (`AppModel.jitNote`); with no JIT row there is no note, and the ready
+/// sentence is there only while the JIT row is on, so a section with the row
+/// off and nothing to say ends at its panel.
 struct HomePerformanceSection: View {
     @Environment(AppModel.self) private var model
 
@@ -579,7 +581,7 @@ struct HomePerformanceSection: View {
                 }
                 if model.jitAvailable { JitRow() }
             } footer: {
-                if model.jitAvailable { SectionNote(model.jitStatus.footer) }
+                if model.jitAvailable, let note = model.jitNote { SectionNote(note) }
             }
             .id("performance")
         }
