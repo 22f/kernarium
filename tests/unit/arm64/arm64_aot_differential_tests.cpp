@@ -5916,7 +5916,6 @@ std::size_t code_synchronization_in_rewritten_code(const LibraryImage &image,
 			};
 			const auto result = engine->run(request);
 			const auto steps_taken = aot::stats().steps;
-			aot::set_enabled(false);
 			const auto faulted_at_target =
 				result.reason == uml::cpu::ExitReason::memory_fault &&
 				result.fault.address == target;
@@ -5936,6 +5935,7 @@ std::size_t code_synchronization_in_rewritten_code(const LibraryImage &image,
 			if (darwin_uml_static_vm_code_changes(active) != active_before)
 				say("the active generation heard of the guest's IC IVAU");
 			if (arm == guest_only) {
+				aot::set_enabled(false);
 				if (faulted_at_target || cpu.pc == bias + site)
 					say("an IC IVAU at a mapped address faulted");
 				if (darwin_uml_static_vm_code_changes(guest) == guest_before)
@@ -5951,24 +5951,48 @@ std::size_t code_synchronization_in_rewritten_code(const LibraryImage &image,
 			if (cpu.pc != bias + site)
 				say("the fault is not at the instruction");
 			/* The kernel maps the page for the guest, and the instruction
-			 * runs again. */
+			 * runs again, with rewritten code still on: the fault left the
+			 * PC at the instruction as the place the engine runs it (the
+			 * retry hint a stepped fault leaves), so the retry is the
+			 * ordinary engine's one instruction, and neither enters
+			 * rewritten code nor steps in it. A run that went on after the
+			 * instruction in rewritten code (the MMU's own advance of the
+			 * guest's code sequence ends it at the next check even so) has
+			 * no hint, and the retry enters rewritten code at the
+			 * instruction and steps it again. */
 			f.arena.set_kind(unmapped_page, 1);
-			aot::set_enabled(true);
+			request.instruction_budget = 1;
+			const auto guest_at_retry = darwin_uml_static_vm_code_changes(guest);
+			const auto active_at_retry =
+				darwin_uml_static_vm_code_changes(active);
+			const auto before_retry = aot::stats();
 			const auto again = engine->run(request);
+			const auto after_retry = aot::stats();
 			aot::set_enabled(false);
-			if ((again.reason == uml::cpu::ExitReason::memory_fault &&
-			     again.fault.address == target) || cpu.pc == bias + site) {
-				std::fprintf(stderr, "  IC IVAU at %llx, %s: the instruction "
-					"did not run once its page was mapped\n",
-					static_cast<unsigned long long>(site), what[arm]);
+			const auto retry_say = [&](const char *failure) {
+				std::fprintf(stderr, "  IC IVAU at %llx, %s: %s (exit %d, "
+					"pc %llx, retired %zu, enters %llu, steps %llu)\n",
+					static_cast<unsigned long long>(site), what[arm], failure,
+					static_cast<int>(again.reason),
+					static_cast<unsigned long long>(cpu.pc),
+					again.retired_instructions,
+					static_cast<unsigned long long>(
+						after_retry.enters - before_retry.enters),
+					static_cast<unsigned long long>(
+						after_retry.steps - before_retry.steps));
 				require(false);
-			}
-			if (darwin_uml_static_vm_code_changes(guest) == guest_before) {
-				std::fprintf(stderr, "  IC IVAU at %llx, %s: the guest's "
-					"generation did not hear of its IC IVAU\n",
-					static_cast<unsigned long long>(site), what[arm]);
-				require(false);
-			}
+			};
+			if (again.reason != uml::cpu::ExitReason::instruction_budget ||
+			    cpu.pc != bias + site + 4 || again.retired_instructions != 1)
+				retry_say("the instruction did not run once its page was "
+					"mapped");
+			if (after_retry.enters != before_retry.enters ||
+			    after_retry.steps != before_retry.steps)
+				retry_say("the retry entered rewritten code");
+			if (darwin_uml_static_vm_code_changes(guest) == guest_at_retry)
+				retry_say("the guest's generation did not hear of its IC IVAU");
+			if (darwin_uml_static_vm_code_changes(active) != active_at_retry)
+				retry_say("the active generation heard of the guest's IC IVAU");
 		}
 	}
 	if (chosen != 0)
@@ -6221,7 +6245,7 @@ int main(int argc, char **argv)
 	}
 	/* The release's own libraries hold IC IVAU (the instruction cache flush
 	 * of the runtime's JIT); a set with none leaves the row nothing to judge. */
-	if (cfg.library < 0)
+	if (cfg.library < 0 && !cfg.words_only)
 		require(code_synchronization_sites_seen != 0);
 	if (cfg.code_synchronize_only)
 		return 0;
