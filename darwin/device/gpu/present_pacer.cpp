@@ -98,11 +98,28 @@ void PresentPacer::retryDelayRan() noexcept
 
 void PresentPacer::remember(double now, std::uint64_t guestFrames) noexcept
 {
+    if (count_ == 0) {
+        counted_ = 0;
+    } else if (guestFrames > lastGuestFrames_) {
+        /* Frames that arrive within one tick are one frame to the display:
+         * a tick counts no more of them than the display could have shown in
+         * the time since the tick before (one at the 120 step's ticks, two at
+         * the 60 step's, more after a late tick). However a guest bunches its
+         * frames, the count of a stretch of ticks moves by at most that for
+         * each of them, so a rate judged on it follows what the display can
+         * show and not how many frames come at once. */
+        const double slots = (now - lastTime_) * parameters_.displayFramesPerSecond;
+        const std::uint64_t most = slots > 1.25 ? static_cast<std::uint64_t>(slots + 0.75) : 1U;
+        const std::uint64_t arrived = guestFrames - lastGuestFrames_;
+        counted_ += arrived < most ? arrived : most;
+    }
+    lastGuestFrames_ = guestFrames;
+    lastTime_ = now;
     if (count_ == capacity) {
         first_ = (first_ + 1U) % capacity;
         --count_;
     }
-    samples_[(first_ + count_) % capacity] = {now, guestFrames};
+    samples_[(first_ + count_) % capacity] = {now, counted_};
     ++count_;
 }
 

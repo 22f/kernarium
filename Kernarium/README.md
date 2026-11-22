@@ -334,10 +334,17 @@ or more, makes no change. One between them never changes the step twice within
 the two seconds: with frames early or late by up to 4 ms it changes it once at
 most, and with 4 ms of jitter in the interval between its frames it can change
 it up to five times in 12 s, at rates from about 60.05 to 62.05 frames a
-second. A guest just over a threshold whose frames bunch at the boundaries of
-the second can stay on the old step for several seconds, longer the more frames
-bunch (at 63 frames a second about 4 s with three bunched, 5 s with four, 7 s
-with six). Every time here is the time plus one tick of the link. The ceiling
+second. The rate is judged on the frames the display could show: a tick counts
+no more of the frames that arrived since the tick before than its time holds at
+120 Hz (one at the 120 step's ticks, two at the 60 step's), so frames that
+arrive together, however many, are one or two to the display, and a guest that
+catches up with a burst in one tick neither takes the 120 step nor holds it.
+The evenly spaced guest's time, the later of the dwell since the last change
+(2 s) and the window after its own change (1 s for a rise, 2 s for a fall), is
+that of any guest whose displayed frames pass a threshold, whatever its
+bunching; one whose displayed frames stay a frame under it for several seconds
+holds the old step that long. Every time here is the time plus one tick of the
+link. The ceiling
 is the rate the EDID's timing states for the mode (the
 largest clock the field holds, for a size beyond it), the screen's maximum and
 Low Power Mode; from 100 it is the 120 step, and any lower rate, a mode of 47

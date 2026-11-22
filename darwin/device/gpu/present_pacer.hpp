@@ -75,17 +75,32 @@ struct DrawableBudget {
  * twice within the dwell, and changes it at most once when its frames are
  * early or late by up to 4 ms. With 4 ms of jitter in the interval between its
  * frames it can change it up to five times in 12 s, at rates from about 60.05
- * to 62.05. A guest just over a threshold whose frames bunch at the boundaries
- * of the second can stay on the old step for several seconds, longer the more
- * frames bunch (at 63 frames a second about 4 s with three bunched, 5 s with
- * four, 7 s with six). The time that a rule states (the second of a rise, the
- * 2 s of a fall and of the dwell) is a time plus one tick: the link decides at
- * its ticks. A link that wakes asks for the fastest rate the ceiling allows,
+ * to 62.05. The time that a rule states (the second of a rise, the 2 s of a
+ * fall and of the dwell) is a time plus one tick: the link decides at its
+ * ticks. A link that wakes asks for the fastest rate the ceiling allows,
  * because the first frame of a burst should wait for the shortest tick, and
  * settles after the first second of the burst. The ceiling is the fastest rate
  * the host allows now (the mode's rate, or less when the screen can show less,
  * as in Low Power Mode): the 120 step is for a ceiling of 100 or more, and any
  * lower ceiling, a mode of 47 Hz included, is the 60 step.
+ *
+ * The rate is judged on the frames the display could show, not on the frames
+ * the guest offered: a tick counts no more of the frames that arrived since the
+ * tick before than its time holds at 120 Hz (`Parameters::
+ * displayFramesPerSecond`): one at the 120 step's ticks, two at the 60 step's,
+ * more after a late tick. Frames that arrive together, however many, are one
+ * or two frames to the display, so a guest that catches up with a burst in one
+ * tick (a guest at 60 with 20 frames at once each second, or at 63 with 3 to
+ * 12 of them within three milliseconds of the second's boundary) neither takes
+ * the 120 step nor holds it. A burst adds at most what the display shows in a
+ * tick to the count of a window, wherever the window's edge falls, so the
+ * count does not depend on how many frames bunch. The evenly spaced guest's
+ * time, the later of the dwell since the last change (2 s) and the window
+ * after its own change (1 s for a rise, 2 s for a fall), plus one tick, is
+ * that of any guest whose displayed frames pass a threshold. A guest whose
+ * displayed frames stay a frame under one for several seconds (frames moved
+ * from each second's count to the next) holds the old step for as long as it
+ * is under.
  *
  * The link sleeps when no frame has been waiting for idleSeconds. Whoever
  * runs the link keeps one flag, whether a frame waits, and clears it when a
@@ -118,6 +133,10 @@ public:
         /* ... and falls from it when that measure does not and the fall
          * measure is below this. */
         double fallFromHigh {61.0};
+        /* The frames a second the display can show at most: the 120 step. A
+         * tick counts no more of the frames that arrived since the one before
+         * it than its time holds at this rate (see `remember`). */
+        double displayFramesPerSecond {120.0};
         /* The least time between two step changes. */
         double minimumDwellSeconds {2.0};
         /* How many times a frame is drawn again after a draw that found no
@@ -214,6 +233,11 @@ private:
 
     Parameters parameters_;
     unsigned rate_ {60};
+    /* The counter and time of the sample before, and the frames counted so
+     * far: what the samples hold in place of the guest's own counter. */
+    std::uint64_t lastGuestFrames_ {};
+    double lastTime_ {};
+    std::uint64_t counted_ {};
     double lastPresent_ {};
     /* A draw owed to the newest frame, and how many have been tried since a
      * frame last arrived. */
