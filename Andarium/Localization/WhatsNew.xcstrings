@@ -116,6 +116,29 @@
         }
       }
     },
+    "Android can now receive a text message that you write. Choose Send text message… in Settings while Android is running, and it arrives as an incoming text." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidで、書いたSMSを受信できるようになりました。Androidの実行中に“設定”で“SMSを送信…”を選ぶと、受信SMSとして届きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android现在可以接收你编写的短信。在Android运行时，于“设置”中选择“发送短信…”，它会作为收到的短信送达。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android現在可以接收你撰寫的簡訊。在Android執行時，於「設定」中選擇「傳送簡訊…」，它會作為收到的簡訊送達。"
+          }
+        }
+      }
+    },
     "Android now lowers the frame rate only when this device is very hot. To keep it even then, set When hot to Full frame rate under Performance." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1239,6 +1262,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "穩定性修正"
+          }
+        }
+      }
+    },
+    "Text messages" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SMS"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "短信"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "簡訊"
           }
         }
       }

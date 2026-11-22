@@ -46,6 +46,13 @@
         "place": "sessionSettings"
       },
       {
+        "id": "text-messages",
+        "title": "Text messages",
+        "text": "Android can now receive a text message that you write. Choose Send text message… in Settings while Android is running, and it arrives as an incoming text.",
+        "symbol": "message.fill",
+        "place": "sessionSettings"
+      },
+      {
         "id": "update-notice",
         "title": "Update notice",
         "text": "When a newer version of Andarium is out, Home tells you and shows how to update. It checks once a day, and you can turn it off in Info.",
