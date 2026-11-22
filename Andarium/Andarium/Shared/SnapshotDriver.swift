@@ -127,8 +127,16 @@ extension AppModel {
             if self.driver == nil, let planAfterRestore { plan = planAfterRestore }
             return .done(())
         case .refused(let refusal):
-            // A restore that took effect and did not finish changed the files.
-            if refusal == .restoreUnfinished { refreshPlan() }
+            // A restore that took effect and did not finish changed the files:
+            // the data disk is the snapshot's already, whether or not its
+            // record could be written. The recovery that ends the restore at
+            // the next start settles the settings on disk, and this guest is
+            // saved over them before it, so it forgets the Magisk app now.
+            if refusal == .restoreUnfinished {
+                self.guest?.root.dataDiskReplaced()
+                persistNow()
+                refreshPlan()
+            }
             return .refused(refusal)
         case .failed(let error):
             refreshPlan()

@@ -577,6 +577,45 @@ final class AppModel {
     /// play on. The runtime states it; an iPad, a Mac and the Simulator have
     /// none, and Capabilities then has no Haptics row.
     var hapticsAvailable = false
+    /// The Android release this copy carries holds root (`RootRelease`): Home
+    /// shows the Root section only then, and a start boots Magisk only then.
+    /// The device application reads it from the staged release; nothing else
+    /// sets it.
+    var rootAvailable = false
+    /// The alert that asks before root is turned on is up (`Model+Root.swift`).
+    var rootWarningShowing = false
+    /// The boot screen's Magisk app step is under way: Android has booted with
+    /// root and the app is being put in the guest (`runRootAppStep`). The
+    /// screen adds its fifth step only while this is set.
+    var rootAppInstalling = false
+    /// Counts the starts, restarts and run ends of the guest: a Magisk app
+    /// step belongs to the boot it began in and changes nothing of Home or
+    /// the boot screen once this number has moved (`runRootAppStep`).
+    private(set) var bootRun = 0
+    /// Counts the changes of the Root switch and of what pauses it: a result
+    /// of a Magisk app step belongs to the period of the switch it began in,
+    /// as well as to its boot (`runRootAppStep`).
+    @ObservationIgnored
+    var rootPeriod = 0
+    /// A fallback decided at launch, before a driver could save the guest.
+    @ObservationIgnored
+    var rootStateUnsaved = false
+    /// The previous session's record is left where the runtime wrote it while
+    /// a decision made from it (a pause of root) is not saved, so that a
+    /// launch that ends first reads it again (`PreviousSession`).
+    @ObservationIgnored
+    var previousSessionHeld = false
+    /// The record of a run that ended is left at its place while the pause
+    /// decided from it is not saved, and moved aside once it is
+    /// (`keepRunRecordIfDecided`): a launch that comes after "Try with root
+    /// again" does not read it again.
+    @ObservationIgnored
+    var runRecordHeld = false
+    /// The ramdisk the last boot before the run under way used, as its record
+    /// said: the previous session's, or a run of this process whose record
+    /// was moved aside.
+    @ObservationIgnored
+    var previousBootRamdisk: SessionRecord.BootRamdisk?
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
@@ -910,10 +949,30 @@ final class AppModel {
     func adoptDiagnostics(in diagnostics: URL, containers: [String], endedOutOfForeground: Bool) {
         diagnosticsDirectory = diagnostics
         diagnosticsContainers = containers
-        guard let previous = PreviousSession.consume(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
-        else { return }
+        // An earlier run a process before left there is not this process's.
+        PreviousSession.settleEarlierRun(in: diagnostics)
+        guard let previous = PreviousSession.read(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
+        else {
+            // No session record to hold: the start's own record still goes
+            // aside for the bug report.
+            PreviousSession.keep(in: diagnostics)
+            return
+        }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
+        previousBootRamdisk = previous.record.ramdisk
+        // A start with root that ended before Android booted is told by the
+        // record alone, which names the ramdisk of the boot that ended: a
+        // guest kernel's panic ends the process, so no run end is seen
+        // (`RootFallbackRule`). The record stays where it is until the pause
+        // is saved.
+        if guest?.root.on == true, RootFallbackRule.endedBeforeBoot(previous.record) {
+            previousSessionHeld = true
+            applyRootFallback()
+            keepPreviousSessionIfDecided()
+        } else {
+            PreviousSession.keep(in: diagnostics)
+        }
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -973,13 +1032,19 @@ final class AppModel {
         }
     }
 
-    func persistNow() {
+    /// Writes the guest's choices now; whether they were written. A failure
+    /// tells the person, and a caller whose decision must outlast the process
+    /// (`applyRootFallback`) does not go on as if it were saved.
+    @discardableResult
+    func persistNow() -> Bool {
         persistTask?.cancel()
-        guard let driver, let guest else { return }
+        guard let driver, let guest else { return false }
         do {
             try driver.save(guest)
+            return true
         } catch {
             alert = AppAlert(title: String(localized: "Settings not saved"), message: error.localizedDescription)
+            return false
         }
     }
 
@@ -1465,7 +1530,8 @@ final class AppModel {
     /// What making a bug report does, whoever asks for it: Android's report,
     /// and the host's records and the guest's counters inside it.
     func bugReportWork() -> @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
-        { [driver, diagnosticsDirectory, diagnosticsContainers, plays = playsBugReport] update in
+        let root = rootReportEntry()
+        return { [driver, diagnosticsDirectory, diagnosticsContainers, plays = playsBugReport] update in
             let file = if let driver, !plays {
                 try await driver.createBugReport(update: update)
             } else {
@@ -1474,10 +1540,13 @@ final class AppModel {
             // The host's records and the guest's counters travel inside
             // Android's own report.
             if let diagnosticsDirectory {
-                let guest = await driver?.guestStallFiles() ?? []
+                let stalls = await driver?.guestStallFiles() ?? []
+                let guest = root.map { stalls + [$0] } ?? stalls
+                let earlierRun = driver?.retiredAnEarlierRun ?? false
                 _ = await Task.detached(priority: .userInitiated) {
                     BugReportAttachments.attach(
-                        to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
+                        to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest,
+                        includingEarlierRun: earlierRun)
                 }.value
             }
             // A cancel that came as the report finished: nobody takes the file.
@@ -1773,8 +1842,13 @@ final class AppModel {
     /// operation under way is not a reason to say anything: the start is
     /// ignored, as the screens offer none while one runs (`snapshotGate`); a
     /// rename is not one, and the start waits for it.
-    func start(_ mode: StartMode) {
+    func start(_ mode: StartMode, withoutRoot: Bool = false) {
         guard !snapshotActivity.holdsGuestFiles else { return }
+        // A pause of root decided from the previous session's record and not
+        // saved yet is settled first: the run's own record replaces that one.
+        // Without it saved, no run begins (the alert says why).
+        saveRootStateIfPending()
+        guard !rootStateUnsaved else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
             // A request to open an Android app that waited for this answer starts with it.
@@ -1790,9 +1864,26 @@ final class AppModel {
             jitLastStart = nil
             preparingJit = false
             if case let .update(from, _) = plan { bootFrom = from } else { bootFrom = nil }
-            if let driver, let guest {
-                persistNow()
-                driver.begin(guest: guest, mode: mode, kind: kind)
+            rootAppInstalling = false
+            bootRun &+= 1
+            // Whether this start asks for the Magisk ramdisk. Nothing of it is
+            // saved: which ramdisk a boot used is the runtime's record of that
+            // boot (`SessionRecord.ramdisk`).
+            if let current = guest {
+                guest?.root.startRooted = current.bootsRooted(
+                    mode: mode, releaseCarriesRoot: rootAvailable, withoutRootOnce: withoutRoot)
+                // "Start without root" is the person's answer to a stopped start.
+                if withoutRoot, current.root.attention == .stoppedStart { guest?.root.attention = nil }
+            }
+            if let driver, var begun = guest {
+                // The choices are written before the runtime is handed the
+                // start. A start with root whose write failed begins without
+                // root (the alert says the settings were not saved).
+                if !persistNow(), begun.root.startRooted {
+                    begun.root.startRooted = false
+                    guest?.root.startRooted = false
+                }
+                driver.begin(guest: begun, mode: mode, kind: kind)
             }
         case .lowSpace: startBlocked = true
         // The screens offer no start the plan refuses (`StartPlan.allowsStart`),
@@ -1814,6 +1905,7 @@ final class AppModel {
         let kind = bootTracker.recovery ? BootKind.recovery : started
         let firstStart = plan == .firstStart
         lifecycle.finishBoot(kind)
+        rootBootFinished(kind)
         // The display lets touches through to Android's screen reader only
         // while it is on, so a run under VoiceOver reads it as soon as Android
         // is up and goes on reading; without VoiceOver Settings reads it when
@@ -1866,6 +1958,8 @@ final class AppModel {
         cameraNotice.runEnded()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
+        rootAppInstalling = false
+        bootRun &+= 1
         if end.poweredOff {
             sheet = nil
             sessionPreset = SessionPreset()
@@ -1878,6 +1972,7 @@ final class AppModel {
         // The run changed the data disk: what Home states of the storage is
         // what the disk holds now, not what it held when the guest loaded.
         if let driver { lifecycle.guest?.usedBytes = driver.measuredUsedBytes() }
+        rootRunEnded(end)
         persistNow()
         refreshPlan()
     }
@@ -1903,6 +1998,8 @@ final class AppModel {
         session.showStats = showStats
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
+        rootAppInstalling = false
+        bootRun &+= 1
         // A restart before the start finished is the same start; a running
         // session's restart begins a boot of its own.
         var unfinished = false

@@ -85,6 +85,7 @@ struct HomeView: View {
         .microphoneAccessAlert()
         .locationAccessAlert()
         .cameraAccessAlert()
+        .rootWarningAlert()
         .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
             Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
@@ -219,10 +220,11 @@ struct HomeView: View {
         HomePerformanceSection()
     }
 
-    /// Capabilities and Backup: what the guest may use.
+    /// Capabilities, Root and Backup: what the guest may use.
     @ViewBuilder
     private var guestSections: some View {
         CapabilitiesSection()
+        RootSection()
         BackupSection()
     }
 
@@ -325,6 +327,7 @@ struct HomeView: View {
                 )
             }
         }
+        RootNoticeCard()
     }
 
     // MARK: Start
@@ -526,11 +529,21 @@ struct NoticeAction {
 
 /// A dismissible message above the controls.
 struct NoticeCard: View {
+    private func actionButton(_ action: NoticeAction) -> some View {
+        Button(action.label, action: action.perform)
+            .buttonStyle(.glass)
+            .controlSize(.small)
+            .accessibilityHint(action.hint ?? "")
+            .accessibilityIdentifier(action.identifier ?? "")
+    }
+
     let symbol: String
     let color: Color
     let title: String
     let text: String
     var action: NoticeAction?
+    /// A second button beside the first (`RootNoticeCard`).
+    var secondAction: NoticeAction?
     /// What VoiceOver says for the close button.
     var closeLabel = String(localized: "Dismiss")
     var onClose: (() -> Void)?
@@ -548,13 +561,16 @@ struct NoticeCard: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if let action {
-                    Button(action.label, action: action.perform)
-                        .buttonStyle(.glass)
-                        .controlSize(.small)
+                if let action, let secondAction {
+                    // Two buttons share a line while both fit, and stack otherwise.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) { actionButton(action); actionButton(secondAction) }
+                        VStack(alignment: .leading, spacing: 8) { actionButton(action); actionButton(secondAction) }
+                    }
+                    .padding(.top, 8)
+                } else if let action {
+                    actionButton(action)
                         .padding(.top, 8)
-                        .accessibilityHint(action.hint ?? "")
-                        .accessibilityIdentifier(action.identifier ?? "")
                 }
             }
             // The title and its words are read as one.

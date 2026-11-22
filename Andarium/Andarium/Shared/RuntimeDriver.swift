@@ -258,6 +258,33 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// out. It takes the seconds the debugger takes and never blocks the main
     /// thread. Without a servicing debugger it asks the runtime nothing.
     func prepareJit(wanted: Bool, shape: JitShape) async -> JitAnswer
+    /// The root the carried release holds (`RootRelease`), nil when it holds
+    /// none: the boot screen's Magisk app step needs it.
+    var rootRelease: RootRelease? { get }
+    /// The release's own copy of the official Magisk app, which the step puts
+    /// in the guest; nil with no root.
+    var rootApkURL: URL? { get }
+    /// Puts the release's own copy of the Magisk app in the guest, reading it
+    /// from the file it opens without following a link (`RootRelease.openApk`).
+    /// Throws when that file is not the release's regular file or the install
+    /// fails. A driver with no root has none to put in.
+    func installRootApp() async throws
+    /// The runtime's record of the run the last `begin` asked for, as it stands:
+    /// which ramdisk the boot used (`SessionRecord.ramdisk`), how far it got
+    /// and how it ended. Nil until the runtime has begun that run's session:
+    /// the record of an earlier run is moved aside as the run is asked for
+    /// (`RunRecord`), so none is ever taken for it.
+    func currentSessionRecord() -> SessionRecord?
+    /// Moves the record of the run that ended aside for the bug report, once
+    /// what was decided from it is saved (`RunRecord`): a launch that comes
+    /// before the next run begins reads no record of a run that was settled.
+    func retireRunRecord()
+    /// Whether the earlier run's record kept beside the others is this
+    /// process's own: a retirement moved one aside (`RunRecord`).
+    var retiredAnEarlierRun: Bool { get }
+    /// The guest's shell, for the short questions about the Magisk app; nil
+    /// when there is none to ask.
+    var guestShell: (any GuestShell)? { get }
 }
 
 extension RuntimeDriver {
@@ -274,6 +301,14 @@ extension RuntimeDriver {
     func setNetworkNotice(_ denial: NetworkDenial?) {}
     /// A driver with no thermal session tells Android nothing either way.
     func setHeatLimit(_ on: Bool) {}
+    /// A driver with no release to read has no root to offer.
+    var rootRelease: RootRelease? { nil }
+    var rootApkURL: URL? { nil }
+    func installRootApp() async throws { throw CancellationError() }
+    var guestShell: (any GuestShell)? { nil }
+    func currentSessionRecord() -> SessionRecord? { nil }
+    func retireRunRecord() {}
+    var retiredAnEarlierRun: Bool { false }
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

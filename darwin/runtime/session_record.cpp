@@ -56,6 +56,8 @@ ConsoleBootSignal boot_signal;
  * guest restarted before the session that begins. */
 std::atomic<bool> boot_reported{false};
 std::atomic<std::uint32_t> boot_restarts{0};
+/* The ramdisk the boot that begins uses (set_session_boot_ramdisk). */
+std::atomic<BootRamdisk> boot_ramdisk{BootRamdisk::unreported};
 std::atomic<int> console_descriptors[console_slots] = {-1, -1, -1, -1};
 
 std::atomic<int> record_descriptor{-1};
@@ -1512,6 +1514,14 @@ std::size_t format_state(char *buffer, char *scratch, SessionEnd end,
 				boot_signal.init_observed() ? "unfinished" : "unobserved")
 			.text("\nrestarts ")
 			.number(boot_restarts.load(std::memory_order_relaxed));
+	if (boot_reported.load(std::memory_order_relaxed)) {
+		switch (boot_ramdisk.load(std::memory_order_relaxed)) {
+		case BootRamdisk::stock: record.text("\nramdisk stock"); break;
+		case BootRamdisk::root: record.text("\nramdisk root"); break;
+		case BootRamdisk::recovery: record.text("\nramdisk recovery"); break;
+		case BootRamdisk::unreported: break;
+		}
+	}
 	if (!message.empty()) {
 		record.text("\nmessage ");
 		keep_masked(record, scratch, message, false);
@@ -1967,6 +1977,12 @@ void set_session_boot_facts(bool console_reports_completion,
 	boot_reported.store(console_reports_completion,
 		std::memory_order_relaxed);
 	boot_restarts.store(restarts, std::memory_order_relaxed);
+	boot_ramdisk.store(BootRamdisk::unreported, std::memory_order_relaxed);
+}
+
+void set_session_boot_ramdisk(BootRamdisk ramdisk) noexcept
+{
+	boot_ramdisk.store(ramdisk, std::memory_order_relaxed);
 }
 
 void set_network_notice(NetworkNotice notice) noexcept
@@ -2096,6 +2112,7 @@ void reset_session_record() noexcept
 	boot_signal.reset();
 	boot_reported.store(false, std::memory_order_relaxed);
 	boot_restarts.store(0, std::memory_order_relaxed);
+	boot_ramdisk.store(BootRamdisk::unreported, std::memory_order_relaxed);
 	crash_recorded.store(false, std::memory_order_release);
 	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
 		sched_yield();

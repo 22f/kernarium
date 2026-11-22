@@ -124,6 +124,17 @@ uml_add_unit_test(NAME kernarium-aot-release
     COMMAND uml_kernarium_aot_release_tests
     LABELS kernarium)
 
+# Whether an Android launch asks for the root boot, the release's Magisk-patched
+# ramdisk: the boot request's word, which older requests never state.
+add_executable(uml_kernarium_android_root_tests android_root_tests.cpp)
+target_include_directories(uml_kernarium_android_root_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin/device)
+target_link_libraries(uml_kernarium_android_root_tests PRIVATE UML::AndroidBoot)
+uml_add_unit_test(NAME kernarium-android-root
+    COMMAND uml_kernarium_android_root_tests
+    LABELS kernarium)
+
 # The installation identity an Android guest is given: the boot request's
 # statements and the file beside the data disk.
 add_executable(uml_kernarium_identity_tests identity_tests.cpp)

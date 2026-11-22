@@ -2176,6 +2176,52 @@
         }
       }
     },
+    "Android did not finish starting with root, so it starts without root until you choose. Try root again, or turn it off." : {
+      "comment" : "Text of Home's card after a start with root ended before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootでのAndroidの起動が完了しなかったため、選択するまでrootなしで起動します。もう一度rootを試すか、オフにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root启动Android未能完成，因此在你做出选择之前将不使用Root启动。你可以再次尝试Root，或将其关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root啟動Android未能完成，因此在你做出選擇之前將不使用Root啟動。你可以再次嘗試Root，或將其關閉。"
+          }
+        }
+      }
+    },
+    "Android did not finish starting with root, so root was turned off. You can turn it on again under Root." : {
+      "comment" : "Text of Home's card after a start with root failed and root was turned off with it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootでのAndroidの起動が完了しなかったため、rootをオフにしました。「root」の項目からもう一度オンにできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root启动Android未能完成，因此已关闭Root。你可以在“Root”中重新开启。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root啟動Android未能完成，因此已關閉Root。你可以在「Root」中重新開啟。"
+          }
+        }
+      }
+    },
     "Android did not power off." : {
       "localizations" : {
         "ja" : {
@@ -3011,6 +3057,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "應用程式"
+          }
+        }
+      }
+    },
+    "Apps you allow in Magisk can read and change everything in the virtual machine, including other apps’ data. Some apps don’t run on a rooted device. The official Magisk app is installed at the next start. You can turn root off whenever the virtual machine is stopped." : {
+      "comment" : "Body of the alert that asks before root access is turned on.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskで許可したアプリは、ほかのアプリのデータを含め、仮想マシン内のすべてを読み取り、変更できます。root化された端末では動作しないアプリもあります。次回の起動時に公式のMagiskアプリがインストールされます。rootは仮想マシンの停止中にいつでもオフにできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允许的应用可以读取和更改虚拟机中的所有内容，包括其他应用的数据。有些应用无法在已Root的设备上运行。下次启动时会安装官方Magisk应用。虚拟机停止时，你可以随时关闭Root。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允許的應用程式可以讀取和更改虛擬機器中的所有內容，包括其他應用程式的資料。有些應用程式無法在已Root的裝置上執行。下次啟動時會安裝官方Magisk應用程式。虛擬機器停止時，你可以隨時關閉Root。"
+          }
+        }
+      }
+    },
+    "Apps you allow in Magisk can run as root. Takes effect at the next start." : {
+      "comment" : "Note under the Root section.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskで許可したアプリがrootで動作できます。次回の起動から有効です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允许的应用可以以Root身份运行。下次启动时生效。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你在Magisk中允許的應用程式可以以Root身分執行。下次啟動時生效。"
           }
         }
       }
@@ -5948,6 +6040,29 @@
         }
       }
     },
+    "Installs the official Magisk app" : {
+      "comment" : "Detail of the boot step that installs the official Magisk app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公式のMagiskアプリをインストールしています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安装官方Magisk应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安裝官方Magisk應用程式"
+          }
+        }
+      }
+    },
     "Internal storage" : {
       "comment" : "Android's internal storage.",
       "localizations" : {
@@ -6634,6 +6749,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在尋找舊版應用程式…"
+          }
+        }
+      }
+    },
+    "Magisk app" : {
+      "comment" : "Boot step: the application puts the official Magisk app into the virtual machine. Magisk is the name of the app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskアプリ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk應用程式"
+          }
+        }
+      }
+    },
+    "Magisk app not installed" : {
+      "comment" : "Title of the alert after the official Magisk app could not be put into the virtual machine.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskアプリは未インストールです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk应用未安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magisk應用程式未安裝"
           }
         }
       }
@@ -8084,6 +8245,29 @@
         }
       }
     },
+    "Paused after a failed start" : {
+      "comment" : "Line under the Root access switch while a start with root that failed has paused root until the person chooses.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動に失敗したため一時停止中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动失败后已暂停"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動失敗後已暫停"
+          }
+        }
+      }
+    },
     "Pausing %@" : {
       "localizations" : {
         "ja" : {
@@ -8880,6 +9064,98 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在繼續…"
+          }
+        }
+      }
+    },
+    "Root" : {
+      "comment" : "Home section title: the virtual machine's root access (Magisk).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root"
+          }
+        }
+      }
+    },
+    "Root access" : {
+      "comment" : "Row title under Root: the switch that starts Android with Magisk, so apps the person allows in Magisk can run as root.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootアクセス"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root权限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root權限"
+          }
+        }
+      }
+    },
+    "Root is paused" : {
+      "comment" : "Title of Home's card after a start with root ended before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootは一時停止中です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已暂停"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已暫停"
+          }
+        }
+      }
+    },
+    "Root turned off" : {
+      "comment" : "Title of Home's card after a start with root failed and root was turned off with it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootをオフにしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已關閉"
           }
         }
       }
@@ -9868,6 +10144,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "請先啟動一次虛擬機器。在此之前沒有可保留的資料。"
+          }
+        }
+      }
+    },
+    "Start was stopped" : {
+      "comment" : "Title of Home's card after the person stopped a start with root before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動を停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动已停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動已停止"
+          }
+        }
+      }
+    },
+    "Start without root" : {
+      "comment" : "Button on Home's card: starts the virtual machine once without root.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootなしで起動"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不使用Root启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不使用Root啟動"
           }
         }
       }
@@ -10874,6 +11196,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置上的位置受到限制。開啟此開關會說明原因。"
+          }
+        }
+      }
+    },
+    "The Magisk app couldn’t be installed. Root is on, but no app can be given root until it is. Andarium tries again at the next start." : {
+      "comment" : "Text of the alert after the official Magisk app could not be put into the virtual machine.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Magiskアプリをインストールできませんでした。rootはオンですが、インストールされるまでアプリにrootを許可できません。次回の起動時に再試行します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法安装Magisk应用。Root已开启，但在安装之前无法为任何应用授予Root。下次启动时会重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法安裝Magisk應用程式。Root已開啟，但安裝完成前無法為任何應用程式授予Root。下次啟動時會重試。"
           }
         }
       }
@@ -13277,6 +13622,29 @@
         }
       }
     },
+    "Try with root again" : {
+      "comment" : "Button on Home's card: starts with root again after a failed start.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "もう一度rootで試す"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再次尝试使用Root"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再次嘗試使用Root"
+          }
+        }
+      }
+    },
     "Turn it on only for an app that crashes: it can make an app that works today behave differently. Turning it on or off closes the app if it’s open. Only apps it can apply to are listed." : {
       "comment" : "The second paragraph of the Old app compatibility page's footer: when to use the switch and what it does.",
       "localizations" : {
@@ -13369,6 +13737,29 @@
         }
       }
     },
+    "Turn off root" : {
+      "comment" : "Button on Home's card: turns root access off.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootをオフにする"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭Root"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉Root"
+          }
+        }
+      }
+    },
     "Turn off the frame rate limit?" : {
       "comment" : "The title of the alert that the heat notice's words open. Its message is the warning and the way back; its buttons are Turn Off and Cancel.",
       "localizations" : {
@@ -13456,6 +13847,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "要為「%@」開啟舊版應用程式相容性嗎？"
+          }
+        }
+      }
+    },
+    "Turn on root access?" : {
+      "comment" : "Title of the alert that asks before root access is turned on.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootアクセスをオンにしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要开启Root权限吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要開啟Root權限嗎？"
           }
         }
       }
@@ -14057,6 +14471,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "處理中"
+          }
+        }
+      }
+    },
+    "You stopped a start with root before Android finished starting. If root is the problem, start once without it." : {
+      "comment" : "Text of Home's card after the person stopped a start with root before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの起動が完了する前に、rootでの起動を停止しました。rootが原因の場合は、一度rootなしで起動してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在Android启动完成之前，你停止了使用Root的启动。如果问题出在Root，可以不使用Root启动一次。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在Android啟動完成之前，你停止了使用Root的啟動。如果問題出在Root，可以不使用Root啟動一次。"
           }
         }
       }

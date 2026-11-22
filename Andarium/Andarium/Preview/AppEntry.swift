@@ -135,12 +135,15 @@ struct AppEntry {
         "info-acknowledgements": .acknowledgements,
         "info-license": .license("mesa"),
         "info-license-gpl": .license("linux"),
+        "info-acknowledgements-root": .acknowledgements,
+        "info-license-magisk": .license("magisk"),
         "whatsnew-history": .whatsNew,
     ]
 
     var hints: ScreenHints {
         ScreenHints(
-            scrollTarget: Self.scrollTargets[screen] ?? SnapshotPreview.scrollTargets[screen],
+            scrollTarget: Self.scrollTargets[screen] ?? SnapshotPreview.scrollTargets[screen]
+                ?? RootPreview.scrollTargets[screen],
             infoPage: Self.infoPages[screen]
         )
     }
@@ -505,6 +508,7 @@ struct AppEntry {
         HeatLimitPreview.apply(screen: screen, to: model)
         WhatsNewPreview.apply(screen: screen, to: model)
         UpdatePreview.apply(screen: screen, to: model)
+        RootPreview.apply(screen: screen, to: model, freeze: freeze)
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -781,7 +785,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history":
+             "whatsnew-history", "info-acknowledgements-root", "info-license-magisk":
             model.sheet = .info
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew

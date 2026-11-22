@@ -27,6 +27,15 @@ shown only on the page of Android Open Source Project and only when the
 application embeds the framework (`parent`, `requires_framework`). The
 paragraph above the row is the application's own text.
 
+Magisk and BusyBox: the Android release may carry Magisk's files (root) and,
+with them, BusyBox. Their projects are shown only where the release carries
+root (`requires_root`, which the application answers from the release it
+carries). Magisk's license text is the GPL-3.0 and is taken from two upstream
+projects' own copies, which must agree byte for byte after line-ending
+normalisation (GPL3_COPIES); BusyBox's is the GPL-2.0 text shared with the
+kernel. Each page says where the source of both is available: the Magisk
+project, at the tag of the version the release carries (MAGISK_VERSION).
+
 Coverage is measured against what the application embeds: the frameworks in
 Andarium/Andarium.xcodeproj and the components of the iOS device prefixes'
 contracts under dependencies/platforms. A project lists the frameworks and
@@ -77,6 +86,8 @@ GROUPS = [
 # under --source-root named as in dependencies/manifest.tsv, or "linux" for the
 # kernel source.
 SOURCES = {
+    "gawk": "gawk",
+    "libiconv": "libiconv",
     "vulkan-headers": "vulkan-headers",
     "mesa": "mesa",
     "libepoxy": "libepoxy",
@@ -89,6 +100,21 @@ SOURCES = {
     "proxy-libintl": "proxy-libintl",
     "zstd": "zstd",
 }
+
+# The version of Magisk that the Android release's root files carry, and the
+# public place where the source of Magisk and of the BusyBox it includes is
+# available at that version's tag.
+MAGISK_VERSION = "v31.1"
+MAGISK_SOURCE = "https://github.com/topjohnwu/Magisk"
+MAGISK_SOURCE_NOTICE = (
+    f"The source code of Magisk and of the BusyBox it includes, in the version Andarium carries "
+    f"({MAGISK_VERSION}), is available from the Magisk project at {MAGISK_SOURCE}, at the tag "
+    f"{MAGISK_VERSION}."
+)
+
+# Two upstream projects' own copies of the GPL-3.0 text: (source, path). They
+# must agree byte for byte after line-ending normalisation.
+GPL3_COPIES = (("gawk", "COPYING"), ("libiconv", "COPYING"))
 
 MESA_HOLDERS = (
     "Intel Corporation, Google LLC, LunarG, Inc., Collabora Ltd., Valve Corporation, "
@@ -121,6 +147,18 @@ class Texts:
         if not path.is_file():
             raise Problem(f"{path} is missing; run dependencies/prepare.sh or pass --source-root")
         return path
+
+    def agreeing(self, copies: tuple[tuple[str, str], ...]) -> str:
+        """The text of copies that must be one: every copy equal to the first
+        once line endings are normalised."""
+        found = []
+        for source, relative in copies:
+            raw = self.path(source, relative).read_bytes()
+            found.append(raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+        if any(copy != found[0] for copy in found[1:]):
+            names = ", ".join(f"{source}/{relative}" for source, relative in copies)
+            raise Problem(f"the copies of one license text differ: {names}")
+        return self.read(*copies[0])
 
     def read(
         self,
@@ -275,6 +313,10 @@ def shared_licenses(texts: Texts) -> dict[str, dict[str, str]]:
             "LICENSES/exceptions/Linux-syscall-note",
             after="License-Text:",
         ),
+        "gpl-3.0": {
+            "title": "GNU General Public License, Version 3",
+            "text": clean(texts.agreeing(GPL3_COPIES)),
+        },
         "lgpl-2.1": license(
             "GNU Lesser General Public License, Version 2.1",
             "glib-ios",
@@ -333,6 +375,28 @@ def projects(texts: Texts, notices: list[dict[str, str]]) -> list[dict]:
             spdx="GPL-2.0-only WITH Linux-syscall-note",
             frameworks=["KRuntime_Android_6_18_4K"],
             licenses=["linux-syscall-note", "gpl-2.0"],
+        ),
+        entry(
+            id="magisk",
+            group="system",
+            name="Magisk",
+            copyright="The Magisk contributors",
+            license="GNU GPL v3 or later",
+            spdx="GPL-3.0-or-later",
+            requires_root=True,
+            licenses=["gpl-3.0"],
+            texts=[{"title": "Source code", "text": MAGISK_SOURCE_NOTICE}],
+        ),
+        entry(
+            id="busybox",
+            group="system",
+            name="BusyBox",
+            copyright="The BusyBox contributors",
+            license="GNU GPL v2",
+            spdx="GPL-2.0-only",
+            requires_root=True,
+            licenses=["gpl-2.0"],
+            texts=[{"title": "Source code", "text": MAGISK_SOURCE_NOTICE}],
         ),
         entry(
             id="mesa",
@@ -529,6 +593,8 @@ def check_document(document: dict, frameworks: set[str], components: set[str]) -
         for field in ("name", "copyright", "license", "spdx", "group"):
             if not str(project.get(field) or "").strip():
                 problems.append(f"{name}: no {field}")
+        if "requires_root" in project and project["requires_root"] is not True:
+            problems.append(f"{name}: requires_root is {project['requires_root']!r}, expected true")
         if project.get("group") not in groups:
             problems.append(f"{name}: unknown group {project.get('group')!r}")
         body = [t for t in project.get("texts", []) if str(t.get("text", "")).strip()]

@@ -203,7 +203,10 @@ request states values only for a run that needs fixed ones
 states the release an Android guest boots to the emulator, which the
 ahead-of-time component needs; a request keeps it out with
 `android_aot_disabled` (API 45), as Andarium's Home switch does, and Kernarium
-sends none.
+sends none. It also asks whether the guest boots the release's root ramdisk
+(`android_root`, API 46; zero, which Kernarium sends, boots the release's own):
+the ramdisk is the release's Magisk-patched file and no request names a path
+([the boot selection](../darwin/device/block/README.md#boot-selection)).
 
 ## Devices and display
 

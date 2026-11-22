@@ -60,6 +60,7 @@ endif()
 
 add_library(KernariumRuntime SHARED
     KernariumAdbChannel.hpp
+    KernariumAndroidRoot.hpp
     KernariumCamera.hpp
     KernariumConsoleInput.hpp
     KernariumConsoleOutput.hpp

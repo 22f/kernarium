@@ -678,6 +678,68 @@ address space holds, so this is a fallback.
   `CameraGuestTests` boots one through this runtime on the synthetic camera and
   reads the vendor SKU, the camera IDs and the lens cover of a live and a
   blocked session.
+- **Root.** Root is a per-guest switch in a section of its own on Home, after
+  Capabilities (`RootSection`; the guest's `RootState`, off for a new guest and
+  for one stored before). Home shows only while Android is stopped, so a change
+  applies at the next start. Turning it on asks first (what an app allowed in
+  Magisk can do); turning it off applies at once. The row exists only where the
+  release this copy carries holds root (`RootRelease`: the manifest's `root`
+  object and the files in the release's `root/`, which the
+  [Android release](../android/lineage-24/README.md) makes and
+  `stage-system-image.py` stages); without it nothing of the feature shows and a
+  start boots the release's own ramdisk. A start with root asks the runtime for
+  the release's Magisk-patched ramdisk (`android_root`, runtime API 46;
+  [boot selection](../darwin/device/block/README.md#boot-selection)).
+  Before the boot screen ends, a start with root asks the guest whether the
+  official Magisk app is there (`RootAppStep`, over the application's adb
+  channel) and puts the release's own copy in when it is not (a regular file
+  reached under `root/` with no link in its path, opened once without following
+  one and sent from that descriptor, `RootRelease.openApk`): the screen adds
+  a fifth step, Magisk app, after Startup only for a start that installs, and
+  the check, the install and the opening of the app are bound together to
+  45 s, and the step belongs to its boot and to the period of the switch it began in:
+  after a Stop, a restart, a later start or a change of the switch its result
+  adds nothing to the state and raises no alert or step (an app that is in
+  the guest and not recorded is installed over at the next start). A package of that name at the
+  carried version that the application did not put in is installed over like
+  an older one, since only its signature says whose it is and the package
+  manager checks it and refuses another signer; a newer one is left alone,
+  since Android refuses a downgrade, and none is ever uninstalled. A failure is an alert and
+  the boot goes on with root on. A start with root that ends before Android
+  boots (a guest panic or exit the previous session's record shows, a restart
+  loop, or a Stop by the person) is the fallback's: starts boot without root
+  until the person chooses, and a Home card offers Try with root again, which
+  also starts Android with root through the Start button's path, and Turn
+  off root (or, after a Stop, Start without root); a panic ends the process, so
+  the next launch reads the previous session's record, which names the ramdisk
+  of the boot that ended (`SessionRecord.ramdisk`) and how far it got: a boot
+  with the Magisk ramdisk that ended in a guest panic or an error exit before
+  Android's boot completed, whether or not init had printed anything, is a
+  failed start, and one that restarted into recovery or never began is not.
+  What a start asks for (`RootState.startRooted`) is never saved. The same
+  record decides the rest: the Magisk app step and a stopped start's card
+  follow the boot the record names (a boot that restarted in place into
+  recovery, or never began, installs nothing), the end of a run reads it too
+  (a kernel's error exit pauses root without a relaunch), and the bug report
+  says from it which ramdisk the last boot used. The previous session's record
+  stays where the runtime wrote it until the pause decided from it is saved,
+  no run begins while that save is owed, and a start with root whose settings
+  cannot be saved begins without root. The record of a run is moved aside as
+  the next run is asked for (`RunRecord`), so the one at its place is always
+  the current run's and no time has to tell them apart; one that cannot be
+  moved is emptied, and one that can be neither moved nor emptied is not read.
+  The record a failed start's pause was decided from is moved aside as soon as
+  the pause is saved, so that a relaunch after Try with root again does not
+  read it again. Restoring a snapshot forgets what the application
+  remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
+  snapshot's disk may not have it, and so does a restore that replaced the
+  disk and could not finish, at once and not at the recovery that ends it; the
+  switch stays. The bug report carries `andarium/root.txt` (the
+  switch, the ramdisk of the last start, the Magisk version the release
+  carries, and why the last install of the Magisk app was made). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
+  when an absent Magisk app is installed again (`RootInstallRule`), what becomes
+  of the app when root is off (`RootOffRule`), and what a failed start with root
+  does to the switch (`RootFallbackRule`).
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches
@@ -952,7 +1014,12 @@ address space holds, so this is a fallback.
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
   that was neither Android's own nor a stop, Home shows a notice with its cause
-  (`SessionRecord.notice`). The runtime writes the record without the serial
+  (`SessionRecord.notice`). A bug report carries the previous process's record
+  for the whole life of the process, and beside it the last earlier run of
+  this process (`RunRecord`), kept apart from it. At launch, an earlier run
+  the process before left is not this process's: it becomes the previous
+  session's when that process left no other record (a failed start whose
+  pause was saved), and is dropped otherwise (`PreviousSession`). The runtime writes the record without the serial
   number, the adb key and the time zone the launch stated and without any
   hardware address in its colon spelling, so neither the bug report nor the
   previous session's copy has them.
@@ -1216,7 +1283,13 @@ kernel's license files (never fetched; `--verify` compares the resource with
 them). A tooling test fails when the Andarium project embeds a framework, or an
 iOS device prefix contract declares a component, that no entry covers
 ([`docs/testing.md`](../docs/testing.md#andarium)). Adding a library therefore
-means adding its entry to the script's table and running it. The machine code
+means adding its entry to the script's table and running it. Magisk and BusyBox,
+which the Android release carries only with root, are listed only where the
+release the application carries has root (`requires_root`, answered from
+`AppModel.rootAvailable`): Magisk's page holds the GPL-3.0 text, which the
+generator takes from two upstream projects' own copies and refuses unless they
+agree, and each page says where the source of both is available (the Magisk
+project, at the tag of the version the release carries). The machine code
 translated from the Android libraries (`UmlArm64Aot.framework`) carries its own
 notices: the generator reads the AOT artifact's `licences.json`
 (`--aot-artifact`, else the accepted artifact installed below

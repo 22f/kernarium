@@ -3,6 +3,7 @@
 #include "KernariumRuntime.h"
 #include "KernariumAdbChannel.hpp"
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "KernariumAndroidRoot.hpp"
 #include "KernariumAotRelease.hpp"
 #include "KernariumCamera.hpp"
 #endif
@@ -1472,6 +1473,8 @@ struct GuestRequest final {
      * data disk. */
     std::optional<uml::android::Storage> androidStorage;
     uml::android::BootMode androidBootMode {};
+    /* Whether the guest boots the release's root ramdisk (android_root). */
+    uml::android::RootMode androidRoot {};
 #else
     std::string rootfsPath;
     std::string overlayPath;
@@ -1635,6 +1638,11 @@ public:
             ignoreBrokenPipes();
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
             chooseAndroidBoot(restarts);
+            /* The record says which ramdisk this boot starts with, so that an
+             * application reads from it, and not from what it asked for,
+             * whether a boot that did not finish was the root ramdisk's: a
+             * restart in place may have chosen recovery's. */
+            uml::runtime::set_session_boot_ramdisk(bootRamdisk(androidBoot_));
 #endif
             /* Ends the old guest's connection, which resets its device and
              * its renderer, and opens the next one. The hold on the request
@@ -2091,20 +2099,36 @@ private:
     /* The first boot asks for the mode the application chose. The ramdisk of
      * every restart is picked again from the misc partition in automatic mode,
      * so that `reboot recovery` boots recovery and anything else boots
-     * normally, and a bootloader request is consumed. */
+     * normally, and a bootloader request is consumed. A run that asked for
+     * root boots the release's root ramdisk for every normal boot. */
     void chooseAndroidBoot(unsigned restarts)
     {
         if (restarts == 0) {
             if (request_.androidStorage->consumeBootloaderCommand())
                 sayBootloaderConsumed();
             androidBoot_ = request_.androidStorage->selectBoot(
-                request_.androidBootMode);
+                request_.androidBootMode, request_.androidRoot);
             return;
         }
-        const auto next = request_.androidStorage->selectRestartBoot();
+        const auto next =
+            request_.androidStorage->selectRestartBoot(request_.androidRoot);
         if (next.bootloaderConsumed)
             sayBootloaderConsumed();
         androidBoot_ = next.boot;
+    }
+
+    static uml::runtime::BootRamdisk bootRamdisk(
+        const uml::android::BootSelection& boot) noexcept
+    {
+        switch (boot.kind()) {
+        case uml::android::RamdiskKind::root:
+            return uml::runtime::BootRamdisk::root;
+        case uml::android::RamdiskKind::recovery:
+            return uml::runtime::BootRamdisk::recovery;
+        case uml::android::RamdiskKind::stock:
+            break;
+        }
+        return uml::runtime::BootRamdisk::stock;
     }
 
     uml::android::BootSelection androidBoot_ {};
@@ -2482,6 +2506,21 @@ int runtimeRun(
             }
             request.identity = resolved.identity;
             request.androidStorage.emplace(release, dataDisk);
+            /* The root ramdisk is the release's own file; a release that has
+             * none cannot be asked for root. */
+            request.androidRoot = kernarium::androidroot::rootMode(*boot);
+            if (request.androidRoot == uml::android::RootMode::on) {
+                if (!request.androidStorage->carriesRoot()) {
+                    std::fputs(
+                        "Kernarium: this Android release carries no root "
+                        "boot image\n",
+                        stderr);
+                    return -UML_EMULATOR_INVALID_ARGUMENT;
+                }
+                std::fputs(
+                    "Kernarium: Android boots the release's root ramdisk\n",
+                    stderr);
+            }
         } catch (const std::exception& error) {
             std::fprintf(
                 stderr, "Kernarium: cannot prepare the Android disks: %s\n",

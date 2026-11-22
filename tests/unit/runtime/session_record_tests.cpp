@@ -376,6 +376,59 @@ void test_boot_unobserved()
 	unlink(path.c_str());
 }
 
+/* The state names the ramdisk the boot used, so that an application reads from
+ * the record alone whether a boot that did not finish was the root ramdisk's.
+ * It is the boot's own: the facts of the next boot forget it. */
+void test_the_record_names_the_boots_ramdisk()
+{
+	const TestConsole console;
+	const std::string stuck = "init: init first stage started!\n";
+	for (const auto &[ramdisk, name] :
+	     {std::pair{uml::runtime::BootRamdisk::stock, "stock"},
+		     std::pair{uml::runtime::BootRamdisk::root, "root"},
+		     std::pair{uml::runtime::BootRamdisk::recovery, "recovery"}}) {
+		uml::runtime::reset_session_record();
+		uml::runtime::set_session_boot_facts(true, 1);
+		uml::runtime::set_session_boot_ramdisk(ramdisk);
+		const std::string path = temporary_record();
+		require(uml::runtime::begin_session_record(path,
+			console.arguments()));
+		std::string state = state_of(path);
+		const std::string line = std::string("\nboot unobserved\nrestarts 1\nramdisk ") +
+			name + "\n";
+		require(has(state, line),
+			std::string("a begun boot did not name its ramdisk ") + name +
+			": " + state);
+		/* The end keeps it, with and without the output. */
+		console.write(stuck);
+		uml::runtime::end_session_record(SessionEnd::stopped, 0);
+		state = state_of(path);
+		require(has(state, std::string("\nramdisk ") + name + "\n"),
+			std::string("an ended boot lost its ramdisk ") + name + ": " + state);
+		unlink(path.c_str());
+	}
+
+	/* A boot whose ramdisk was never chosen, and the next boot after one that
+	 * was, say none; a guest that reports no boot says none whatever is set. */
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	uml::runtime::set_session_boot_ramdisk(uml::runtime::BootRamdisk::root);
+	uml::runtime::set_session_boot_facts(true, 1);
+	std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	require(!has(state_of(path), "ramdisk "),
+		"a boot inherited the ramdisk of the one before");
+	unlink(path.c_str());
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(false, 0);
+	uml::runtime::set_session_boot_ramdisk(uml::runtime::BootRamdisk::root);
+	path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	require(!has(state_of(path), "ramdisk "),
+		"a guest that reports no boot named a ramdisk");
+	unlink(path.c_str());
+}
+
 /* The restart count and the boot belong to their session: the next one
  * starts unobserved again, whatever the one before did. */
 void test_boot_state_per_session()
@@ -2957,6 +3010,7 @@ int main(int argc, char **argv)
 		test_kept_output();
 		test_the_console_says_when_the_boot_finished();
 		test_boot_state();
+		test_the_record_names_the_boots_ramdisk();
 		test_boot_unobserved();
 		test_boot_state_per_session();
 		test_a_boot_quotes_only_its_own_output();
