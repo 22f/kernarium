@@ -159,10 +159,49 @@ struct MagiskAppOpeningTests {
         #expect(MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{4125ccd #6 type=standard A=10126:com.topjohnwu.magisk")))
         #expect(!MagiskApp.hasFocus(output("")))
         #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #2 type=home A=1000:com.android.launcher3}\n")))
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #2 type=home}\n")))
         #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #2 type=standard A=10126:com.topjohnwu.magisk.stub}\n")))
         // The package alone in a line that is not the focus line (a task list) is no focus.
         #expect(!MagiskApp.hasFocus(output("  * Task{a891373 #9 type=standard A=10126:com.topjohnwu.magisk U=0 visible=true}\n")))
         #expect(!MagiskApp.hasFocus(output("Can't find service: activity\n", exit: 1)))
+    }
+
+    @Test func aStaleLineBesideTheCurrentRecordIsNoFocus() {
+        let home = "topDisplayFocusedRootTask=Task{1 #1 type=home}\n"
+        let stale = "previous_topDisplayFocusedRootTask=Task{2 #9 type=standard A=10126:com.topjohnwu.magisk}\n"
+        // Home has the focus whatever order the lines come in.
+        #expect(!MagiskApp.hasFocus(output(home + stale)))
+        #expect(!MagiskApp.hasFocus(output(stale + home)))
+        // A stale line is not a current record and counts for nothing: the app's own record is the one.
+        #expect(MagiskApp.hasFocus(output(MagiskGuest.focused + "previous_topDisplayFocusedRootTask=Task{1 #1 type=home}\n")))
+        #expect(!MagiskApp.hasFocus(output(stale)), "a stale line alone names no focus")
+    }
+
+    @Test func aQueryThatDidNotSucceedIsNoFocus() {
+        #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: 1)))
+        #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: 255)))
+        #expect(!MagiskApp.hasFocus(output(MagiskGuest.focused, exit: nil)))
+    }
+
+    @Test func moreThanOneCurrentRecordIsAmbiguousAndNoFocus() {
+        let magisk = MagiskGuest.focused
+        #expect(!MagiskApp.hasFocus(output(magisk + magisk)))
+        #expect(!MagiskApp.hasFocus(output(magisk + "topDisplayFocusedRootTask=Task{1 #1 type=home}\n")))
+        #expect(!MagiskApp.hasFocus(output("topDisplayFocusedRootTask=Task{1 #1 type=home}\n" + magisk)))
+    }
+
+    @Test func theAppsFieldIsTheExactUidAndPackageField() {
+        for bad in [
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard A=abc:com.topjohnwu.magisk}\n",
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard A=:com.topjohnwu.magisk}\n",
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard XA=10126:com.topjohnwu.magisk}\n",
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard A=10126:other:com.topjohnwu.magisk}\n",
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard B=10126:com.topjohnwu.magisk}\n",
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard A=10126:Com.topjohnwu.magisk}\n",
+            "topDisplayFocusedRootTask=Task{1 #1 type=standard com.topjohnwu.magisk}\n",
+        ] {
+            #expect(!MagiskApp.hasFocus(output(bad)), Comment(rawValue: bad))
+        }
     }
 
     @Test func userZeroIsUnlockedOnlyOnItsOwnWord() {
@@ -199,7 +238,8 @@ struct MagiskAppOpeningTests {
     }
 
     @Test func anUnlockThatNeverComesIsWaitedForABoundedTimeThenTheOpenIsStillTried() async {
-        // A start by component already works in the gap before the unlock is reported (measured).
+        // The tries run even then: a start while locked fails and is recorded, or succeeds. A start by
+        // component already works in the gap before the unlock is reported (measured).
         let (result, guest, sleeps) = await opened(.init(lockedAsks: .max))
         #expect(result)
         #expect(guest.count(MagiskApp.userStateCommand) == standard.unlockPolls)

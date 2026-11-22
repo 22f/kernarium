@@ -21,12 +21,16 @@ import Foundation
 ///   resumed activity is the dialog's. The task in focus is the app's.
 ///
 /// The open waits a bounded time for the unlock, then tries a bounded number
-/// of times, each try checked by the activity manager's own answer. It never
-/// fails the start: the caller records the result and goes on.
+/// of times, each try checked by the activity manager's own answer. The tries
+/// run even when the unlock was never seen: a start while user 0 is locked
+/// either fails, and is recorded as not opened, or succeeds, so it gives no
+/// wrong result, and it keeps the open working if the answer to the unlock
+/// question ever changes its shape. It never fails the start: the caller
+/// records the result and goes on.
 public enum MagiskAppOpening {
     public struct Policy: Equatable, Sendable {
         /// How many times user 0 is asked whether it is unlocked, `pollInterval`
-        /// apart, before the open goes on without the answer.
+        /// apart, before the tries begin; they begin whatever the answers were.
         public var unlockPolls: Int
         public var pollInterval: Duration
         /// How many times the app is started and checked, `retryInterval` apart.
@@ -152,14 +156,31 @@ extension MagiskApp {
         }
     }
 
-    /// The task in focus is this package's: `topDisplayFocusedRootTask=Task{...
-    /// A=10126:com.topjohnwu.magisk}`. A package that merely begins with the
-    /// name is not it.
+    /// The task in focus is this package's. The query's output is the lines of
+    /// the activity manager's dump that name the focused task, so it counts
+    /// only when the query succeeded and exactly one line is the current
+    /// record, `topDisplayFocusedRootTask=Task{... A=10126:com.topjohnwu.magisk}`
+    /// (the key begins the line, never the tail of another key such as
+    /// `previous_topDisplayFocusedRootTask`), and that record holds the exact
+    /// `A=<uid>:<package>` field. Anything else, a second current record
+    /// included, is not focus.
     static func hasFocus(_ output: GuestShellOutput) -> Bool {
-        output.text.split(whereSeparator: \.isNewline).contains { line in
-            guard line.contains("topDisplayFocusedRootTask="), let found = line.range(of: ":\(package)") else { return false }
-            let rest = line[found.upperBound...]
-            return rest.isEmpty || rest.first == "}" || rest.first == " "
+        guard output.exitCode == 0 else { return false }
+        let key = "topDisplayFocusedRootTask="
+        let records = output.text.split(whereSeparator: \.isNewline).compactMap { line -> Substring? in
+            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            return trimmed.hasPrefix(key) ? trimmed.dropFirst(key.count) : nil
+        }
+        guard records.count == 1, let record = records.first else { return false }
+        return record.split(whereSeparator: { $0 == " " || $0 == "\t" }).contains { token in
+            var field = token
+            if field.last == "}" { field = field.dropLast() }
+            guard field.hasPrefix("A=") else { return false }
+            let rest = field.dropFirst(2)
+            guard let colon = rest.firstIndex(of: ":") else { return false }
+            let uid = rest[..<colon]
+            return !uid.isEmpty && uid.allSatisfy(\.isASCII) && uid.allSatisfy(\.isNumber)
+                && rest[rest.index(after: colon)...] == package
         }
     }
 }

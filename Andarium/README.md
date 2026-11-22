@@ -702,9 +702,10 @@ address space holds, so this is a fallback.
   45 s. The app is opened by the activity the package manager names as its
   launcher (`MagiskAppOpening`: `am start` resolves default activities only, so
   the launcher intent never resolves): after a bounded wait for user 0's unlock,
-  up to five tries, each checked against the activity manager's task in focus.
-  An app that does not open is no failure and no alert; `andarium/root.txt`
-  says so. The step belongs to its boot and to the period of the switch it began in:
+  up to five tries, each checked against the activity manager's one current
+  focus record. The tries run even when the unlock never shows: a start while
+  locked either fails, and is recorded as not opened, or succeeds. An app that
+  does not open is no failure and no alert; `andarium/root.txt` says so. The step belongs to its boot and to the period of the switch it began in:
   after a Stop, a restart, a later start or a change of the switch its result
   adds nothing to the state and raises no alert or step (an app that is in
   the guest and not recorded is installed over at the next start). A package of that name at the
