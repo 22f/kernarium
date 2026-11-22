@@ -323,8 +323,8 @@ final class AppModel {
     // JIT (Home's JIT row): the guest runs on the JIT engine when the person
     // turned it on and a debugger they attached has prepared the executable
     // memory.
-    /// This build on this device can run the guest on the JIT engine: a
-    /// development build on a device. The Simulator and the preview offer it
+    /// This build on this device can run the guest on the JIT engine: a build
+    /// on a device, Debug or Release. The Simulator and the preview offer it
     /// only as a mock.
     var jitAvailable = false
     /// Whether the person wants the JIT. It applies to the next start.

@@ -584,8 +584,8 @@ final class LiveRuntime: RuntimeDriver {
             RunEnd(result: -1, startFailure: startFailure, memoryRefusedMiB: memoryRefusedMiB), uptimeSeconds: nil)
     }
 
-    /// What a start decides before the runtime runs, beyond the guest: in a
-    /// development build, whether the guest boots on the JIT engine.
+    /// What a start decides before the runtime runs, beyond the guest: on a
+    /// device, whether the guest boots on the JIT engine.
     private struct StartExtras: Sendable {
         var jit = false
         /// What the start does about the translated libraries. It has no
