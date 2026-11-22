@@ -213,10 +213,11 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// JIT, right below Virtual machine.
+    /// Performance (120 Hz, AOT where the build carries it, and JIT), right below
+    /// Virtual machine.
     @ViewBuilder
     private var developmentSections: some View {
-        JitSection()
+        HomePerformanceSection()
     }
 
     /// Capabilities, Root and Backup: what the guest may use.

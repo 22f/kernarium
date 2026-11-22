@@ -18,6 +18,11 @@ Android release (--android-release):
     below .build/android/releases (install-release.py), whose own layout names
     the digest: a manifest that says accepted over another disk fails. The
     manifests and layouts are read refusing a repeated JSON key;
+  - the Magisk root files (a root/ directory and the manifest's root record)
+    are the accepted release's: a staged or packaged system with a record the
+    installed release lacks or differs from, without the record the installed
+    release has, or with a root/ file that is not the recorded one or that no
+    record declares, fails;
   - the Git object ID of every input path of the release
     (android/lineage-24/support/release/input-paths.tsv) equals the one the
     descriptor records. A changed input fails, naming the path and the commits
@@ -85,20 +90,23 @@ import gzip
 import hashlib
 import os
 import re
+import stat
 import struct
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 HERE = Path(__file__).resolve().parents[1]
 for _tools in ("kernel/common/artifacts", "android/lineage-24/tools", "tools/aot"):
     sys.path.insert(0, str(HERE / _tools))
 import contract_checks  # noqa: E402
+import magisk_image  # noqa: E402
 import release_artifact  # noqa: E402
 import release_inputs  # noqa: E402
 
 DECISION_ENV = "PENDING_INPUTS_DECISION"
 ANDROID_DESCRIPTOR = "android/lineage-24/metadata/accepted-release.env"
 INPUT_TREES_KEY = "LINEAGE24_ACCEPTED_INPUT_TREES"
+ROOT_RECORD_KEY = "LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256"
 UNSIGNED_PROOF = "unsigned-proof"
 STAGED_SYSTEM = ".build/andarium-system"
 # Where install-release.py installs a release, below the work tree.
@@ -112,6 +120,7 @@ PACKAGED_SYSTEM = "andarium-system"
 MANIFEST = "release-manifest.json"
 LAYOUT = "guest/partition-layout.json"
 SYSTEM_DISK = "guest/system.img"
+ROOT_DIRECTORY = "root"
 ELF_SECTION = ("__TEXT", "__uml_elf")
 # The build user and host build-kernel.sh gives every kernel; any other pair in
 # a banner is the builder's own account and machine.
@@ -300,8 +309,41 @@ def descriptor_of(repo, relative):
 # ---------------------------------------------------------------- Android --
 
 
+def is_link_or_file(path):
+    """The path exists and is not a real directory: a link (whatever it points to)
+    or a file. A missing path is not."""
+    try:
+        return not stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def real_directories(report, base, label, relatives):
+    """Each of `relatives` below `base` ("" is `base` itself) is a real directory,
+    checked before any is read: a link stays behind when a tree is moved, whatever it
+    holds now. A directory that is missing is left to the check that reads it."""
+    for relative in relatives:
+        path = base / relative
+        if is_link_or_file(path):
+            report.error(
+                f"{label} {f'has a {relative}/ that is' if relative else 'is'} not a real directory",
+                f"{path} is a link or a file: stage the accepted release with "
+                "Andarium/scripts/stage-system-image.py and package that",
+            )
+            return False
+    return True
+
+
+def real_system_directories(report, system, label):
+    """The system directory and the two directories the checks read below it
+    (guest/ and boot/) are real directories."""
+    return real_directories(report, system, label, ("", "guest", "boot"))
+
+
 def check_staged_system(report, release_id, descriptor, system, label):
     """The staged or packaged system is the accepted release; returns its manifest."""
+    if not real_system_directories(report, system, label):
+        return None
     manifest_path = system / MANIFEST
     if not manifest_path.is_file():
         report.error(
@@ -377,16 +419,19 @@ def check_packaged_disk(report, staged, packaged, release_id, expected):
         )
 
 
-def installed_disk_digest(repo, report, descriptor, release_id):
-    """The system disk digest of the accepted release as installed below the
-    work tree, which the accepted descriptor selects by its directory name, or
-    None after reporting why there is none. The staged and the packaged disk
-    are tied to it, not to a digest their own layout names."""
+def installed_release(repo, report, descriptor, release_id):
+    """The system disk digest and the Magisk root record (None for a release
+    without root files) of the accepted release as installed below the work
+    tree, which the accepted descriptor selects by its directory name, or None
+    after reporting why there is none. The staged and the packaged disk and root
+    files are tied to it, not to a digest their own layout or manifest names."""
     name = descriptor.get("LINEAGE24_ACCEPTED_DIRECTORY_NAME")
     if not name or "/" in name or name in (".", ".."):
         report.error("the accepted descriptor names no release directory", ANDROID_DESCRIPTOR)
         return None
     installed = repo / INSTALLED_RELEASES / name
+    if not real_directories(report, installed, "the installed accepted release", ("guest",)):
+        return None
     try:
         manifest = read_json(installed / MANIFEST)
         digest = read_json(installed / LAYOUT)["system_disk"]["sha256"]
@@ -411,7 +456,109 @@ def installed_disk_digest(repo, report, descriptor, release_id):
             f"{installed / LAYOUT}: system_disk.sha256 must be 64 lowercase hexadecimal digits",
         )
         return None
-    return digest
+    if not root_binding_holds(report, descriptor, manifest, installed / MANIFEST):
+        return None
+    return digest, manifest.get("root")
+
+
+def root_binding_holds(report, descriptor, manifest, installed):
+    """The accepted descriptor and the installed release agree on the root files. A
+    schema 6 or 7 descriptor names none, so the release has no root record; a schema
+    8 descriptor names the digest of its root record, or none. Without this a
+    release with root files and one without would both pass under one descriptor."""
+    schema = descriptor.get("LINEAGE24_ACCEPTED_SCHEMA", "")
+    bound = descriptor.get(ROOT_RECORD_KEY)
+    if not schema.isdigit():
+        report.error("the accepted descriptor names no schema", ANDROID_DESCRIPTOR)
+        return False
+    if int(schema) < magisk_image.ROOT_SCHEMA:
+        if bound is None and "root" not in manifest:
+            return True
+        report.error(
+            f"the accepted descriptor is schema {schema}, which admits no root files, but "
+            f"{'it binds a root record' if bound is not None else 'the installed release carries one'}",
+            f"{ANDROID_DESCRIPTOR} and {installed}: a release with root files is accepted by a "
+            f"schema {magisk_image.ROOT_SCHEMA} descriptor",
+        )
+        return False
+    if bound is None:
+        report.error(
+            f"the accepted descriptor is schema {schema} and binds no root record",
+            f"{ANDROID_DESCRIPTOR} must name {ROOT_RECORD_KEY}: the digest of the reviewed root "
+            "record, or none",
+        )
+        return False
+    if bound != magisk_image.root_record_digest(manifest.get("root")):
+        report.error(
+            "the installed root record is not the one the accepted descriptor binds",
+            f"{installed} and {ANDROID_DESCRIPTOR} ({ROOT_RECORD_KEY}) disagree: install "
+            "the accepted release again",
+        )
+        return False
+    return True
+
+
+def check_root_files(report, system, manifest, expected, label):
+    """The Magisk root files of a staged or packaged system are the accepted
+    release's: the manifest's root record is the installed release's (`expected`,
+    None when it has none), every root file hashes to it, and root/ holds
+    nothing else."""
+    record = manifest.get("root")
+    held = system / ROOT_DIRECTORY
+    if expected is None:
+        if record is not None:
+            report.error(
+                f"{label} carries Magisk root files the accepted release does not",
+                f"{system / MANIFEST} has a root record; stage the accepted release with "
+                "Andarium/scripts/stage-system-image.py",
+            )
+        elif held.exists() or held.is_symlink():
+            report.error(
+                f"{label} holds a root/ its manifest records no root files for",
+                f"{held} is not part of the accepted release",
+            )
+        return
+    if record != expected:
+        report.error(
+            f"{label} {'lacks' if record is None else 'records root files that differ from'} "
+            "the Magisk root files of the accepted release",
+            f"{system / MANIFEST}: stage the accepted release with Andarium/scripts/stage-system-image.py",
+        )
+        return
+    try:
+        files = {item["path"]: item["sha256"] for item in (record["boot_image"], record["apk"])}
+    except (KeyError, TypeError) as error:
+        report.error(f"{label} has an unreadable root record", str(error))
+        return
+    try:
+        mode = os.lstat(held).st_mode
+    except OSError:
+        mode = None
+    if mode is None or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        report.error(
+            f"{label} has a root/ that is not a real directory",
+            f"{held} is missing, a link or a file; the accepted release's root files are two files in a "
+            "real root/ directory",
+        )
+        return
+    names = {PurePosixPath(relative).name for relative in files}
+    for relative, digest in sorted(files.items()):
+        path = system / relative
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError:
+            regular = False
+        if not regular or sha256_file(path) != digest:
+            report.error(
+                f"{label} has a root file that is not the accepted release's: {relative}",
+                f"{path} is missing, not a regular file, or does not hash to the record's digest",
+            )
+    extra = sorted(set(os.listdir(held)) - names)
+    if extra:
+        report.error(
+            f"{label} holds root files the accepted release does not",
+            *(f"{held / name}" for name in extra),
+        )
 
 
 def check_staged_disk(report, staged, label, expected):
@@ -455,6 +602,16 @@ def input_findings(recorded, paths, current):
     return findings
 
 
+def is_accepted(manifest, release_id):
+    """A manifest that says it is the accepted release: the other cases (a proof,
+    another release) are reported as what they are, not checked for their files."""
+    return (
+        manifest is not None
+        and manifest.get("acceptance") == "accepted"
+        and manifest.get("release_id") == release_id
+    )
+
+
 def check_android(repo, report, staged_root, app):
     try:
         descriptor = descriptor_of(repo, ANDROID_DESCRIPTOR)
@@ -465,12 +622,15 @@ def check_android(repo, report, staged_root, app):
         return
     label = f"the Android release {release_id}"
 
-    expected = installed_disk_digest(repo, report, descriptor, release_id)
+    installed = installed_release(repo, report, descriptor, release_id)
+    expected = installed[0] if installed is not None else None
     staged = staged_root
     staged_manifest = check_staged_system(
         report, release_id, descriptor, staged, f"the staged system ({label})")
     if staged_manifest is not None and expected is not None:
         check_staged_disk(report, staged, f"the staged system ({label})", expected)
+    if installed is not None and is_accepted(staged_manifest, release_id):
+        check_root_files(report, staged, staged_manifest, installed[1], f"the staged system ({label})")
     if app is not None:
         packaged = app / PACKAGED_SYSTEM
         packaged_manifest = check_staged_system(
@@ -481,6 +641,9 @@ def check_android(repo, report, staged_root, app):
             and packaged_manifest.get("release_id") == release_id
         ):
             check_packaged_disk(report, staged, packaged, release_id, expected)
+        if installed is not None and is_accepted(packaged_manifest, release_id):
+            check_root_files(
+                report, packaged, packaged_manifest, installed[1], f"the packaged system ({label})")
 
     recorded_text = descriptor.get(INPUT_TREES_KEY)
     if recorded_text is None:
@@ -530,6 +693,14 @@ def check_blob_release(report, app, blob):
     ID, manifest digest and system partition digest) is the release it boots,
     which the staged system's own files state. Anything else would archive an
     application that silently runs without it."""
+    if any(is_link_or_file(app / PACKAGED_SYSTEM / relative) for relative in ("", "guest")):
+        # A link to the packaged system is reported by the Android check, which
+        # runs only with --android-release; nothing is read through it here.
+        report.error(
+            "the packaged AOT blob cannot be compared with the packaged system",
+            f"{app / PACKAGED_SYSTEM} or its guest/ is a link or a file, not a real directory",
+        )
+        return
     try:
         _, _, named = release_artifact.parse_blob_header(blob[:release_artifact.BLOB_HEADER_BYTES])
         booted = release_artifact.release_identity(app / PACKAGED_SYSTEM)

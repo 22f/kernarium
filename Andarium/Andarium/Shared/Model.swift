@@ -209,10 +209,16 @@ final class AppModel {
     /// devices; nothing in the application does.
     var statedNativeScale: Double?
     var statedDisplayPoints: CGSize?
-    /// What the scene reads of the screen the window is on.
-    func screenDidChange(nativeScale: Double) {
+    var statedMaximumFramesPerSecond: Int?
+    /// What the scene reads of the screen the window is on. A caller that
+    /// does not read the frame rate leaves it as it was.
+    func screenDidChange(nativeScale: Double, maximumFramesPerSecond: Int? = nil) {
         let scale = statedNativeScale ?? nativeScale
         if screenNativeScale != scale { screenNativeScale = scale }
+        if let rate = statedMaximumFramesPerSecond ?? maximumFramesPerSecond,
+           screenMaximumFramesPerSecond != rate {
+            screenMaximumFramesPerSecond = rate
+        }
     }
     /// What Home reads of the window: the display's size as the guest will
     /// get it.
@@ -271,6 +277,49 @@ final class AppModel {
     /// What is kept of Settings' "Show on screen" across launches
     /// (`StatsPreference`); nil where the launch decided it.
     var showStatsToKeep: Bool? { statsDecidedByLaunch ? nil : session.showStats }
+    // AOT (Home's AOT row): Android's system libraries run from the code
+    // translated from them ahead of time. The switch applies to the next start,
+    // and only a build that carries the translated-code framework has it.
+    /// This build carries the translated-code framework (what Acknowledgements
+    /// reads, `Acknowledgements.carries`), so Home shows the row.
+    var translatedLibrariesAvailable = false
+    /// Whether the person wants them. On is the default. Kept for the install
+    /// (`TranslatedLibrariesPreference`).
+    var translatedLibrariesOn = true
+    /// The launch decided it (automation): the value belongs to that run and
+    /// is not kept.
+    var translatedLibrariesDecidedByLaunch = false
+    /// What is kept of the row across launches; nil where the launch decided
+    /// it.
+    var translatedLibrariesToKeep: Bool? { translatedLibrariesDecidedByLaunch ? nil : translatedLibrariesOn }
+    /// The person turns the translated libraries on or off. It changes nothing
+    /// until Android next starts: the choice is read at each start.
+    func setTranslatedLibraries(_ on: Bool) {
+        translatedLibrariesOn = on
+    }
+    /// The note under Performance's panel: what JIT does at the next start
+    /// (`JitStatus.footer`). The ready sentence shows only while the JIT row is
+    /// on; the sentences that say how to enable it, that the guest changed
+    /// after it was prepared, or that a start ran without it show whatever the
+    /// row says.
+    var jitNote: String? {
+        let status = jitStatus
+        return status.readyForNextStart && !jitOn ? nil : status.footer
+    }
+    /// The next start runs on the JIT engine, which does not use the translated
+    /// libraries: the JIT is on and the note under its row says it is ready
+    /// (its memory is, or can be, prepared for the guest, and no earlier start
+    /// fell back), so that this row and that note agree.
+    var jitInUseForNextStart: Bool {
+        jitAvailable && jitOn && jitStatus.readyForNextStart
+    }
+    /// What a start does about the translated libraries, for the runtime's boot
+    /// request and the start record. `jitInUse` is whether this start runs on
+    /// the JIT engine.
+    func translatedLibrariesStart(jitInUse: Bool) -> TranslatedLibrariesStart {
+        TranslatedLibrariesStart(
+            buildCarries: translatedLibrariesAvailable, optionOn: translatedLibrariesOn, jitInUse: jitInUse)
+    }
     // JIT (Home's JIT row): the guest runs on the JIT engine when the person
     // turned it on and a debugger they attached has prepared the executable
     // memory.
@@ -771,6 +820,70 @@ final class AppModel {
     /// What is kept of the option across launches; nil where the launch
     /// decided it.
     var heatLimitToKeep: Bool? { heatLimitDecidedByLaunch ? nil : heatLimitOn }
+    /// The most frames a second the screen the window is on can show: 60 until
+    /// the scene says (`screenDidChange`, on connection and on every move
+    /// between screens), and then 120 on a ProMotion iPhone or iPad.
+    private(set) var screenMaximumFramesPerSecond = 60
+    /// The host can show the 120 Hz display: an iPhone or an iPad. An iPad app
+    /// on a Mac or on a Vision Pro has none that the display link can pace, so
+    /// nothing of the setting is offered or asked there (the gate the list of
+    /// Android's apps uses).
+    var hostOffersHighRefresh: Bool {
+        host.idiom != .mac && padAppHost.hasHomeScreen
+    }
+    /// Whether Home offers "120 Hz": the screen shows at least 100 frames a
+    /// second, the host is an iPhone or an iPad, and the display the next
+    /// start gives the guest is a size whose 120 Hz mode the EDID can state (a
+    /// 12.9- or 13-inch iPad Pro at its native size is not, and is offered the
+    /// setting again at a smaller resolution).
+    var highRefreshOffered: Bool {
+        HighRefresh.isOffered(
+            maximumFramesPerSecond: screenMaximumFramesPerSecond, displaySize: nextDisplaySize,
+            hostIsMacOrVision: !hostOffersHighRefresh)
+    }
+    /// The size in pixels of the display the next start lays out, once Home has
+    /// read the window.
+    private var nextDisplaySize: (width: Int, height: Int)? {
+        resolutionLayout.map { ($0.width, $0.height) }
+    }
+    /// Home's "120 Hz" in Performance: whether the next Android start asks
+    /// for a 120 Hz display. Off is the default. Kept for the install
+    /// (`HighRefreshPreference`).
+    var highRefreshOn = false
+    /// The launch decided it (automation): the value belongs to that run and
+    /// is not kept.
+    var highRefreshDecidedByLaunch = false
+    /// What is kept of the setting across launches; nil where the launch
+    /// decided it.
+    var highRefreshToKeep: Bool? { highRefreshDecidedByLaunch ? nil : highRefreshOn }
+    /// Whether a start now asks for the 120 Hz display: the setting is on and
+    /// the offer holds. The runtime decides at the start (the screen of the
+    /// display's own view and the size it boots at) and the run has what it
+    /// granted (`runStarted`).
+    var asksForHighRefresh: Bool { asksForHighRefresh(displaySize: nextDisplaySize) }
+    /// The same for a start whose display size is known: the size it boots at.
+    func asksForHighRefresh(displaySize: (width: Int, height: Int)?) -> Bool {
+        HighRefresh.asksAtBoot(
+            isOn: highRefreshOn, maximumFramesPerSecond: screenMaximumFramesPerSecond,
+            displaySize: displaySize, hostIsMacOrVision: !hostOffersHighRefresh)
+    }
+    /// Whether the run in progress has the 120 Hz display, as the runtime
+    /// granted it, which no change of the setting alters until Android next
+    /// starts. False until the runtime has said.
+    private(set) var runHasHighRefresh = false
+    /// Home's "120 Hz". It applies at the next start (Home shows only while no
+    /// guest runs).
+    func setHighRefresh(_ on: Bool) {
+        guard on != highRefreshOn else { return }
+        highRefreshOn = on
+    }
+    /// What this run's display is: the runtime granted the 120 Hz display, or
+    /// did not (it checks the screen, the host and the size once at the start,
+    /// whatever the start asked).
+    func runStarted(withHighRefresh granted: Bool) {
+        runHasHighRefresh = granted
+    }
+
     /// The thermal policy holds the device hot (iOS's critical state, the
     /// policy's hold after it included), whether or not Android is told.
     /// Settings' footnote reads it.
@@ -839,7 +952,12 @@ final class AppModel {
         // An earlier run a process before left there is not this process's.
         PreviousSession.settleEarlierRun(in: diagnostics)
         guard let previous = PreviousSession.read(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
-        else { return }
+        else {
+            // No session record to hold: the start's own record still goes
+            // aside for the bug report.
+            PreviousSession.keep(in: diagnostics)
+            return
+        }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
         previousBootRamdisk = previous.record.ramdisk

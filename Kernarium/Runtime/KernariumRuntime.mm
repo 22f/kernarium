@@ -4,6 +4,7 @@
 #include "KernariumAdbChannel.hpp"
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
 #include "KernariumAndroidRoot.hpp"
+#include "KernariumAotRelease.hpp"
 #include "KernariumCamera.hpp"
 #endif
 #include "KernariumConsoleInput.hpp"
@@ -52,6 +53,7 @@
 #include "gnss/protocol.hpp"
 #include "gpu/frame_tap.hpp"
 #include "gpu/in_process_service.hpp"
+#include "gpu/native_display.hpp"
 #include "gpu/protocol.hpp"
 #include "input/virtio/hardware_input.hpp"
 #include "input/virtio/hardware_input_run.hpp"
@@ -1449,6 +1451,9 @@ struct GuestRequest final {
      * request's android_host_features; a Linux guest ignores them. */
     std::uint32_t hostFeatures {};
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+    /* The boot request asked for a launch without the ahead-of-time component
+     * (android_aot_disabled): the release is not stated to the emulator. */
+    bool aotDisabled {};
     /* What the boot request states about the guest's cameras, and the host GPU
      * budget in bytes that sets their memory tier. */
     kernarium::camera::Request camera;
@@ -2025,13 +2030,17 @@ private:
             arguments.push_back(std::move(argument));
         /* The release the guest boots, as its files state it: the
          * ahead-of-time component runs only with the release it was made
-         * from. A release that states none gets no such code. */
-        if (const auto identity = request_.androidStorage->releaseIdentity()) {
-            auto argument = uml::emulator::aot_release_argument(
-                identity->id, identity->manifestSha256, identity->systemSha256);
-            if (!argument.empty())
-                arguments.push_back(std::move(argument));
-        }
+         * from. A release that states none gets no such code, and neither
+         * does a launch whose request keeps it out (android_aot_disabled). */
+        if (request_.aotDisabled)
+            std::fputs(
+                "Kernarium: the launch states no ahead-of-time release; the "
+                "guest runs on the engine alone\n",
+                stderr);
+        if (auto argument = kernarium::aot::releaseArgument(
+                request_.aotDisabled, *request_.androidStorage);
+            !argument.empty())
+            arguments.push_back(std::move(argument));
         appendKernelCommandLine(
             arguments,
             *request_.androidStorage,
@@ -2366,6 +2375,7 @@ int runtimeRun(
             return -UML_EMULATOR_INVALID_ARGUMENT;
         }
         GuestRequest request;
+        std::uint32_t grantedRefreshRate = 60;
         request.adbPublicKey = std::move(adbPublicKey);
         request.timeZone = std::move(timeZone);
         if (boot->struct_size >= bootSizeBeforeJit &&
@@ -2401,7 +2411,29 @@ int runtimeRun(
                     "Kernarium: ignoring unknown host features 0x%x\n",
                     unknown);
             request.hostFeatures = boot->android_host_features & ~unknown;
+            /* The one 120 Hz mode is granted here, once: to a run on an iPhone
+             * or iPad whose boot view's own screen shows 100 frames a second
+             * or more, for a display size whose EDID can state 120 Hz. The
+             * answer is the host-feature bit and the guest's boot property,
+             * the display's rate (EDID and pacing), and what the application
+             * reads of the run (statistics.display_refresh_hz). A request on
+             * any other keeps the 60 Hz display, and the guest is not told of
+             * a mode it will not find. */
+            if ((request.hostFeatures &
+                 KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) != 0) {
+                grantedRefreshRate = uml::gpu::NativeDisplay::grantedRefreshRate(
+                    120U, (__bridge void*)view, width, height);
+                if (grantedRefreshRate != 120U) {
+                    std::fputs(
+                        "Kernarium: this display has no 120 Hz mode: keeping "
+                        "60 Hz\n",
+                        stderr);
+                    request.hostFeatures &=
+                        ~KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH;
+                }
+            }
         }
+        request.aotDisabled = kernarium::aot::aotDisabled(*boot);
         /* The identity a request states is kept as given: a value that is not
          * valid fails the run, since the caller wants exactly that one. */
         const auto statedIdentity = kernarium::identity::readRequest(*boot);
@@ -2631,6 +2663,7 @@ int runtimeRun(
                     .dotsPerInch = dotsPerInch,
                     .nativeView = (__bridge void*)view,
                     .autoResizeGuest = boot->auto_resize_guest != 0,
+                    .refreshRate = grantedRefreshRate,
                     .sharedMemoryRegions = sharedMemoryRegions,
                     .deviceMemoryLimit = deviceMemoryLimit,
                 });
@@ -3027,6 +3060,8 @@ int runtimeReadStatistics(kernarium_runtime_statistics* statistics)
                 display = kernarium::statistics::DisplayFigures {
                     .presentedFrames = frames->presentedFrames,
                     .offeredFrames = frames->guestFrames,
+                    .refreshRate =
+                        activeGpu->displayRefreshRate().value_or(0U),
                 };
             scanout = activeGpu->guestScanoutActive();
             memoryRefusals = activeGpu->memoryRefusals();

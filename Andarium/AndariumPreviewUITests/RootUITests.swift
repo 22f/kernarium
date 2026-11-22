@@ -194,4 +194,23 @@ final class RootUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Start was stopped"].firstMatch.waitForNonExistence(timeout: 10), "the card stayed")
         XCTAssertFalse(app.staticTexts["Magisk app"].exists)
     }
+
+    /// A row of the acknowledgements list, found by its name whatever the row
+    /// puts together with it (the license beneath).
+    private func acknowledgement(_ name: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
+    }
+
+    @MainActor
+    func testTheAcknowledgementsListMagiskAndBusyBoxOnlyWhereTheReleaseCarriesRoot() {
+        let with = launch("info-acknowledgements-root")
+        XCTAssertTrue(acknowledgement("Linux", in: with).waitForExistence(timeout: 20), "the list did not open")
+        XCTAssertTrue(acknowledgement("Magisk", in: with).exists, "no Magisk where the release carries root")
+        XCTAssertTrue(acknowledgement("BusyBox", in: with).exists, "no BusyBox where the release carries root")
+        with.terminate()
+        let without = launch("info-acknowledgements")
+        XCTAssertTrue(acknowledgement("Linux", in: without).waitForExistence(timeout: 20), "the list did not open")
+        XCTAssertFalse(acknowledgement("Magisk", in: without).exists, "Magisk is listed for a release without root")
+        XCTAssertFalse(acknowledgement("BusyBox", in: without).exists, "BusyBox is listed for a release without root")
+    }
 }

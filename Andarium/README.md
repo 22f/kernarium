@@ -166,7 +166,11 @@ that measures it names an artifact, `-DUML_AOT_ARTIFACT=DIR`, when it
 configures the runtime). The staging script checks
 the accepted release against its manifest and layout and stages the system
 disk, partition layout, kernel command line and manifest into
-`.build/andarium-system`, which the application bundles as it stands.
+`.build/andarium-system`, which the application bundles as it stands. A release
+that carries Magisk root files (a `root/` directory and the manifest's `root`
+record) has them verified by this checkout's `verify-magisk-boot.py`, first at
+the source and again on the staged copy, and staged with the rest; a `root/`
+with no record is refused.
 A developer build can stage an unsigned proof image instead
 (`stage-system-image.py --release DIR --unsigned-proof`), whose manifest stays
 a proof's, completed from the tracked image line and the accepted Android
@@ -233,7 +237,9 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   the commit's inputs, and the staged and packaged system and runtime with the
   descriptors, and fails naming the changed paths and commits. The staged and
   packaged system disk must be the one of the accepted release installed below
-  `.build/android/releases`, not only the one their own layout names. It also
+  `.build/android/releases`, not only the one their own layout names, and the
+  Magisk root files and `root` record they carry are the installed release's
+  (none when it has none). It also
   refuses a packaged kernel whose Linux banner names a build user or host other
   than the neutral `kernarium@kernarium`. With `--aot` it also checks the AOT
   artifact: an archive embeds `UmlArm64Aot.framework` (made by the packaging
@@ -564,6 +570,30 @@ address space holds, so this is a fallback.
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
   the run ([Automation](#automation)).
+  Home's Performance section has "120 Hz" (`HighRefreshPreference`, off by
+  default) above JIT, drawn only where the screen shows at least 100 frames a
+  second (an iPhone Pro, an iPad Pro; a screen between 61 and 99 does not
+  qualify), where the display size the next start would have can carry the 120
+  Hz mode, and never on a Mac or Vision Pro; Settings has no row of it,
+  because Home, which shows only while no guest runs, is where the guest's
+  configuration is. The section is one heading over a group for each setting
+  that has an explanation (120 Hz, AOT, JIT), each a panel of the switch with
+  its note beneath it, closer together than two sections are. The heading is
+  drawn when one of the groups is, and a group that is not offered leaves out
+  its note too.
+  Turned on, the next start of Android asks the runtime for the 120 Hz display
+  ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
+  change applies at that start. The runtime
+  decides once, at boot, whether the run has the mode, and the application
+  uses what it granted (`display_refresh_hz` of the runtime's statistics) for
+  the run. While iOS is in Low Power Mode, or after the window moves to a
+  screen that shows under 100 frames a second, a granted run tells Android
+  MODERATE (the thermal wire's severity between light and severe), which holds
+  Android's render rate to 60 Hz; "When hot" still decides the heat levels,
+  and the heavier severity wins. The screen's maximum is read again at each
+  geometry update. A harness launch starts with the setting off, and
+  `ANDARIUM_HIGH_REFRESH` (`1` or `0`) states it for the run, which keeps
+  nothing.
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
@@ -658,7 +688,7 @@ address space holds, so this is a fallback.
   [Android release](../android/lineage-24/README.md) makes and
   `stage-system-image.py` stages); without it nothing of the feature shows and a
   start boots the release's own ramdisk. A start with root asks the runtime for
-  the release's Magisk-patched ramdisk (`android_root`, runtime API 45;
+  the release's Magisk-patched ramdisk (`android_root`, runtime API 46;
   [boot selection](../darwin/device/block/README.md#boot-selection)).
   Before the boot screen ends, a start with root asks the guest whether the
   official Magisk app is there (`RootAppStep`, over the application's adb
@@ -797,8 +827,9 @@ address space holds, so this is a fallback.
   is stored as a scale and stays. Native's host allocations count against the
   same iOS process limit as guest RAM; neither the graphics-memory estimate
   nor the memory default counts the display's pixels.
-- **JIT.** A build on a device has a JIT row on Home, off until
-  the person turns it on and kept for the install (`JitPreference`). An iOS
+- **JIT.** A build on a device has a JIT row in Home's Performance section,
+  off until the person turns it on and kept for the install
+  (`JitPreference`). An iOS
   device gives the JIT its executable memory only through a debugger attached to
   the process ([`docs/architecture.md`](../docs/architecture.md#executable-code)):
   the person assigns StikDebug's universal script to Andarium once in StikDebug
@@ -812,7 +843,8 @@ address space holds, so this is a fallback.
   memory prepared at launch (or waits for the attempt, with "Preparing JIT" on
   the boot screen) and boots on the JIT engine; without a debugger, or if the
   preparation fails, it boots on gadgets and says why on the boot screen and
-  under the row. A guest changed after the memory was prepared needs Andarium
+  under the row. The note's ready sentence shows only while the row is on. A
+  guest changed after the memory was prepared needs Andarium
   opened from StikDebug again, and the memory stays wired for the process
   whether the start uses it or not (the runtime's GPU plan counts it). No
   debugger request is made while none is attached, and one that goes unanswered
@@ -825,6 +857,31 @@ address space holds, so this is a fallback.
   ([cold code](../darwin/cpu/arm64/jit/README.md#cold-code)), so an Android
   guest's boot, application launches and background work run several times
   slower than on gadgets, and a long single-process computation runs faster.
+- **AOT.** Android's system libraries and boot image run from machine code
+  translated ahead of time
+  ([`docs/architecture.md`](../docs/architecture.md#ahead-of-time-code)). A
+  build that embeds `UmlArm64Aot.framework` (what Acknowledgements reads) has an
+  AOT group in Home's Performance section, between the 120 Hz group and the
+  JIT group: a switch, on by default and kept for the install
+  (`TranslatedLibrariesPreference`), with the note beneath its panel; a fresh
+  install and an update start on, and a harness launch starts on and keeps
+  nothing. The choice is read at each start. Off, the boot request keeps the
+  release out of the launch (`android_aot_disabled`,
+  [Kernarium](../Kernarium/README.md#automation-runs)) and Android runs on
+  the engine alone, as in a build without the framework; a running Android is
+  not changed. While the next start runs on the JIT, which does not use the
+  translated code, the row is dimmed, its switch cannot be changed and the line
+  beneath the group says so. Each start writes what it chose beside the session
+  record (`start.txt`, `StartRecord`), kept with it at the next launch, and a
+  bug report carries both as `andarium/start-current.txt` and
+  `andarium/start-previous.txt`: `translated-libraries` is `on`, `off`,
+  `not-used-with-jit` or `unavailable` (a build without the framework). The
+  record names the process and the second of its start, and is a session's
+  only when that session's record names the same process and began no earlier;
+  a choice whose start left no session record is copied as
+  `andarium/start-current-unmatched.txt` or
+  `andarium/start-previous-unmatched.txt`, and the session records are always
+  copied.
 - **Motion.** The guest has the device's accelerometer and gyroscope wherever
   the device has them, with no setting and no permission. An iPad app on a Mac
   and the Simulator have none, so nothing is read there, and Android still
@@ -1287,7 +1344,8 @@ one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; only `critical`
 reaches the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
-Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
+Settings' "When hot" for the run: `0` tells the guest nothing of the heat.
+`ANDARIUM_HIGH_REFRESH` (`1` or `0`) states Home's "120 Hz" for the run. A
 UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
 runs the thermal session against a stand-in for the guest's HAL, and its log
 says what the guest would be told (`heat told <severity>`).

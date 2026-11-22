@@ -8,7 +8,7 @@
 
 namespace kernarium::androidroot {
 
-/* Whether an Android launch asks for the root boot (runtime API 45): the
+/* Whether an Android launch asks for the root boot (runtime API 46): the
  * release's Magisk-patched ramdisk in place of its own. The ramdisk is the
  * release's file and nothing a request names, so a request carries one word. */
 

@@ -359,8 +359,8 @@ and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-device-orientation`,
 `andarium-haptics-protocol`, `andarium-haptics-player`,
-`andarium-thermal-protocol`, `andarium-thermal-levels` and
-`andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
+`andarium-thermal-protocol` (the MODERATE record included),
+`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
 motion wire format (its device-orientation and magnetic field records and its
 control frames, "ANC3" included, against the golden frames in
@@ -384,7 +384,27 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest. `kernarium-camera` (unit) checks
+request carries to an Android guest (the high-refresh bit included), and
+`kernarium-aot-release` (unit) the boot request's word that keeps the
+ahead-of-time component out of a launch and the release argument a start then
+gives the emulator. The 120 Hz
+display is covered without a device: `gpu-device-command-atomicity` has the
+EDID's 60 Hz bytes unchanged, the 120 Hz timing only where its pixel clock
+fits and the mode's rate told to the display (a size beyond 60 Hz included);
+`gpu-edid-timing` checks the size rule against one fixture table that the app's
+check also reads;
+`gpu-present-pacer` runs the display link's decisions (the 60 and 120 steps as
+the guest's rate changes, steady, speeding-up and alternating guests, frames
+early and late in groups, bursts that bunch in a tick and the time to follow a
+change however they bunch, the two seconds between changes and the bound on the
+changes, the wake, the sleep, the bounded retry of a present that
+found no drawable, and the bound on its waits for one (a frame's budget is the
+frame claimed, across a link made again and a frame that arrives while a tick
+decides), and the ceiling of Low Power Mode
+and of a mode that states neither rate) against a fake clock; `gpu-offscreen-display` counts each accepted
+guest update once; `HighRefreshTests` (in `andarium-core` and in
+`AndariumTests`) cover the setting, its launch rules (screen maximum, size,
+Mac and Vision Pro) and the Low Power Mode hold. `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
 boot, the lens cover, the host memory a live session reserves (none for a
@@ -424,7 +444,9 @@ mock data, `Andarium` the device application,
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
 FOLLOW_X_HANDLE=example_handle UPDATE_SOURCE_HOST=example.com UPDATE_SOURCE_PATH=/source.json`;
-the scheme without the filter also runs `AndariumUITests`). A row that asserts
+the scheme without the filter also runs `AndariumUITests`). The scheme runs the
+bundle's suites one at a time, because they share the application's one window
+and its main actor. A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
 UIKit elements) is disabled there with its reason and shows as skipped. The
@@ -454,6 +476,13 @@ and the keys the build writes (`UPDATE_SOURCE_HOST=example.com` and
 `UpdateNoticeUITests` of `AndariumPreviewUITests` tap the same screens in the
 preview, where a made-up version file is read by the real rules.
 `HomePlainInfoTests` checks that Home's toolbar holds the plain Info button.
+`TranslatedLibrariesRowTests` and `TranslatedLibrariesUITests` (of
+`AndariumPreviewUITests`) check Home's AOT row: there only in a build that
+carries the translated-code framework, below JIT in the same section, on by
+default and the person's choice, dimmed with its reason while the next start
+runs on JIT, and what a start states to the runtime; `TranslatedLibrariesTests`
+(`AndariumCoreTests`) the preference, the start decision and the start record
+the bug report carries.
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest
 service's tests read too, and run the exchange over socket pairs and a scripted
@@ -786,8 +815,12 @@ blocker in every one of them.
   on; another release ID, manifest digest or system-partition digest is off
   under `auto` and fails under `on`; a launch that states no release has no
   component and no tables; a restart in the process decides again, so a
-  release the blob no longer fits runs on the engine), each case in a process
-  of its own;
+  release the blob no longer fits runs on the engine; a session that ran
+  without the component keeps it off until it ends, and the next session, in
+  the same process, chooses afresh, for the release it states), each case in a
+  process of its own; `runtime-release-reselects-aot` (a build with the
+  component) boots the test kernel, powers it off, releases its guest, and
+  checks that the next session can take the component;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
   `aot-archive-switch` (tooling) selects the accepted artifact for each Apple
@@ -1432,8 +1465,8 @@ power off cleanly (the loop guard, `emulator/src/restart_loop_guard.hpp`).
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
-render rate and the frame rates at each severity, on a fresh data disk or, with
-`--instance`, over an older release's.
+render rate and the frame rates at each severity (MODERATE's 60 Hz vote
+included), on a fresh data disk or, with `--instance`, over an older release's.
 `android-orientation` (integration) registers when
 `UML_ANDROID_ORIENTATION_RELEASE` names the release: the runner plays the host
 application over a vsock forward to the motion port with the

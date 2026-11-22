@@ -63,6 +63,11 @@ constexpr std::string_view orientation_prefix{
  * the field passes it; a release's own command line may not carry it. */
 constexpr std::string_view compass_prefix{
 	"androidboot.kernarium.compass="};
+/* Tells the guest its display is a 120 Hz one (the iOS runtime's
+ * KernariumHostFeatures.hpp states it too). This launcher's display keeps its
+ * 60 Hz mode and passes none; a release's own command line may not carry it. */
+constexpr std::string_view high_refresh_prefix{
+	"androidboot.kernarium.high_refresh="};
 
 struct AndroidOptions {
 	std::filesystem::path release;
@@ -358,6 +363,7 @@ std::vector<std::string> boot_command_line(
 		uml::camera::layoutArgumentPrefix,
 		orientation_prefix,
 		compass_prefix,
+		high_refresh_prefix,
 		uml::android::lcdDensityPrefix,
 		uml::android::hwTimeoutMultiplierPrefix};
 	/* A run that has a serial number of its own drops the release's fixed

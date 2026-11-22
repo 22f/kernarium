@@ -407,6 +407,40 @@ std::atomic_bool test_native_kernel_window_by_the_host{false};
 	return layout;
 }
 
+/* The ahead-of-time choice a start takes, put back unless the run reaches its
+ * guest: every way a start can fail after the choice and before the guest
+ * runs leaves the session's choice as it was before the start. A run that
+ * restarts keeps its session's, whichever way its next start ends. It is
+ * held under the process admission, which the choice also belongs to. */
+class AotChoiceScope final {
+public:
+	AotChoiceScope() noexcept : before_{::uml::runtime::aot_choice()} {}
+
+	~AotChoiceScope()
+	{
+		if (!kept_)
+			::uml::runtime::restore_aot_choice(before_);
+	}
+
+	/* The guest runs: the choice is the session's now. */
+	void keep() noexcept { kept_ = true; }
+
+	AotChoiceScope(const AotChoiceScope &) = delete;
+	AotChoiceScope &operator=(const AotChoiceScope &) = delete;
+
+private:
+	int before_;
+	bool kept_{};
+};
+
+#if UML_EMULATOR_HAS_KERNEL_RUNNER
+/* What the loader calls as it enters the kernel (uml_elf_run). */
+void keep_aot_choice(void *scope) noexcept
+{
+	static_cast<AotChoiceScope *>(scope)->keep();
+}
+#endif
+
 class ProcessAddressSpaceAdmission final {
 public:
 	ProcessAddressSpaceAdmission() noexcept = default;
@@ -565,8 +599,12 @@ public:
 		if (!process_admission.enter(runtime_))
 			return -UML_EMULATOR_RUNTIME_ERROR;
 		const int result = hand_back_guest();
-		if (result == 0)
+		if (result == 0) {
 			power_off_pending_ = false;
+			/* The session is over and none of its executors exists: the
+			 * next one chooses its ahead-of-time component afresh. */
+			::uml::runtime::end_aot_session();
+		}
 		return result;
 	}
 
@@ -608,12 +646,45 @@ public:
 		if (runtime_.set_execution_engine(prepared.engine) != 0)
 			return -UML_EMULATOR_UNSUPPORTED;
 		runtime_.set_top_byte_ignore(prepared.top_byte_ignore);
+		runtime_.set_x86_jit_tier(prepared.jit_tier_instructions);
+		/* What this handle's own run keeps (the engine, the top-byte setting
+		 * and the tier belong to its context) is set here; what the whole
+		 * process keeps waits for the run to own the process. */
+		auto &arguments = prepared.arguments;
+		std::vector<char *> argument_pointers;
+		argument_pointers.reserve(arguments.size() + 1);
+		for (auto &argument : arguments)
+			argument_pointers.push_back(argument.data());
+		argument_pointers.push_back(nullptr);
+
+		std::vector<std::string> environment_strings;
+		if (envp != nullptr) {
+			for (auto entry = envp; *entry != nullptr; ++entry)
+				environment_strings.emplace_back(*entry);
+		}
+		std::vector<char *> environment_pointers;
+		environment_pointers.reserve(environment_strings.size() + 1);
+		for (auto &entry : environment_strings)
+			environment_pointers.push_back(entry.data());
+		environment_pointers.push_back(nullptr);
+		if (!process_admission.enter(runtime_))
+			return -UML_EMULATOR_RUNTIME_ERROR;
+		/* Another run may have claimed the guest while this one waited for
+		 * admission. */
+		if (!restartable_ && ::uml::runtime::process_guest_spent())
+			return -UML_EMULATOR_UNSUPPORTED;
 		/* Before any executor reads it, so before any table of the
 		 * component exists: the component runs only with the release it was
 		 * made from, which the launcher states. A launch that asks for it
 		 * where the build, the framework or the release does not have it
 		 * does not start; a launch that states no release (a Linux guest)
-		 * gets none. */
+		 * gets none. The choice belongs to the session of the run that owns
+		 * the process: it is taken once the run is admitted, after the
+		 * session before it has ended (release_guest ends it while it holds
+		 * the admission), and a run the process refuses never reaches it.
+		 * A start that fails after it and before its guest runs puts the
+		 * session's choice back (AotChoiceScope). */
+		AotChoiceScope choice_scope;
 		if (!prepared.informational) {
 			::uml::runtime::AotRelease release{
 				.id = prepared.aot_release_id,
@@ -623,9 +694,13 @@ public:
 				    prepared.aot_release_stated ? &release : nullptr))
 				return -UML_EMULATOR_UNSUPPORTED;
 		}
+		/* The settings the whole process keeps, published only once the run owns
+		 * the process and its start is valid: a start the process refuses (the
+		 * guest spent, the component refused) leaves none of them behind, and a
+		 * start that waits for admission cannot change what the run before it
+		 * is using. */
 		if (!prepared.informational)
 			prepare_guest_hibernation(prepared.guest_hibernation);
-		runtime_.set_x86_jit_tier(prepared.jit_tier_instructions);
 		const bool jit_run = !prepared.informational &&
 			runtime_.execution_engine() ==
 				::uml::runtime::ExecutionEngine::jit;
@@ -653,32 +728,9 @@ public:
 		/* A JIT run activates the managed multi-vCPU executor pool. */
 		if (!translation_cache_run.enter(jit_run))
 			return -UML_EMULATOR_RUNTIME_ERROR;
-		auto &arguments = prepared.arguments;
-		std::vector<char *> argument_pointers;
-		argument_pointers.reserve(arguments.size() + 1);
-		for (auto &argument : arguments)
-			argument_pointers.push_back(argument.data());
-		argument_pointers.push_back(nullptr);
-
-		std::vector<std::string> environment_strings;
-		if (envp != nullptr) {
-			for (auto entry = envp; *entry != nullptr; ++entry)
-				environment_strings.emplace_back(*entry);
-		}
-		std::vector<char *> environment_pointers;
-		environment_pointers.reserve(environment_strings.size() + 1);
-		for (auto &entry : environment_strings)
-			environment_pointers.push_back(entry.data());
-		environment_pointers.push_back(nullptr);
-		if (!process_admission.enter(runtime_))
-			return -UML_EMULATOR_RUNTIME_ERROR;
-		/* Another run may have claimed the guest while this one waited for
-		 * admission. */
 		if (restartable_) {
 			if (const int refused = hand_back_guest(); refused != 0)
 				return refused;
-		} else if (::uml::runtime::process_guest_spent()) {
-			return -UML_EMULATOR_UNSUPPORTED;
 		}
 		/* Readies the guest console's location before the guest binds it,
 		 * and removes it when the run returns, however the guest ended. */
@@ -760,6 +812,7 @@ public:
 			/* The kernel's own process state is the run's to restore, as
 			 * the loader restores it around a real kernel. */
 			const ::uml::runtime::KernelSignalScope kernel_signals{0, 0};
+			choice_scope.keep();
 			return entry(static_cast<int>(arguments.size()),
 				argument_pointers.data(), environment_pointers.data());
 		}
@@ -779,12 +832,14 @@ public:
 				&Emulator::trim_for_memory_pressure_of, this);
 #endif
 		}
+		/* The choice is the session's once the loader is about to enter the
+		 * kernel: a kernel image it refuses leaves it as it was. */
 		const auto result = uml_elf_run(kernel_view_.data(),
 			kernel_view_.size(), native_layout.load_bias,
 			native_layout.reserved ? native_layout.window_start : 0U,
 			native_layout.reserved ? native_layout.window_end : 0U,
 			static_cast<int>(arguments.size()), argument_pointers.data(),
-			environment_pointers.data());
+			environment_pointers.data(), keep_aot_choice, &choice_scope);
 		return result;
 #else
 		return -UML_EMULATOR_UNSUPPORTED;

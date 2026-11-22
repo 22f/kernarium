@@ -113,7 +113,10 @@ struct AppEntry {
         "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
         "home-camera-ask": "capabilities",
         "home-backup": "backup",
-        "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
+        "home-jit": "performance", "home-jit-no-debugger": "performance", "home-jit-fallback": "performance",
+        "home-performance": "performance", "home-performance-on": "performance",
+        "home-aot": "performance", "home-aot-off": "performance", "home-aot-jit": "performance",
+        "home-aot-60hz": "performance",
     ]
 
     /// Where Settings scrolls to for a screen that shows a lower section.
@@ -124,6 +127,7 @@ struct AppEntry {
         "settings-accessibility-left": "accessibility",
         "settings-performance": "stats", "settings-performance-menu": "stats", "settings-performance-off": "stats",
         "settings-performance-hot": "stats", "settings-performance-hot-off": "stats",
+        "settings-performance-120": "stats",
     ]
 
     /// The page of Info a screen opens on.
@@ -180,6 +184,10 @@ struct AppEntry {
         model.fileBrowser = browser
         let freeze = !play
         model.jitAvailable = true
+        // The preview carries no translated-code framework, so Home has no AOT
+        // row unless a screen plays a build that does (`home-aot`,
+        // `home-aot-off`, `home-aot-jit`).
+        model.translatedLibrariesAvailable = screen.hasPrefix("home-aot")
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
         model.hapticsAvailable = host.hasHaptics
@@ -277,8 +285,15 @@ struct AppEntry {
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit",
-             "home-location-ask", "home-camera-ask":
+             "home-location-ask", "home-camera-ask", "home-performance", "home-performance-on":
             break
+        case "home-aot", "home-aot-60hz":
+            break
+        case "home-aot-off":
+            model.translatedLibrariesOn = false
+        case "home-aot-jit":
+            // JIT is on and a debugger is attached, so the next start runs on it.
+            model.jitOn = true
         case "home-jit":
             model.jitOn = true
         case "home-jit-no-debugger":
@@ -415,7 +430,8 @@ struct AppEntry {
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-text-message", "settings-accessibility", "settings-accessibility-left",
              "settings-performance", "settings-performance-menu", "settings-performance-off",
-             "settings-performance-hot", "settings-performance-hot-off", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "settings-performance-hot", "settings-performance-hot-off", "settings-performance-120",
+             "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",

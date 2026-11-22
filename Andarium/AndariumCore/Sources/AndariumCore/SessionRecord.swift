@@ -353,7 +353,8 @@ public enum DiagnosticRedaction {
 
 /// The previous session's record at launch: read, then kept as
 /// `previous-session.txt` for the bug report, so the next boot can write its
-/// own and a second launch says nothing more.
+/// own and a second launch says nothing more. The start's record
+/// (`StartRecord`) is kept as `previous-start.txt` the same way.
 public enum PreviousSession {
     /// The previous session's record and the notice Home shows for it, left
     /// where the runtime wrote it. `endedOutOfForeground` is whether the pause
@@ -370,13 +371,45 @@ public enum PreviousSession {
 
     /// Keeps the record `read` returned as `previous-session.txt` for the bug
     /// report, so that the next boot can write its own and a second launch
-    /// says nothing more.
+    /// says nothing more. The start's own record goes with the session's,
+    /// whether or not the runtime got as far as writing the session's. What is
+    /// kept follows what this launch found: a session record with no start
+    /// record before it leaves no kept start, so the one an earlier session
+    /// kept is never read as this session's choice (`BugReportAttachments`
+    /// pairs the two again by what they say of themselves). A launch that
+    /// finds no readable session record still keeps the start record, marked
+    /// as belonging to no session.
     public static func keep(in diagnostics: URL) {
+        let start = diagnostics.appendingPathComponent(BugReportAttachments.startRecord)
         let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let record = SessionRecord.read(at: current)
+        let started = FileManager.default.fileExists(atPath: start.path)
+        if started || record != nil {
+            let keptStart = diagnostics.appendingPathComponent(BugReportAttachments.previousStartRecord)
+            try? FileManager.default.removeItem(at: keptStart)
+            if started { keep(start, as: keptStart, orphaned: record == nil) }
+        }
+        guard record != nil else { return }
         let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
-        guard FileManager.default.fileExists(atPath: current.path) else { return }
         try? FileManager.default.removeItem(at: kept)
         try? FileManager.default.moveItem(at: current, to: kept)
+    }
+
+    /// Moves the start record to its kept place. With no session record of its
+    /// own to go with it, the record is kept only if it can be marked first,
+    /// so that no retained session whose process and time happen to fit can
+    /// take it for its own: one that cannot be read, or written marked, is
+    /// dropped.
+    private static func keep(_ start: URL, as kept: URL, orphaned: Bool) {
+        guard orphaned else {
+            try? FileManager.default.moveItem(at: start, to: kept)
+            return
+        }
+        if var record = StartRecord.read(at: start) {
+            record.orphaned = true
+            if !record.write(to: kept) { try? FileManager.default.removeItem(at: kept) }
+        }
+        try? FileManager.default.removeItem(at: start)
     }
 
     /// At launch, before anything is reported or decided from a record: no run
@@ -400,6 +433,15 @@ public enum PreviousSession {
             let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
             try? manager.removeItem(at: kept)
             try? manager.moveItem(at: earlier, to: kept)
+            // The start that went with that run is kept with it, not marked as
+            // belonging to no session: `BugReportAttachments` pairs the two by
+            // what they say of themselves.
+            let start = diagnostics.appendingPathComponent(BugReportAttachments.startRecord)
+            let keptStart = diagnostics.appendingPathComponent(BugReportAttachments.previousStartRecord)
+            if manager.fileExists(atPath: start.path) {
+                try? manager.removeItem(at: keptStart)
+                try? manager.moveItem(at: start, to: keptStart)
+            }
         }
     }
 
@@ -408,7 +450,7 @@ public enum PreviousSession {
     public static func consume(in diagnostics: URL, endedOutOfForeground: Bool)
         -> (record: SessionRecord, notice: HomeNotice?)?
     {
-        guard let previous = read(in: diagnostics, endedOutOfForeground: endedOutOfForeground) else { return nil }
+        let previous = read(in: diagnostics, endedOutOfForeground: endedOutOfForeground)
         keep(in: diagnostics)
         return previous
     }

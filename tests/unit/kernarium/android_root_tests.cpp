@@ -61,7 +61,7 @@ void theWordIsTheLastMemberAndTheApiIsTheOneThatAddedIt()
             sizeof(kernarium_runtime_boot));
     require(sizeof(kernarium_runtime_boot) - bootSizeBeforeRoot <=
             sizeof(void*));
-    require(KERNARIUM_RUNTIME_API_VERSION >= 45U);
+    require(KERNARIUM_RUNTIME_API_VERSION >= 46U);
 }
 
 } // namespace

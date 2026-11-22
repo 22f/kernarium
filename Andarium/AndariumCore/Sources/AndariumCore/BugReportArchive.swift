@@ -181,6 +181,10 @@ public enum BugReportAttachments {
     /// The record of the last earlier run of this process, kept apart from
     /// the previous process's (`RunRecord`).
     public static let earlierRunRecord = "earlier-run.txt"
+    /// What the application chose for the start of each of the two sessions
+    /// (`StartRecord`), kept beside their records.
+    public static let startRecord = "start.txt"
+    public static let previousStartRecord = "previous-start.txt"
     public static let metricKitDirectory = "metrickit"
     public static let stallReport = "andarium/stalls.txt"
     public static let networkReport = "andarium/network.txt"
@@ -217,6 +221,19 @@ public enum BugReportAttachments {
         // that follows has written none.
         let previous = records[0]
         let latest = records[2] ?? records[1]
+        // The choices the application made for each start, next to the records
+        // they belong to. A choice whose start left no session record of its
+        // own (the application ended first, or the session's was not written)
+        // is copied under a name that says so, never as a session's.
+        for (file, name, session) in [
+            (previousStartRecord, "andarium/start-previous", previous),
+            (startRecord, "andarium/start-current", latest),
+        ] {
+            if let record = StartRecord.read(at: diagnostics.appendingPathComponent(file)) {
+                let matched = session.map(record.belongs(to:)) ?? false
+                entries.append(.init(name: name + (matched ? ".txt" : "-unmatched.txt"), data: Data(record.text.utf8)))
+            }
+        }
         if let report = stalls(previous: previous, current: latest) {
             entries.append(.init(name: stallReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }

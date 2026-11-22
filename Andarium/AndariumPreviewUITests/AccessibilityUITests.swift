@@ -18,6 +18,7 @@ final class AccessibilityUITests: XCTestCase {
     private static let screens: [(name: String, ready: String)] = [
         ("welcome", ""), ("home", ""), ("home-new", ""), ("home-update", ""), ("home-update-failed", ""),
         ("home-blocked", ""), ("home-ended", ""), ("home-memory-warning", ""), ("home-mic-denied", ""),
+        ("home-aot", ""), ("home-aot-off", ""), ("home-aot-jit", ""),
         ("create", ""), ("resize", ""), ("system-edit", ""), ("info", ""), ("info-acknowledgements", ""),
         ("info-license", ""), ("boot", ""), ("boot-first", ""), ("boot-recovery", ""),
         ("session", "side-keys"), ("session-open", "side-keys-power"), ("session-stats", ""),

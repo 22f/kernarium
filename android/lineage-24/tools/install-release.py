@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/aot"))
 
 import release_artifact  # noqa: E402
 from release_common import (  # noqa: E402
-    PAYLOAD_SPECS,
     fail,
     load_manifest,
+    payload_specs,
     render_acceptance,
     verify_release,
 )
@@ -30,8 +30,9 @@ def reject_nonlocal_syntax(raw: str) -> None:
         fail("release source must use local filesystem path syntax")
 
 
-def copy_declared(source: Path, staging: Path) -> None:
-    paths = ["release-manifest.json", *sorted(PAYLOAD_SPECS)]
+def copy_declared(source: Path, staging: Path, manifest: dict) -> None:
+    """Copy the manifest and every file it declares, the root files among them."""
+    paths = ["release-manifest.json", *sorted(payload_specs(manifest))]
     for relative in paths:
         source_path = source / relative
         destination = staging / relative
@@ -84,7 +85,13 @@ def main() -> None:
             saved_stdout = os.dup(1)
             os.dup2(2, 1)
             try:
-                verify_release(source, android_root, acceptance_path=descriptor)
+                # A candidate is accepted for the tree it was built from: its Magisk
+                # release is the one the tracked pin names. An accepted release that
+                # is installed later is history, bound by its descriptor instead.
+                verify_release(
+                    source, android_root, acceptance_path=descriptor,
+                    pin=android_root / "metadata/magisk.env",
+                )
             finally:
                 sys.stdout.flush()
                 os.dup2(saved_stdout, 1)
@@ -132,7 +139,7 @@ def main() -> None:
     staging_path = staging_parent / manifest["directory_name"]
     staging_path.mkdir()
     try:
-        copy_declared(source, staging_path)
+        copy_declared(source, staging_path, manifest)
         verify_release(staging_path, android_root, acceptance_path=acceptance)
         os.replace(staging_path, destination)
         staging_parent.rmdir()

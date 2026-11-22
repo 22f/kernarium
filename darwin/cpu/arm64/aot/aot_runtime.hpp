@@ -38,13 +38,27 @@ namespace uml::cpu::arm64::aot {
  * release, and `on` fails for any other release or none. The decision is made
  * before any executor, so a launch the blob does not fit allocates nothing
  * of it. A run that starts again in the process (a guest restart) decides
- * again: a release the blob no longer fits is off, and a process that ran
+ * again: a release the blob no longer fits is off, and a session that ran
  * without the component does not turn it on, so `automatic` runs on the
  * engine. False when it cannot be kept: `on` for a framework whose blob is not
- * valid, for a release it does not fit, or in a process that already runs
+ * valid, for a release it does not fit, or in a session that already runs
  * without it. */
 [[nodiscard]] bool select(::uml::cpu::AotSelection selection,
 	const ::uml::cpu::AotRelease *release) noexcept;
+
+/* The end of a session: Android's clean power-off, whose guest was released to
+ * the process, so that no executor of it exists. The next session's select()
+ * chooses again, which a start without the component would otherwise forbid
+ * for the rest of the process (the loader reuses it). A restart inside a
+ * session is no end and keeps what its session chose. Nothing about a release
+ * is remembered: select() validates it at every boot. */
+void end_session() noexcept;
+
+/* The session's choice as it stands, and putting it back: a start that took
+ * the choice and then failed before its guest ran leaves the process as it
+ * was. The value means nothing but to restore_choice(). */
+[[nodiscard]] int choice() noexcept;
+void restore_choice(int choice) noexcept;
 
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {
