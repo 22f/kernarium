@@ -229,16 +229,80 @@ struct RootAppStepTests {
     }
 
     @Test func openingTheAppIsInsideTheBoundAndSaysNothingOfTheInstall() async {
-        let slowOpen = RootScriptedShell { command in
-            if command.hasPrefix("am start") { await Self.waitThatACancelDoesNotEnd(seconds: 40) }
-            return GuestShellOutput(text: "", exitCode: 0)
+        // The guest is unlocked and names the launcher, so the start is reached and then hangs.
+        let entered = RootCounter()
+        let hungStart = RootScriptedShell { command in
+            switch command {
+            case MagiskApp.userStateCommand: return GuestShellOutput(text: "RUNNING_UNLOCKED\n", exitCode: 0)
+            case MagiskApp.resolveCommand: return GuestShellOutput(text: MagiskGuest.resolved, exitCode: 0)
+            default:
+                if command.hasPrefix("am start") {
+                    await entered.bump()
+                    await Self.waitThatACancelDoesNotEnd(seconds: 40)
+                }
+                return GuestShellOutput(text: "", exitCode: 0)
+            }
         }
         let started = ContinuousClock.now
         let outcome = await RootAppStep.run(
-            shell: slowOpen, release: release, state: rooted, installing: {}, install: {}, limit: .seconds(2))
+            shell: hungStart, release: release, state: rooted, installing: {}, install: {}, limit: .seconds(2))
         guard case .installed(let state) = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
+        let reached = await entered.value
+        #expect(reached == 1, "the hung start was never entered: the bound ended something else")
         #expect(state.appInstall?.opened == false, "an open the bound ended is not an open")
         #expect(ContinuousClock.now - started < .seconds(20), "the open waited past the bound")
+    }
+
+    @Test func everyTimerOfTheStepEndsAtTheOriginalDeadlineWhateverTheClockDidMeanwhile() async {
+        // Every read of the time costs a second, as a timer that starts late would find it.
+        let clock = ScriptedClock(tick: .seconds(1))
+        let outcome = await RootAppStep.run(
+            shell: MagiskGuest(), release: release, state: rooted, installing: {}, install: {}, sleep: noWait,
+            clocking: clock.clocking)
+        guard case .installed(let state) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(state.appInstall?.opened == true)
+        let deadline = clock.instant(at: .seconds(45))
+        let asked = clock.requested
+        #expect(asked.count == 2, "one timer for the check and the install, one for the opening")
+        #expect(asked.allSatisfy { $0 == deadline }, "a timer was set for another instant than the step's deadline")
+    }
+
+    @Test func aSilentGuestIsReleasedWhenTheClockReachesTheDeadlineAndNotBefore() async {
+        // The install takes 40 of the 45 seconds; the guest then never answers the start.
+        let clock = ScriptedClock()
+        let entered = RootCounter()
+        let hungStart = RootScriptedShell { command in
+            switch command {
+            case MagiskApp.userStateCommand: return GuestShellOutput(text: "RUNNING_UNLOCKED\n", exitCode: 0)
+            case MagiskApp.resolveCommand: return GuestShellOutput(text: MagiskGuest.resolved, exitCode: 0)
+            default:
+                if command.hasPrefix("am start") {
+                    await entered.bump()
+                    await Self.waitThatACancelDoesNotEnd(seconds: 40)
+                }
+                return GuestShellOutput(text: "", exitCode: 0)
+            }
+        }
+        let finished = RootCounter()
+        let release = release
+        let state = rooted
+        let clocking = clock.clocking
+        let task = Task { () -> RootAppStep.Outcome in
+            let outcome = await RootAppStep.run(
+                shell: hungStart, release: release, state: state, installing: {},
+                install: { clock.advance(to: .seconds(40)) }, clocking: clocking)
+            await finished.bump()
+            return outcome
+        }
+        while await entered.value == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        clock.advance(to: .seconds(44))
+        try? await Task.sleep(for: .milliseconds(150))
+        let early = await finished.value
+        #expect(early == 0, "the step ended before its deadline")
+        clock.advance(to: .seconds(45))
+        let outcome = await task.value
+        guard case .installed(let learned) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(learned.appInstall?.opened == false)
     }
 
     @Test func theWaitsOfTheOpeningAreInsideTheBoundToo() async {
@@ -327,5 +391,80 @@ struct RootAppStepTests {
         #expect(BootSteps.count == 4 && BootSteps.countWithRootApp == 5)
         #expect(BootSteps.reportName(ofStep: BootSteps.rootAppStep, recovery: false) == "Magisk app")
         #expect(BootSteps.reportName(ofStep: 3, recovery: false) == "Startup")
+    }
+}
+
+/// A clock a test moves. Each read of the time can cost `tick`, and a wait
+/// ends when the test moves the time to its instant or the waiter is cancelled.
+final class ScriptedClock: @unchecked Sendable {
+    private struct Waiter {
+        var id: Int
+        var deadline: ContinuousClock.Instant
+        var continuation: CheckedContinuation<Void, Never>
+    }
+
+    private let lock = NSLock()
+    private let base = ContinuousClock.now
+    private let tick: Duration
+    private var offset = Duration.zero
+    private var waiters: [Waiter] = []
+    private var nextID = 0
+    private var asked: [ContinuousClock.Instant] = []
+
+    init(tick: Duration = .zero) { self.tick = tick }
+
+    /// The instants every wait was set for.
+    var requested: [ContinuousClock.Instant] { lock.withLock { asked } }
+
+    func instant(at time: Duration) -> ContinuousClock.Instant { base.advanced(by: time) }
+
+    func now() -> ContinuousClock.Instant {
+        lock.withLock {
+            let value = base.advanced(by: offset)
+            offset += tick
+            return value
+        }
+    }
+
+    /// Moves the time to `time` from the start and ends every wait it reaches.
+    func advance(to time: Duration) {
+        let due: [Waiter] = lock.withLock {
+            offset = time
+            let reached = base.advanced(by: time)
+            let ready = waiters.filter { $0.deadline <= reached }
+            waiters.removeAll { $0.deadline <= reached }
+            return ready
+        }
+        due.forEach { $0.continuation.resume() }
+    }
+
+    func wait(until deadline: ContinuousClock.Instant) async {
+        let id = lock.withLock { () -> Int in
+            asked.append(deadline)
+            nextID += 1
+            return nextID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if deadline <= base.advanced(by: offset) {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters.append(Waiter(id: id, deadline: deadline, continuation: continuation))
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            let waiter = lock.withLock { () -> Waiter? in
+                guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                return waiters.remove(at: index)
+            }
+            waiter?.continuation.resume()
+        }
+    }
+
+    var clocking: RootAppStep.Clocking {
+        RootAppStep.Clocking(now: { self.now() }, wait: { await self.wait(until: $0) })
     }
 }
