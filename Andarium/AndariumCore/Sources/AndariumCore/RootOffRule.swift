@@ -2,8 +2,8 @@
 
 import Foundation
 
-/// What becomes of the Magisk app when root is off. The owner may choose
-/// another way; it is one constant here.
+/// What becomes of the Magisk app when root is off: it stays installed. The
+/// behaviour is one constant here.
 public enum RootOffRule {
     public enum AppPolicy: Sendable {
         /// The app stays installed: its settings and grants survive and apps
@@ -14,7 +14,7 @@ public enum RootOffRule {
         case uninstall
     }
 
-    /// The first option of the decision.
+    /// The app stays installed.
     public static let appPolicy = AppPolicy.keep
 
     /// Whether a start without root asks the guest about the app to remove it.

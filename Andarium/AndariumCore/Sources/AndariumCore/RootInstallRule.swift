@@ -3,8 +3,7 @@
 import Foundation
 
 /// When the application puts the official Magisk app in the guest, and what it
-/// does once it has. The owner may choose another way; each choice is one
-/// constant here and the rest follows it.
+/// does once it has. Each choice is one constant here and the rest follows it.
 public enum RootInstallRule {
     /// When an absent app is put in again.
     public enum Policy: Sendable {
@@ -18,7 +17,7 @@ public enum RootInstallRule {
         case oncePerGuest
     }
 
-    /// The first option of the decision.
+    /// An absent app is installed once in a period of root being on.
     public static let policy = Policy.oncePerOnPeriod
 
     /// The installing start ends with the Magisk app on the guest's screen, so

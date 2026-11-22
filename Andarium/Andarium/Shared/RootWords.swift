@@ -3,8 +3,7 @@
 import AndariumCore
 import SwiftUI
 
-/// Every word of the root switch, in one place, so that the wording the owner
-/// picks is a change here and in the catalog. The UI says "Android" or
+/// Every word of the root switch, in one place. The UI says "Android" or
 /// "virtual machine", and names Magisk because the person grants root there.
 enum RootWords {
     // MARK: Home

@@ -4,7 +4,8 @@ import AndariumCore
 import Foundation
 
 /// The root switch on the model. The guest's root state is `Guest.root`
-/// (AndariumCore); the rules the owner may choose differently are the three
+/// (AndariumCore); its three rules (when the Magisk app is put in, what
+/// becomes of it with root off, and what a failed start does) are the
 /// `Root...Rule` enums there.
 extension AppModel {
     /// The switch as Home shows it: on is the person's choice, and a pause that

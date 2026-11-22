@@ -3,8 +3,8 @@
 import Foundation
 
 /// What a start with root that ends before Android has booted does to the
-/// switch, so that a ramdisk that cannot boot never traps the person. The owner
-/// may choose another way; the behaviour is one constant here.
+/// switch, so that a ramdisk that cannot boot never traps the person. The
+/// behaviour is one constant here.
 public enum RootFallbackRule {
     public enum Behaviour: Sendable {
         /// Starts boot without root until the person says what to do. The
@@ -17,7 +17,7 @@ public enum RootFallbackRule {
         case none
     }
 
-    /// The first option of the decision.
+    /// Starts boot without root until the person says what to do.
     public static let behaviour = Behaviour.bootStockOnce
 
     /// Whether a session record, read at the next launch or at the end of a

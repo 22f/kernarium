@@ -6,7 +6,7 @@ import Testing
 @testable import AndariumCore
 
 /// The root switch's model: what a release carries, what the guest keeps of
-/// the switch, the three rules the owner may change, the Magisk app check and
+/// the switch, the three rules, the Magisk app check and
 /// the boot screen's install step. The release files here are made up: no
 /// Magisk file is in the repository.
 struct RootReleaseTests {
