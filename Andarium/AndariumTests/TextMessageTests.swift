@@ -565,6 +565,44 @@ struct TextMessageTests {
         #expect(await eventually { noticeText(rig) == header })
     }
 
+    /// The overlay as the application has it: a view in a hosting controller that UIKit owns, where SwiftUI's
+    /// `scenePhase` stays at .background and never says the application is active. The model must still learn
+    /// it from UIKit: the flag follows the application's own state at the overlay's first appearance and its
+    /// become-active and resign-active notifications, and a result on the open bar is told, which is what
+    /// lets Send take the next message.
+    @Test func theOverlayInAUIKitHostedViewKeepsTheModelsActiveFlagAndToldLinesFollow() async throws {
+        try #require(UIApplication.shared.applicationState == .active, "the test host is the active application")
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        // What a scene phase of .background left the flag as.
+        model.textMessageSceneActive = false
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        try await hosted(TextMessageBarOverlay().environment(model), in: lease, height: 900, width: 390) { _ in
+            #expect(await eventually { model.textMessageSceneActive }, "the overlay read the application's state")
+            // The result of a send on the open bar is told at once, and the identifier it was kept for goes.
+            model.openTextMessage()
+            #expect(await send(rig, "one", .handedOver(1)))
+            #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+            // Typing after a told result is a new message, which Send takes.
+            model.setTextMessageText("two")
+            #expect(model.canSendTextMessage)
+
+            // Resigning active: the next result is not told while the application is not active...
+            NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: UIApplication.shared)
+            #expect(await eventually { !model.textMessageSceneActive })
+            #expect(await send(rig, "two", .handedOver(1)))
+            await settle()
+            let identifier = rig.driver.smsSent[1].identifier
+            #expect(state.awaiting == .result(identifier))
+            // ... and is, once the application is active again.
+            NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: UIApplication.shared)
+            #expect(await eventually { model.textMessageSceneActive })
+            #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+        }
+    }
+
     @Test func aLateAnswerOfAnEndedSessionTouchesNothingOfANewerSend() async throws {
         let rig = try rig()
         defer { rig.cleanUp() }
