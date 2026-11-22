@@ -20,11 +20,10 @@ final class WhatsNewModel {
     /// Writes the record for the next launch: the device keeps it in its
     /// defaults. Nil keeps nothing, as in a harness launch and the preview.
     @ObservationIgnored var keep: ((WhatsNewRecord) -> Void)?
-    /// Whether this device shows a feature now, by the feature's own rule
-    /// (`AppModel` states them: Home's "120 Hz" switch and Add to Home
-    /// Screen). The launch cannot ask it, since the screen the 120 Hz switch
-    /// depends on is known only once the scene connects, so it is asked each
-    /// time the ribbon and the notes are drawn.
+    /// Whether this device shows a feature, by the feature's own rule
+    /// (`AppModel` states it: Add to Home Screen, in Settings). The launch's
+    /// offer (`pending`) does not ask it; the ribbon and the notes do, each
+    /// time they are drawn.
     @ObservationIgnored var showsFeature: (WhatsNewFeature) -> Bool = { _ in true }
 
     /// What the ribbon and its notes announce now: `pending` without the

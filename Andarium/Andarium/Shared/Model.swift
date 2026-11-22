@@ -922,7 +922,6 @@ final class AppModel {
         whatsNew.showsFeature = { [weak self] feature in
             guard let self else { return true }
             return switch feature {
-            case .highRefresh: highRefreshOffered
             case .addToHomeScreen: hostOffersAddToHomeScreen
             }
         }

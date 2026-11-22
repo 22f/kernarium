@@ -461,14 +461,12 @@ control out.
   own number and no later ones. An entry can name the devices it is for (more
   guest memory than a limit, an iPad, a device with haptics, a compass or a
   camera): the ribbon and its sheet announce only the entries the device meets.
-  An entry can also name the feature it is about (Home's 120 Hz switch, Add to
-  Home Screen); the ribbon and its sheet show it only while the feature's own
-  rule offers it, asked each time they are drawn, because a launch cannot know
-  the screen yet. Info keeps every entry as written (`WhatsNewRules`,
-  `WhatsNewStore`). A launch
-  with a launch setting, or one a test runs, shows no ribbon and keeps no
-  record, and neither does a launch whose notes cannot be read, which also has
-  no What's New row in Info.
+  An entry can also name the feature it is about (Add to Home Screen); the
+  ribbon and its sheet show it only where the feature's own rule offers it,
+  asked each time they are drawn. Info keeps every entry as written
+  (`WhatsNewRules`, `WhatsNewStore`). A launch with a launch setting, or one a
+  test runs, shows no ribbon and keeps no record, and neither does a launch
+  whose notes cannot be read, which also has no What's New row in Info.
 
 ## Runtime
 

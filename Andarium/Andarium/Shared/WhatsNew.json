@@ -19,10 +19,7 @@
         "id": "high-refresh",
         "title": "120 Hz",
         "text": "On a ProMotion iPhone or iPad, Android can now run at 120 Hz for smoother motion, using more battery. It is off until you turn it on in Performance on Home.",
-        "symbol": "speedometer",
-        "requirement": {
-          "feature": "highRefresh"
-        }
+        "symbol": "speedometer"
       },
       {
         "id": "add-to-home-screen",

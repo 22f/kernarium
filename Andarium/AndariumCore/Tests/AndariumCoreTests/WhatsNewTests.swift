@@ -259,10 +259,9 @@ struct WhatsNewRequirementTests {
     /// time the notes are drawn, so a launch's question (`isMet`) does not
     /// include it.
     @Test func aFeatureRequirementIsAskedWhenTheNotesAreDrawnAndNotWhenALaunchDecides() {
-        let requirement = WhatsNewRequirement(feature: .highRefresh)
+        let requirement = WhatsNewRequirement(feature: .addToHomeScreen)
         for host in [iPhone, iPhoneWithoutHaptics, iPad, mac] { #expect(requirement.isMet(by: host, vCPUs: 6)) }
-        #expect(requirement.isShown(by: { $0 == .highRefresh }))
-        #expect(!requirement.isShown(by: { $0 == .addToHomeScreen }))
+        #expect(requirement.isShown(by: { $0 == .addToHomeScreen }))
         #expect(!requirement.isShown(by: { _ in false }))
         // A requirement that names no feature is shown whatever the features say.
         #expect(WhatsNewRequirement(device: .pad).isShown(by: { _ in false }))
@@ -379,14 +378,15 @@ struct WhatsNewCatalogTests {
     }
 
     @Test func aFeatureRequirementDecodesAloneOrBesideAnotherAndOnlyAsAKnownFeature() throws {
-        for (word, feature) in [("highRefresh", WhatsNewFeature.highRefresh), ("addToHomeScreen", .addToHomeScreen)] {
-            let alone = try decode(notes(entry: entry + #", "requirement": {"feature": "\#(word)"}"#))
-            #expect(alone.first?.entries.first?.requirement == WhatsNewRequirement(feature: feature))
-            let beside = try decode(
-                notes(entry: entry + #", "requirement": {"device": "pad", "feature": "\#(word)"}"#))
-            #expect(beside.first?.entries.first?.requirement == WhatsNewRequirement(device: .pad, feature: feature))
-        }
-        for feature in [#""Pad""#, #""120Hz""#, #""""#, "3", "null", #"["highRefresh"]"#, "true"] {
+        let alone = try decode(notes(entry: entry + #", "requirement": {"feature": "addToHomeScreen"}"#))
+        #expect(alone.first?.entries.first?.requirement == WhatsNewRequirement(feature: .addToHomeScreen))
+        let beside = try decode(
+            notes(entry: entry + #", "requirement": {"device": "pad", "feature": "addToHomeScreen"}"#))
+        #expect(
+            beside.first?.entries.first?.requirement
+                == WhatsNewRequirement(device: .pad, feature: .addToHomeScreen))
+        // A word that is not a feature, and one that no longer is, refuse the notes.
+        for feature in [#""Pad""#, #""120Hz""#, #""highRefresh""#, #""""#, "3", "null", #"["addToHomeScreen"]"#, "true"] {
             #expect(throws: (any Error).self, "\(feature)") {
                 try decode(notes(entry: entry + #", "requirement": {"feature": \#(feature)}"#))
             }
@@ -425,7 +425,7 @@ struct WhatsNewCatalogTests {
         // decoding them proves.
         let named = releases.flatMap(\.entries).compactMap(\.requirement)
         #expect(named.contains { $0.device == .pad })
-        // The two entries about a feature that only some devices show.
+        // The entry about a feature that only some devices show.
         #expect(Set(named.compactMap(\.feature)) == Set(WhatsNewFeature.allCases))
     }
 

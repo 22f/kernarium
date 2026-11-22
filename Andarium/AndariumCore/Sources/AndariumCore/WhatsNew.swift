@@ -186,8 +186,7 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     /// The feature the entry is about, for one that the application shows
     /// only where its own rule says so. The rule is the feature's, never the
     /// notes': it is asked each time the notes are drawn (`isShown`), not at
-    /// launch (`isMet`), because the screen it can depend on is known only once
-    /// the scene connects.
+    /// launch (`isMet`).
     public var feature: WhatsNewFeature?
     /// `true` is an entry for a device that can give the guest a compass (an
     /// iPhone, an iPad), which a Mac and the Simulator cannot. `false` is no
@@ -275,12 +274,10 @@ public enum WhatsNewDevice: String, Hashable, Decodable, Sendable {
 }
 
 /// A feature that the application shows only where its own rule says so,
-/// written in the notes as `"highRefresh"` or `"addToHomeScreen"`. An entry
-/// about one is left out of the ribbon and its notes on a device that does not
-/// show the feature, and stays in Info's history as written.
+/// written in the notes as `"addToHomeScreen"`. An entry about one is left out
+/// of the ribbon and its notes on a device that does not show the feature, and
+/// stays in Info's history as written.
 public enum WhatsNewFeature: String, Hashable, Decodable, Sendable, CaseIterable {
-    /// Home's "120 Hz" switch.
-    case highRefresh
     /// Add to Home Screen, in Settings.
     case addToHomeScreen
 }

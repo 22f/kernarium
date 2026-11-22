@@ -47,11 +47,15 @@ struct WhatsNewTests {
 
     /// An iPhone or iPad running the application, as iOS 27 has it.
     private static let iPadApp = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
+    /// The same on an iOS before 27, which has no Shortcuts tile for Add to Home
+    /// Screen.
+    private static let iPadAppBeforeIOS27 = IPadAppHost(
+        isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false)
 
     /// A model for `host`, on a screen that shows `framesPerSecond` at the most
     /// and a system that runs the application as `padApp` says: a ProMotion
-    /// screen on iOS 27 unless the test says otherwise, so that Home shows its
-    /// "120 Hz" switch and Settings offers Add to Home Screen.
+    /// screen on iOS 27 unless the test says otherwise, so that Settings offers
+    /// Add to Home Screen.
     private func model(
         on host: HostDevice, framesPerSecond: Int = 120, padApp: IPadAppHost = Self.iPadApp
     ) -> AppModel {
@@ -81,11 +85,8 @@ struct WhatsNewTests {
         "frame-rate-when-hot", "update-notice", "build-16-fixes",
     ]
 
-    /// The entries of build 16 about a feature that only some devices show.
-    private static let buildSixteenFeatureIDs = ["high-refresh", "add-to-home-screen"]
-    private static let buildSixteenIDsWithoutFeatures = buildSixteenIDs.filter {
-        !buildSixteenFeatureIDs.contains($0)
-    }
+    /// Build 16 as a device without Add to Home Screen is told it.
+    private static let buildSixteenIDsWithoutAddToHomeScreen = buildSixteenIDs.filter { $0 != "add-to-home-screen" }
 
     /// Build 12 as written.
     private static let buildTwelveIDs = ["old-app-compatibility", "fixes-and-improvements"]
@@ -168,7 +169,7 @@ struct WhatsNewTests {
             }
         }
         // A requirement the code does not know fails to decode, so the notes
-        // would not be here; these six entries are the ones that have any.
+        // would not be here; these five entries are the ones that have any.
         let requirements = WhatsNewCatalog.load().flatMap(\.entries).compactMap { entry in
             entry.requirement.map { (entry.id, $0) }
         }
@@ -177,7 +178,6 @@ struct WhatsNewTests {
             "ipad-rotation": WhatsNewRequirement(device: .pad),
             "camera": WhatsNewRequirement(camera: true),
             "haptics": WhatsNewRequirement(device: .haptics),
-            "high-refresh": WhatsNewRequirement(feature: .highRefresh),
             "add-to-home-screen": WhatsNewRequirement(feature: .addToHomeScreen),
         ])
     }
@@ -265,8 +265,8 @@ struct WhatsNewTests {
         let withoutDeviceEntries = Self.buildElevenIDs.filter { $0 != "ipad-rotation" && $0 != "haptics" }
         let withoutACamera = { (ids: [String]) in ids.filter { $0 != "camera" } }
         let newer = Self.buildSixteenIDs + Self.buildTwelveIDs
-        // A Mac and a Vision Pro show neither the 120 Hz switch nor Add to Home Screen.
-        let newerWithoutFeatures = Self.buildSixteenIDsWithoutFeatures + Self.buildTwelveIDs
+        // A Mac and a Vision Pro show no Add to Home Screen.
+        let newerWithoutFeatures = Self.buildSixteenIDsWithoutAddToHomeScreen + Self.buildTwelveIDs
         #expect(told(by: host(maximumMiB: 4096)) == newer + Self.buildElevenIDsOnAnIPhone)
         #expect(
             told(by: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false))
@@ -291,7 +291,7 @@ struct WhatsNewTests {
                 == withoutACamera(newerWithoutFeatures + Self.buildElevenIDsOnAnIPad))
     }
 
-    // MARK: Entries about a feature that only some devices show
+    // MARK: The entry about a feature that only some devices show
 
     /// What an update from build 12 announces to `host`, and the checks that
     /// hold on every device: the ribbon and the notes name the same entries, and
@@ -311,39 +311,44 @@ struct WhatsNewTests {
         }
     }
 
-    @Test func aDeviceThatShowsBothFeaturesIsToldAboutBoth() {
+    @Test func aDeviceThatShowsAddToHomeScreenIsToldEveryEntry() {
         #expect(idsAnnounced(to: host(maximumMiB: 4096)) == Self.buildSixteenIDs)
         #expect(idsAnnounced(to: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false)) == Self.buildSixteenIDs)
-    }
-
-    /// A screen that shows 60 frames a second has no "120 Hz" switch on Home, and
-    /// nothing else of build 16 goes with it.
-    @Test func aScreenThatShowsNoMoreThanSixtyFramesIsNotToldAbout120Hz() {
-        #expect(
-            idsAnnounced(to: host(maximumMiB: 4096), framesPerSecond: 60)
-                == Self.buildSixteenIDs.filter { $0 != "high-refresh" })
     }
 
     /// An iOS before 27 has no Shortcuts tile for the Add to Home Screen guide,
     /// so Settings offers none.
     @Test func aSystemBeforeIOS27IsNotToldAboutAddToHomeScreen() {
-        let ios26 = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false)
         #expect(
-            idsAnnounced(to: host(maximumMiB: 4096), padApp: ios26)
-                == Self.buildSixteenIDs.filter { $0 != "add-to-home-screen" })
+            idsAnnounced(to: host(maximumMiB: 4096), padApp: Self.iPadAppBeforeIOS27)
+                == Self.buildSixteenIDsWithoutAddToHomeScreen)
     }
 
-    @Test func theIPadAppOnAMacOrAVisionProIsToldAboutNeitherFeature() {
+    @Test func theIPadAppOnAMacOrAVisionProIsNotToldAboutAddToHomeScreen() {
         #expect(
             idsAnnounced(
                 to: host(maximumMiB: 4096, idiom: .mac, hasHaptics: false, hasCamera: false),
                 padApp: IPadAppHost(isiOSAppOnMac: true, isiOSAppOnVision: false))
-                == Self.buildSixteenIDsWithoutFeatures)
+                == Self.buildSixteenIDsWithoutAddToHomeScreen)
         #expect(
             idsAnnounced(
                 to: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false, hasCamera: false),
                 padApp: IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: true))
-                == Self.buildSixteenIDsWithoutFeatures)
+                == Self.buildSixteenIDsWithoutAddToHomeScreen)
+    }
+
+    /// The entry about 120 Hz is for every device, whatever its screen shows:
+    /// it names the setting, and a device without the switch has no other
+    /// reason to be left out of the news.
+    @Test func the120HzEntryIsToldWhateverTheScreenShows() {
+        for framesPerSecond in [60, 120] {
+            #expect(idsAnnounced(to: host(maximumMiB: 4096), framesPerSecond: framesPerSecond) == Self.buildSixteenIDs)
+            #expect(
+                idsAnnounced(
+                    to: host(maximumMiB: 4096), framesPerSecond: framesPerSecond, padApp: Self.iPadAppBeforeIOS27)
+                    == Self.buildSixteenIDsWithoutAddToHomeScreen)
+        }
+        #expect(Self.buildSixteenIDsWithoutAddToHomeScreen.contains("high-refresh"))
     }
 
     /// The entries a device does not show are not in the ribbon's count or names
@@ -357,60 +362,53 @@ struct WhatsNewTests {
                 return WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: named)
             }
         }
-        let ios26 = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false)
         let separator = "\u{00A0}\u{00B7} "
-        #expect(ribbon(framesPerSecond: 120, padApp: Self.iPadApp, naming: 0) == "8 new features")
-        #expect(ribbon(framesPerSecond: 60, padApp: Self.iPadApp, naming: 0) == "7 new features")
-        #expect(ribbon(framesPerSecond: 120, padApp: ios26, naming: 0) == "7 new features")
-        #expect(ribbon(framesPerSecond: 60, padApp: ios26, naming: 0) == "6 new features")
-        // Where neither shows, the names skip both.
+        for framesPerSecond in [60, 120] {
+            #expect(ribbon(framesPerSecond: framesPerSecond, padApp: Self.iPadApp, naming: 0) == "8 new features")
+            #expect(
+                ribbon(framesPerSecond: framesPerSecond, padApp: Self.iPadAppBeforeIOS27, naming: 0)
+                    == "7 new features")
+        }
+        // Where Add to Home Screen is not shown, the names skip it.
         #expect(
-            ribbon(framesPerSecond: 60, padApp: ios26, naming: 3)
-                == ["Root access", "AOT", "VoiceOver and TalkBack", "3 more"].joined(separator: separator))
+            ribbon(framesPerSecond: 60, padApp: Self.iPadAppBeforeIOS27, naming: 5)
+                == ["Root access", "AOT", "120 Hz", "VoiceOver and TalkBack", "Frame rate when hot", "2 more"]
+                .joined(separator: separator))
     }
 
-    /// The launch decides the ribbon before the scene connects and reads its
-    /// screen, so the notes follow the screen afterwards, by Home's own rule.
-    @Test func theNotesFollowWhatHomeShowsAfterTheLaunch() {
+    /// The launch offers the whole release, and the notes ask the feature's own
+    /// rule each time they are drawn.
+    @Test func theNotesAskTheFeaturesRuleEachTimeTheyAreDrawn() {
         withDefaults { defaults in
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 12))
-            let model = model(on: host(maximumMiB: 4096), framesPerSecond: 60)
+            let model = model(on: host(maximumMiB: 4096), padApp: Self.iPadAppBeforeIOS27)
             entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(model.whatsNew.pending.flatMap { $0.entries.map(\.id) } == Self.buildSixteenIDs)
-            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildSixteenIDs.filter { $0 != "high-refresh" })
-            model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildSixteenIDsWithoutAddToHomeScreen)
+            model.playedPadAppHost = Self.iPadApp
             #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildSixteenIDs)
-            // A 13-inch iPad Pro at its native size is offered no 120 Hz switch.
-            model.displayPointsDidChange(CGSize(width: 1376, height: 1032))
-            model.chooseResolution(.native)
-            #expect(!model.highRefreshOffered)
-            #expect(!model.whatsNew.pendingEntries.map(\.id).contains("high-refresh"))
-            model.chooseResolution(.factor(1.5))
-            #expect(model.highRefreshOffered)
-            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildSixteenIDs)
-            // The scene moves to a 60 Hz display.
-            model.screenDidChange(nativeScale: 2, maximumFramesPerSecond: 60)
-            #expect(!model.whatsNew.pendingEntries.map(\.id).contains("high-refresh"))
+            model.playedPadAppHost = Self.iPadAppBeforeIOS27
+            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildSixteenIDsWithoutAddToHomeScreen)
             // The record is the launch's: what the notes show does not touch it.
             #expect(WhatsNewStore(defaults: defaults).record
                 == WhatsNewRecord(seenBuild: 12, ribbonBuild: 16, ribbonLaunches: 1))
         }
     }
 
-    /// No second rule: each entry is shown exactly where the feature's own rule
-    /// offers it, whatever the device.
-    @Test func anEntryAboutAFeatureIsShownExactlyWhereTheFeatureIsOffered() {
+    /// No second rule: Add to Home Screen is shown exactly where Settings offers
+    /// it, whatever the device, and the 120 Hz entry is shown everywhere.
+    @Test func theEntryAboutAddToHomeScreenIsShownExactlyWhereSettingsOffersIt() {
         let hosts = [
             host(maximumMiB: 4096), host(maximumMiB: 4096, idiom: .pad, hasHaptics: false),
             host(maximumMiB: 4096, idiom: .mac, hasHaptics: false, hasCamera: false),
         ]
         let systems = [
             Self.iPadApp,
-            IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false),
+            Self.iPadAppBeforeIOS27,
             IPadAppHost(isiOSAppOnMac: true, isiOSAppOnVision: false),
             IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: true),
         ]
-        var shown = Set<String>()
+        var answers = Set<Bool>()
         for host in hosts {
             for padApp in systems {
                 for framesPerSecond in [60, 120] {
@@ -420,15 +418,15 @@ struct WhatsNewTests {
                         entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
                         let ids = model.whatsNew.pendingEntries.map(\.id)
                         let label = "\(host.name) \(padApp) at \(framesPerSecond)"
-                        #expect(ids.contains("high-refresh") == model.highRefreshOffered, "\(label)")
                         #expect(ids.contains("add-to-home-screen") == model.hostOffersAddToHomeScreen, "\(label)")
-                        shown.formUnion(ids.filter { Self.buildSixteenFeatureIDs.contains($0) })
+                        #expect(ids.contains("high-refresh"), "\(label)")
+                        answers.insert(model.hostOffersAddToHomeScreen)
                     }
                 }
             }
         }
         // Both answers occur in the cases above, so neither check is vacuous.
-        #expect(shown == Set(Self.buildSixteenFeatureIDs))
+        #expect(answers == [true, false])
     }
 
     /// A release whose every entry the device hides shows no ribbon, though the
@@ -437,16 +435,16 @@ struct WhatsNewTests {
         let hidden = WhatsNewRelease(build: 16, version: "1.1 (16)", entries: [
             WhatsNewEntry(
                 id: "a", title: "A", text: "T", symbol: "star",
-                requirement: WhatsNewRequirement(feature: .highRefresh)),
+                requirement: WhatsNewRequirement(feature: .addToHomeScreen)),
         ])
-        let model = model(on: host(maximumMiB: 4096), framesPerSecond: 60)
+        let model = model(on: host(maximumMiB: 4096), padApp: Self.iPadAppBeforeIOS27)
         model.whatsNew.launch(
             releases: [hidden], record: WhatsNewRecord(seenBuild: 12), currentBuild: 16, hasGuest: true,
             offers: { _ in true })
         #expect(model.whatsNew.pending.map(\.build) == [16])
         #expect(model.whatsNew.announced.isEmpty && model.whatsNew.pendingEntries.isEmpty)
         #expect(!model.whatsNew.showsRibbon)
-        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        model.playedPadAppHost = Self.iPadApp
         #expect(model.whatsNew.showsRibbon && model.whatsNew.pendingEntries.map(\.id) == ["a"])
     }
 
@@ -565,7 +563,7 @@ struct WhatsNewTests {
                 == Self.buildSixteenIDs + Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPhone
                     + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.map(\.entries.count) == [9, 2, 9, 3])
+            #expect(model.whatsNew.releases.map(\.entries.count) == [8, 2, 9, 3])
         }
     }
 
