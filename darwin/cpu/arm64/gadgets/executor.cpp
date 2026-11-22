@@ -11,6 +11,7 @@
 #include "cpu/arm64/aarch32/guest_fetch.hpp"
 #include "cpu/arm64/aarch32/guest_key.hpp"
 #include "cpu/arm64/aarch32/guest_validation.hpp"
+#include "cpu/arm64/code_synchronization.hpp"
 #include "cpu/arm64/detail/floating_exception.hpp"
 #include "cpu/arm64/gadgets/a32/a32_builder.hpp"
 #include "cpu/gadget_body_arena.hpp"
@@ -3629,6 +3630,21 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 				diag::note_dispatch(finds, entries);
 #endif
 				return event;
+			}
+			/* An IC IVAU at an address the address space maps nothing at
+			 * faults like a load, and the entry loop reports it at the
+			 * instruction (the one before the PC) from the note the
+			 * helper left. No instruction may run after it, or the loop
+			 * would report the fault at whatever instruction the run
+			 * stopped after. The kernel maps the page and the
+			 * instruction runs again, in the engine. */
+			if (arm64::has_unmapped_code_synchronization()) [[unlikely]] {
+				aot_->retry_pc = cpu.pc - sizeof(std::uint32_t);
+				executed = total;
+#if UML_AOT_DIAGNOSTICS
+				diag::note_dispatch(finds, entries);
+#endif
+				return ::uml::cpu::EngineEvent::continued;
 			}
 		} else if (cpu.pc == start && result.retired == 0) {
 #if UML_AOT_DIAGNOSTICS

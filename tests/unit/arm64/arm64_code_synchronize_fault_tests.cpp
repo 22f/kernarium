@@ -23,6 +23,9 @@
  *               instruction cache at the executable view, which A has not
  *               mapped yet. The fault maps the view; B, which translated the
  *               page, then runs the new instruction.
+ *   note        The helper both engines call leaves a note for the entry loop
+ *               when the address is unmapped, which an executor that runs on
+ *               after an instruction can see without taking it.
  *   entered     The generation an entered execution context holds is the one
  *               IC IVAU is resolved in, through nested contexts and back out
  *               of them, and a context destroyed while entered leaves nothing
@@ -36,6 +39,8 @@
  *               change is published to the running generation.
  */
 #include "arm64_cross_generation_test_support.hpp"
+
+#include "cpu/arm64/code_synchronization.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -223,6 +228,46 @@ int synchronize_alias()
 		static_cast<unsigned long>(alias_base + 0x40));
 }
 
+void note_for_the_entry_loop(unsigned long &next)
+{
+	const auto app = next++;
+	require(darwin_uml_static_vm_activate(app) == 0);
+	{
+		uml::testing::ScratchBacking data{"uml-icfault-data.XXXXXX", page};
+		void *context = darwin_uml_static_vm_execution_context_create(app);
+		require(context != nullptr);
+		require(darwin_uml_static_vm_execution_context_begin(context, 0) == 0);
+		namespace cpu = uml::cpu::arm64;
+		std::uint64_t address = 0;
+		uml::cpu::arm64::discard_unmapped_code_synchronization();
+		expect(!cpu::has_unmapped_code_synchronization(), "helper",
+			"a note was waiting before any instruction");
+		/* An address nothing maps: the note is there to see, as often as
+		 * asked, until the loop takes it. */
+		uml_arm64_guest_code_synchronize(alias_base + 0x40);
+		expect(cpu::has_unmapped_code_synchronization() &&
+			cpu::has_unmapped_code_synchronization(), "helper",
+			"an IC IVAU at an unmapped address left no note");
+		expect(cpu::take_unmapped_code_synchronization(address) &&
+			address == alias_base + 0x40, "helper",
+			"the note does not name the address");
+		expect(!cpu::has_unmapped_code_synchronization(), "helper",
+			"a taken note is still waiting");
+		require(darwin_uml_static_vm_execution_context_end(context) == 0);
+		/* A mapped one leaves none. A mapping waits for the runs that are
+		 * entered, so the kernel's map call is made between them. */
+		const Map view{app, alias_base, data.descriptor(),
+			PROT_READ | PROT_WRITE, false};
+		require(darwin_uml_static_vm_execution_context_begin(context, 0) == 0);
+		uml_arm64_guest_code_synchronize(alias_base + 0x40);
+		expect(!cpu::has_unmapped_code_synchronization(), "helper",
+			"an IC IVAU at a mapped address left a note");
+		require(darwin_uml_static_vm_execution_context_end(context) == 0);
+		darwin_uml_static_vm_execution_context_destroy(context);
+	}
+	require(darwin_uml_static_vm_destroy(app) == 0);
+}
+
 void entered_context_binding(unsigned long &next)
 {
 	const auto app = next++;
@@ -338,6 +383,7 @@ int main(int argc, char **argv)
 	const uml::testing::RuntimeTestRoute runtime_route;
 	unsigned long generation = 0x6c00;
 	entered_context_binding(generation);
+	note_for_the_entry_loop(generation);
 	for_each_engine(argc > 1 ? argv[1] : "", [&](uml::cpu::EngineKind kind) {
 		unmapped_and_mapped(kind, generation);
 		another_generation_active(kind, generation);
