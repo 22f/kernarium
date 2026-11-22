@@ -6,15 +6,12 @@ import XCTest
 /// framework (the preview plays one with `-screen home-aot`), absent from one
 /// that does not (`home`), on by default, turned off and on again, and dimmed
 /// with its reason while the next start runs on the JIT engine, which does not
-/// use the translated code. The preview words the row either way the owner is
-/// choosing between (`-aotTitle`, `-aotNote`).
+/// use the translated code.
 final class TranslatedLibrariesUITests: XCTestCase {
     private static let identifier = "home-aot-switch"
     private static let title = "AOT"
     private static let note =
         "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot."
-    private static let otherTitle = "Translated system libraries"
-    private static let otherNote = "Faster. Turn this off only to troubleshoot."
     private static let jitNote = "Not used while JIT is on."
 
     override func setUp() {
@@ -22,9 +19,9 @@ final class TranslatedLibrariesUITests: XCTestCase {
     }
 
     @MainActor
-    private func launch(_ screen: String, words: [String] = []) -> XCUIApplication {
+    private func launch(_ screen: String) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = previewTestLanguage + ["-screen", screen] + words
+        app.launchArguments = previewTestLanguage + ["-screen", screen]
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20), "\(screen) did not open")
         return app
@@ -95,16 +92,6 @@ final class TranslatedLibrariesUITests: XCTestCase {
         XCTAssertLessThan(toggle.frame.maxY, jit.frame.minY, "the AOT row is not above the JIT row")
         // One section: a single Performance heading above the three rows.
         XCTAssertEqual(app.staticTexts.matching(identifier: "Performance").count, 1)
-    }
-
-    @MainActor
-    func testThePreviewShowsTheOtherWordsTheOwnerChoosesBetween() {
-        let app = launch("home-aot", words: ["-aotTitle", "translated", "-aotNote", "short"])
-        let toggle = app.switches[Self.identifier].firstMatch
-        reveal(toggle, in: app)
-        XCTAssertEqual(toggle.label, "\(Self.otherTitle), \(Self.otherNote)", "the switch's label is \(toggle.label)")
-        XCTAssertTrue(text(Self.otherNote, in: app).exists, "the short note is missing")
-        XCTAssertFalse(text(Self.note, in: app).exists, "the longer note shows beside the short one")
     }
 
     @MainActor

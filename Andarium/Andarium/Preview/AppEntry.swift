@@ -69,11 +69,6 @@ struct AppEntry {
     /// "change" turns the screen reader on from Settings' switch, "card" from
     /// the card's Turn On, so a capture shows a change under way or failed.
     var talkBackAct: String?
-    /// The words of Home's AOT row, for the owner to compare: "aot" or
-    /// "translated" for the title and "short" or "explained" for the note;
-    /// absent, the row's chosen words.
-    var aotTitle: String?
-    var aotNote: String?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -97,9 +92,7 @@ struct AppEntry {
             memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) },
             voiceOver: defaults.bool(forKey: "voiceOver"),
             talkBack: defaults.string(forKey: "talkBack"),
-            talkBackAct: defaults.string(forKey: "talkBackAct"),
-            aotTitle: defaults.string(forKey: "aotTitle"),
-            aotNote: defaults.string(forKey: "aotNote")
+            talkBackAct: defaults.string(forKey: "talkBackAct")
         )
     }
 
@@ -191,16 +184,6 @@ struct AppEntry {
         // row unless a screen plays a build that does (`home-aot`,
         // `home-aot-off`, `home-aot-jit`).
         model.translatedLibrariesAvailable = screen.hasPrefix("home-aot")
-        switch aotTitle {
-        case "aot": model.translatedLibrariesTitle = .aot
-        case "translated": model.translatedLibrariesTitle = .translatedLibraries
-        default: break
-        }
-        switch aotNote {
-        case "short": model.translatedLibrariesNote = .short
-        case "explained": model.translatedLibrariesNote = .explained
-        default: break
-        }
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
         model.hapticsAvailable = host.hasHaptics

@@ -3,50 +3,17 @@
 import AndariumCore
 import SwiftUI
 
-/// The words of Home's AOT row. The owner chooses between two titles and two
-/// notes: `chosenTitle` and `chosenNote` are the one place the choice is made,
-/// and the Simulator preview shows any pair through the model.
+/// The words of Home's AOT row.
 enum TranslatedLibrariesWords {
-    /// The row's title: the name AOT, which stays as it is as JIT does, or
-    /// what the row is in words.
-    enum Title: CaseIterable {
-        case aot
-        case translatedLibraries
-    }
+    /// The row's title. AOT is a name and stays as it is, as JIT does; the note
+    /// says what it is.
+    static let title = "AOT"
 
-    /// The line under the title while the switch works: what it does and that
-    /// it is faster, or only that it is faster, and in both when to turn it off.
-    enum Note: CaseIterable {
-        case explained
-        case short
-    }
-
-    static let chosenTitle = Title.aot
-    static let chosenNote = Note.explained
-
-    static func text(for title: Title) -> String {
-        switch title {
-        case .aot:
-            return "AOT"
-        case .translatedLibraries:
-            return String(
-                localized: "Translated system libraries",
-                comment: "Title of the page of notices, of the row that opens it, and of the AOT switch on Home when Home words it in place of the name AOT, for the Android system libraries that Andarium translates to machine code ahead of time.")
-        }
-    }
-
-    static func text(for note: Note) -> String {
-        switch note {
-        case .explained:
-            return String(
-                localized: "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot.",
-                comment: "Under the AOT switch on Home. AOT is a name and stays as it is. Says that Android's system libraries run from machine code translated ahead of time, that this is faster, and that the switch is for trouble-shooting.")
-        case .short:
-            return String(
-                localized: "Faster. Turn this off only to troubleshoot.",
-                comment: "Under the AOT switch on Home. AOT is a name and stays as it is. Says that the switch makes Android faster and is for trouble-shooting.")
-        }
-    }
+    /// The line under the title while the switch works: what the libraries
+    /// are, that this is faster, and when to turn it off.
+    static let note = String(
+        localized: "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot.",
+        comment: "Under the AOT switch on Home. AOT is a name and stays as it is. Says that Android's system libraries run from machine code translated ahead of time, that this is faster, and that the switch is for trouble-shooting.")
 
     /// Under the title while the next start runs on the JIT engine, which does
     /// not use them: the switch is dimmed and changes nothing.
@@ -67,10 +34,8 @@ struct TranslatedLibrariesRow: View {
 
     var body: some View {
         let unused = model.jitInUseForNextStart
-        let title = TranslatedLibrariesWords.text(for: model.translatedLibrariesTitle)
-        let detail = unused
-            ? TranslatedLibrariesWords.notUsedWithJit
-            : TranslatedLibrariesWords.text(for: model.translatedLibrariesNote)
+        let title = TranslatedLibrariesWords.title
+        let detail = unused ? TranslatedLibrariesWords.notUsedWithJit : TranslatedLibrariesWords.note
         let spoken: String = "\(title), \(detail)"
         // The note says what the libraries are and is longer than any other
         // row's: it takes three lines where the others take two.
