@@ -489,6 +489,11 @@ service's tests read too, and run the exchange over socket pairs and a scripted
 system (deadline, cancellation); the hosted `TextMessageTests` play the bar over a
 fake driver: every state, the durable notice at each point where a session can end,
 and what VoiceOver has been told.
+`RootAppStepTests` and `MagiskAppOpeningTests` (`AndariumCoreTests`) play the
+Magisk app step on a scripted guest: the install rule, and the opening of the app
+after it (the commands, the bounded wait for user 0's unlock, the retries, and an
+app that does not open recorded and not a failure); the hosted `RootStartTests`
+play the step through the model.
 `AndariumCoreTests` holds the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
 and nothing else) as pure logic.

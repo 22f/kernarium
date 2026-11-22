@@ -5,13 +5,14 @@ import Foundation
 /// The boot screen's Magisk app step: after Android has booted with root, the
 /// application asks the guest whether the official Magisk app is there and puts
 /// it in when it is not (`RootInstallRule`). The check, the install and the
-/// opening of the app are bounded together by `limit`; past it, or on a
-/// failure, the boot goes on with root on and no app, and Home says so. A
-/// cancelled caller is released at once.
+/// opening of the app (`MagiskAppOpening`) are bounded together by `limit`;
+/// past it, or on a failure, the boot goes on with root on and no app, and
+/// Home says so. An app that was put in and did not open is not a failure: the
+/// state records it. A cancelled caller is released at once.
 public enum RootAppStep {
     /// The hard bound on the check and the install together.
     public static let limit = Duration.seconds(45)
-    /// The bound on each of the short commands (the check, opening the app).
+    /// The bound on the short command that checks for the app.
     static let commandLimit = Duration.seconds(10)
 
     public enum Outcome: Equatable, Sendable {
@@ -29,19 +30,44 @@ public enum RootAppStep {
         }
     }
 
+    /// How the bound is counted: the time now and a wait until an instant. The
+    /// deadline is one instant, taken when the step begins and carried through
+    /// the check, the install and the opening, so that a timer that starts late
+    /// still ends at it. A test replaces both.
+    public struct Clocking: Sendable {
+        public var now: @Sendable () -> ContinuousClock.Instant
+        public var wait: @Sendable (ContinuousClock.Instant) async -> Void
+
+        public init(
+            now: @escaping @Sendable () -> ContinuousClock.Instant,
+            wait: @escaping @Sendable (ContinuousClock.Instant) async -> Void
+        ) {
+            self.now = now
+            self.wait = wait
+        }
+
+        public static let live = Clocking(
+            now: { ContinuousClock.now },
+            wait: { try? await Task.sleep(until: $0, clock: ContinuousClock()) })
+    }
+
     /// Runs the step. `installing` is told once, when an install is about to
     /// begin and not before, so that the screen adds its step only for a boot
-    /// that installs. `install` puts the carried app in the guest.
+    /// that installs. `install` puts the carried app in the guest. `opening`
+    /// and `sleep` are how the app is then opened and how it waits between
+    /// tries, and `clocking` how the bound is counted, which a test replaces.
     public static func run(
         shell: any GuestShell, release: RootRelease, state: RootState,
         installing: @escaping @Sendable () async -> Void,
         install: @escaping @Sendable () async throws -> Void,
-        limit: Duration = RootAppStep.limit
+        limit: Duration = RootAppStep.limit,
+        opening: MagiskAppOpening.Policy = .standard,
+        sleep: @escaping @Sendable (Duration) async -> Void = MagiskAppOpening.pause,
+        clocking: Clocking = .live
     ) async -> Outcome {
         let attempt = Attempt(state)
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: limit)
-        let outcome = await bounded(limit) { () -> Outcome in
+        let deadline = clocking.now().advanced(by: limit)
+        let outcome = await bounded(until: deadline, clocking) { () -> Outcome in
             let presence = await MagiskApp.presence(shell: shell, limit: commandLimit)
             if Task.isCancelled { return .failed(state) }
             let action = RootInstallRule.decide(
@@ -62,15 +88,18 @@ public enum RootAppStep {
             return .installed(done)
         }
         guard let outcome else { return .failed(attempt.state) }
-        // Opening the app is inside the same bound, with what is left of it,
-        // and says nothing of the install it follows.
-        if case .installed = outcome, RootInstallRule.opensAppAfterInstall {
-            let remaining = clock.now.duration(to: deadline)
-            if remaining > .zero {
-                _ = await bounded(remaining) { await MagiskApp.open(shell: shell, limit: commandLimit) }
-            }
+        // Opening the app is inside the same bound, up to the same deadline.
+        // It says nothing of the install it follows but whether the app was
+        // seen on the screen: an app that did not open is recorded, not failed.
+        guard case .installed(var learned) = outcome, RootInstallRule.opensAppAfterInstall else { return outcome }
+        var opened = false
+        if clocking.now() < deadline {
+            opened = await bounded(until: deadline, clocking) {
+                await MagiskAppOpening.run(shell: shell, policy: opening, sleep: sleep)
+            } ?? false
         }
-        return outcome
+        learned.appInstall?.opened = opened
+        return .installed(learned)
     }
 
     /// The state with the install the step has begun, for a bound that passes
@@ -85,16 +114,17 @@ public enum RootAppStep {
         func set(_ state: RootState) { lock.withLock { value = state } }
     }
 
-    /// `work`'s value, or nil when `limit` passes first or the caller is
+    /// `work`'s value, or nil when `deadline` passes first or the caller is
     /// cancelled. The caller is released at either even if the work ignores
-    /// its cancellation.
+    /// its cancellation. The timer waits until the instant itself, not for
+    /// the time left when it starts, so a late start does not move it.
     static func bounded<Value: Sendable>(
-        _ limit: Duration, _ work: @escaping @Sendable () async -> Value
+        until deadline: ContinuousClock.Instant, _ clocking: Clocking, _ work: @escaping @Sendable () async -> Value
     ) async -> Value? {
         let gate = Gate<Value>()
         let task = Task { gate.finish(await work()) }
         let timer = Task {
-            try? await Task.sleep(for: limit)
+            await clocking.wait(deadline)
             task.cancel()
             gate.finish(nil)
         }

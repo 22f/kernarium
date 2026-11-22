@@ -699,7 +699,13 @@ address space holds, so this is a fallback.
   one and sent from that descriptor, `RootRelease.openApk`): the screen adds
   a fifth step, Magisk app, after Startup only for a start that installs, and
   the check, the install and the opening of the app are bound together to
-  45 s, and the step belongs to its boot and to the period of the switch it began in:
+  45 s. The app is opened by the activity the package manager names as its
+  launcher (`MagiskAppOpening`: `am start` resolves default activities only, so
+  the launcher intent never resolves): after a bounded wait for user 0's unlock,
+  up to five tries, each checked against the activity manager's one current
+  focus record. The tries run even when the unlock never shows: a start while
+  locked either fails, and is recorded as not opened, or succeeds. An app that
+  does not open is no failure and no alert; `andarium/root.txt` says so. The step belongs to its boot and to the period of the switch it began in:
   after a Stop, a restart, a later start or a change of the switch its result
   adds nothing to the state and raises no alert or step (an app that is in
   the guest and not recorded is installed over at the next start). A package of that name at the
@@ -738,7 +744,7 @@ address space holds, so this is a fallback.
   disk and could not finish, at once and not at the recovery that ends it; the
   switch stays. The bug report carries `andarium/root.txt` (the
   switch, the ramdisk of the last start, the Magisk version the release
-  carries, and why the last install of the Magisk app was made). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
+  carries, why the last install of the Magisk app was made and whether the app was then on the screen). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
   when an absent Magisk app is installed again (`RootInstallRule`), what becomes
   of the app when root is off (`RootOffRule`), and what a failed start with root
   does to the switch (`RootFallbackRule`).

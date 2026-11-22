@@ -146,10 +146,15 @@ public struct RootState: Equatable, Codable, Sendable {
         public var reason: Reason
         /// The install ended well; false for one that failed or ran out of time.
         public var installed: Bool
+        /// Whether the app was on Android's screen after that install
+        /// (`MagiskAppOpening`); nil when no open was tried, as for an install
+        /// that failed or one an older application recorded.
+        public var opened: Bool?
 
-        public init(reason: Reason, installed: Bool) {
+        public init(reason: Reason, installed: Bool, opened: Bool? = nil) {
             self.reason = reason
             self.installed = installed
+            self.opened = opened
         }
     }
 
@@ -231,10 +236,6 @@ public enum MagiskApp {
     /// One line per package whose name contains the filter:
     /// `package:com.topjohnwu.magisk versionCode:31100`.
     static let probeCommand = "pm list packages --show-versioncode \(package)"
-    /// Opens the app's launcher activity on the guest's screen.
-    static let openCommand =
-        "am start --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p \(package)"
-
     /// What the guest says of the app.
     public enum Presence: Equatable, Sendable {
         case absent
@@ -263,13 +264,6 @@ public enum MagiskApp {
     public static func presence(shell: any GuestShell, limit: Duration) async -> Presence {
         guard let output = try? await shell.run(probeCommand, limit: limit) else { return .unknown }
         return presence(of: output)
-    }
-
-    /// Opens the app; whether the guest took the command. Nothing depends on it.
-    @discardableResult
-    public static func open(shell: any GuestShell, limit: Duration) async -> Bool {
-        guard let output = try? await shell.run(openCommand, limit: limit) else { return false }
-        return output.exitCode == 0
     }
 
     static let uninstallCommand = "pm uninstall --user 0 \(package)"
