@@ -15,8 +15,12 @@ enum RootPreview {
         "home-root-app-alert": "root",
     ]
 
+    /// Info's screens of a copy whose release carries root: Acknowledgements
+    /// with Magisk and BusyBox, and Magisk's page.
+    static let infoScreens: Set<String> = ["info-acknowledgements-root", "info-license-magisk"]
+
     static func handles(_ screen: String) -> Bool {
-        screen.hasPrefix("home-root") || screen.hasPrefix("boot-root")
+        screen.hasPrefix("home-root") || screen.hasPrefix("boot-root") || infoScreens.contains(screen)
     }
 
     static func apply(screen: String, to model: AppModel, freeze: Bool) {

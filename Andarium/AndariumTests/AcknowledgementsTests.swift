@@ -29,7 +29,8 @@ struct AcknowledgementsTests {
         // The projects a page opens are not in the list, and an app that
         // embeds the translated code's framework lists all the others once.
         let embedding = try bundle(embedding: [Acknowledgements.aotFramework])
-        let listed = acknowledgements.groups.flatMap { acknowledgements.projects(in: $0, in: embedding) }.map(\.id)
+        let listed = acknowledgements.groups
+            .flatMap { acknowledgements.projects(in: $0, in: embedding, rootCarried: true) }.map(\.id)
         #expect(listed.sorted() == acknowledgements.projects.filter { $0.parent == nil }.map(\.id).sorted())
     }
 
@@ -64,6 +65,37 @@ struct AcknowledgementsTests {
         #expect(paragraph.hasPrefix("Andarium contains machine code translated from the libraries of the Android system it runs"))
         #expect(paragraph.hasSuffix("is listed under Translated system libraries."))
         #expect(acknowledgements.project("android")?.introduction == nil)
+    }
+
+    @Test func magiskAndBusyBoxAreListedOnlyWhereTheReleaseCarriesRoot() throws {
+        let magisk = try #require(acknowledgements.project("magisk"))
+        let busybox = try #require(acknowledgements.project("busybox"))
+        let system = try #require(acknowledgements.groups.first { $0.id == "system" })
+        let bundle = try bundle(embedding: [Acknowledgements.aotFramework])
+        for project in [magisk, busybox] {
+            #expect(project.requiresRoot == true && project.group == system.id)
+            #expect(!acknowledgements.isShown(project, in: bundle))
+            #expect(acknowledgements.isShown(project, in: bundle, rootCarried: true))
+        }
+        let without = acknowledgements.projects(in: system, in: bundle).map(\.id)
+        let with = acknowledgements.projects(in: system, in: bundle, rootCarried: true).map(\.id)
+        #expect(!without.contains("magisk") && !without.contains("busybox"))
+        #expect(with.contains("magisk") && with.contains("busybox"))
+        // The others are as they were.
+        #expect(without == with.filter { $0 != "magisk" && $0 != "busybox" })
+    }
+
+    @Test func eachCarriesItsLicenceTextAndNamesWhereTheSourceIs() throws {
+        let magisk = try #require(acknowledgements.project("magisk"))
+        let busybox = try #require(acknowledgements.project("busybox"))
+        let three = acknowledgements.blocks(of: magisk)
+        let two = acknowledgements.blocks(of: busybox)
+        #expect(three.contains { $0.title == "GNU General Public License, Version 3" && $0.text.contains("Version 3, 29 June 2007") })
+        #expect(two.contains { $0.title == "GNU General Public License, Version 2" && $0.text.contains("Version 2, June 1991") })
+        for blocks in [three, two] {
+            let source = try #require(blocks.first { $0.title == "Source code" })
+            #expect(source.text.contains("https://github.com/topjohnwu/Magisk") && source.text.contains("v31.1"))
+        }
     }
 
     /// A bundle that embeds the named frameworks, as an app does.

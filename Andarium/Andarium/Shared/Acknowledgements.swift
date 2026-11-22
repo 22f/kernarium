@@ -58,10 +58,14 @@ nonisolated struct Acknowledgements: Decodable, Sendable {
         let parent: String?
         /// The framework the app must embed for this project to be shown.
         let requiresFramework: String?
+        /// Whether the project is shown only where the Android release the app
+        /// carries has root (Magisk's files, and BusyBox with them).
+        let requiresRoot: Bool?
 
         private enum CodingKeys: String, CodingKey {
             case id, group, name, copyright, license, spdx, licenses, texts, parent
             case requiresFramework = "requires_framework"
+            case requiresRoot = "requires_root"
         }
 
         static func == (lhs: Project, rhs: Project) -> Bool { lhs.id == rhs.id }
@@ -91,20 +95,24 @@ nonisolated struct Acknowledgements: Decodable, Sendable {
     }
 
     /// Whether this build shows a project: one that needs a framework is shown
-    /// only by an app that embeds it.
-    func isShown(_ project: Project, in bundle: Bundle = .main) -> Bool {
+    /// only by an app that embeds it, and one that needs root only where the
+    /// release the app carries has it (`rootCarried`, `AppModel.rootAvailable`).
+    func isShown(_ project: Project, in bundle: Bundle = .main, rootCarried: Bool = false) -> Bool {
+        if project.requiresRoot == true, !rootCarried { return false }
         guard let framework = project.requiresFramework else { return true }
         return Self.carries(framework, in: bundle)
     }
 
     /// The projects the list shows under a group: those a page does not open.
-    func projects(in group: Group, in bundle: Bundle = .main) -> [Project] {
-        projects.filter { $0.group == group.id && $0.parent == nil && isShown($0, in: bundle) }
+    func projects(in group: Group, in bundle: Bundle = .main, rootCarried: Bool = false) -> [Project] {
+        projects.filter {
+            $0.group == group.id && $0.parent == nil && isShown($0, in: bundle, rootCarried: rootCarried)
+        }
     }
 
     /// The projects a project's own page opens, in the resource's order.
-    func children(of project: Project, in bundle: Bundle = .main) -> [Project] {
-        projects.filter { $0.parent == project.id && isShown($0, in: bundle) }
+    func children(of project: Project, in bundle: Bundle = .main, rootCarried: Bool = false) -> [Project] {
+        projects.filter { $0.parent == project.id && isShown($0, in: bundle, rootCarried: rootCarried) }
     }
 
     func project(_ id: String) -> Project? {
@@ -182,12 +190,13 @@ extension Acknowledgements.Project {
 
 /// The list of projects, grouped, ending with the line about names and marks.
 struct AcknowledgementsView: View {
+    @Environment(AppModel.self) private var model
     private let acknowledgements = Acknowledgements.bundled
 
     var body: some View {
         List {
             ForEach(acknowledgements.groups) { group in
-                let projects = acknowledgements.projects(in: group)
+                let projects = acknowledgements.projects(in: group, rootCarried: model.rootAvailable)
                 Section {
                     ForEach(projects) { project in
                         NavigationLink(value: InfoPage.license(project.id)) {
@@ -217,15 +226,18 @@ struct AcknowledgementsView: View {
 
 /// One project: who holds the copyright, the license, and its full text.
 struct LicenseView: View {
+    @Environment(AppModel.self) private var model
     let projectID: String
     private let acknowledgements = Acknowledgements.bundled
 
     var body: some View {
         ScrollView {
-            if let project = acknowledgements.project(projectID), acknowledgements.isShown(project) {
+            if let project = acknowledgements.project(projectID),
+               acknowledgements.isShown(project, rootCarried: model.rootAvailable)
+            {
                 VStack(alignment: .leading, spacing: 22) {
                     summary(project)
-                    ForEach(acknowledgements.children(of: project)) { child in
+                    ForEach(acknowledgements.children(of: project, rootCarried: model.rootAvailable)) { child in
                         translated(child)
                     }
                     ForEach(acknowledgements.blocks(of: project)) { block in

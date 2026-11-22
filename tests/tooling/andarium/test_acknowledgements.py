@@ -221,6 +221,55 @@ class TranslatedLibrariesTests(unittest.TestCase):
                 self.assertTrue(localization["stringUnit"]["value"].strip(), language)
 
 
+class RootProjectsTests(unittest.TestCase):
+    """Magisk and BusyBox: shown only where the release carries root, each with
+    the full text of its license and one statement of where the source is."""
+
+    def setUp(self) -> None:
+        self.document = json.loads(ack.RESOURCE.read_text(encoding="utf-8"))
+        self.projects = {p["id"]: p for p in self.document["projects"]}
+
+    def test_both_are_in_the_resource_for_root_only(self) -> None:
+        for identifier, shared in (("magisk", "gpl-3.0"), ("busybox", "gpl-2.0")):
+            with self.subTest(project=identifier):
+                project = self.projects[identifier]
+                self.assertIs(project["requires_root"], True)
+                self.assertEqual(project["group"], "system")
+                self.assertEqual(project["licenses"], [shared])
+                self.assertTrue(self.document["licenses"][shared]["text"].strip())
+        self.assertNotIn("requires_root", self.projects["linux"])
+
+    def test_each_names_the_magisk_project_and_the_version_as_the_source(self) -> None:
+        for identifier in ("magisk", "busybox"):
+            with self.subTest(project=identifier):
+                notice = next(t for t in self.projects[identifier]["texts"] if t["title"] == "Source code")
+                self.assertEqual(notice["text"], ack.MAGISK_SOURCE_NOTICE)
+        self.assertIn(ack.MAGISK_SOURCE, ack.MAGISK_SOURCE_NOTICE)
+        self.assertEqual(ack.MAGISK_SOURCE, "https://github.com/topjohnwu/Magisk")
+        self.assertEqual(ack.MAGISK_SOURCE_NOTICE.count(ack.MAGISK_VERSION), 2)
+
+    def test_requires_root_means_true(self) -> None:
+        document = copy.deepcopy(self.document)
+        next(p for p in document["projects"] if p["id"] == "magisk")["requires_root"] = False
+        found = ack.check_document(document, ack.embedded_frameworks(), ack.device_components())
+        self.assertTrue(any("magisk: requires_root is False" in line for line in found), found)
+
+    def test_the_gpl3_text_is_taken_only_from_copies_that_agree(self) -> None:
+        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for name, data in (("one", b"GNU GENERAL PUBLIC LICENSE\r\nVersion 3\r\n"), ("two", b"GNU GENERAL PUBLIC LICENSE\nVersion 3\n"),
+                           ("three", b"GNU GENERAL PUBLIC LICENSE\nVersion 3.\n")):
+            (root / name).mkdir()
+            (root / name / "COPYING").write_bytes(data)
+        texts = ack.Texts(root, None)
+        # Line endings are normalised away; nothing else is.
+        self.assertEqual(texts.agreeing((("one", "COPYING"), ("two", "COPYING"))).split(), ["GNU", "GENERAL", "PUBLIC", "LICENSE", "Version", "3"])
+        with self.assertRaises(ack.Problem) as raised:
+            texts.agreeing((("one", "COPYING"), ("three", "COPYING")))
+        self.assertIn("differ", str(raised.exception))
+        self.assertEqual(len(ack.GPL3_COPIES), 2)
+        self.assertEqual(len({source for source, _ in ack.GPL3_COPIES}), 2)
+
+
 class ReflowTests(unittest.TestCase):
     def test_hard_wrapped_paragraphs_join_and_blocks_stay(self) -> None:
         wrapped = (

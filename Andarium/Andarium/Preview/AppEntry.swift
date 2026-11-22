@@ -131,6 +131,8 @@ struct AppEntry {
         "info-acknowledgements": .acknowledgements,
         "info-license": .license("mesa"),
         "info-license-gpl": .license("linux"),
+        "info-acknowledgements-root": .acknowledgements,
+        "info-license-magisk": .license("magisk"),
         "whatsnew-history": .whatsNew,
     ]
 
@@ -767,7 +769,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history":
+             "whatsnew-history", "info-acknowledgements-root", "info-license-magisk":
             model.sheet = .info
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew

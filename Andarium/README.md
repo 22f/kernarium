@@ -1226,7 +1226,13 @@ kernel's license files (never fetched; `--verify` compares the resource with
 them). A tooling test fails when the Andarium project embeds a framework, or an
 iOS device prefix contract declares a component, that no entry covers
 ([`docs/testing.md`](../docs/testing.md#andarium)). Adding a library therefore
-means adding its entry to the script's table and running it. The machine code
+means adding its entry to the script's table and running it. Magisk and BusyBox,
+which the Android release carries only with root, are listed only where the
+release the application carries has root (`requires_root`, answered from
+`AppModel.rootAvailable`): Magisk's page holds the GPL-3.0 text, which the
+generator takes from two upstream projects' own copies and refuses unless they
+agree, and each page says where the source of both is available (the Magisk
+project, at the tag of the version the release carries). The machine code
 translated from the Android libraries (`UmlArm64Aot.framework`) carries its own
 notices: the generator reads the AOT artifact's `licences.json`
 (`--aot-artifact`, else the accepted artifact installed below
