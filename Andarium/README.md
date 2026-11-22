@@ -800,8 +800,9 @@ address space holds, so this is a fallback.
   when a boot ends); until then, and for good on a kernel that never registers
   it, the system pointer's clicks are touches and its use only plugs the mouse.
   The devices need a kernel that follows configuration changes (the hot-plug
-  topic of the virtio-input devices); on the accepted kernel they plug and
-  nothing sees them, and input sent is dropped. A touch of the pointer is the
+  topic of the virtio-input devices), which the accepted kernels have; on a
+  kernel without it they plug and nothing sees them, and input sent is
+  dropped. A touch of the pointer is the
   mouse's or a finger's from its beginning to its end. An iPhone has no pointer
   to give the guest, and Settings' "Use the pointer as touch" (off for a fresh
   install, kept as `PointerPreference`, absent on an iPhone) leaves the guest

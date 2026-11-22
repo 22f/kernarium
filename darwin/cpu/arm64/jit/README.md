@@ -36,8 +36,8 @@ translating: its processes' working sets together outgrow the cache at any
 budget a device can afford, so the arena is emptied every few seconds and the
 guest's boot, launches and background work run several times slower than on
 gadgets, while a long single-process computation runs faster in CPU time. The
-JIT's products are macOS and development builds, so the cold path is not
-optimized
+JIT's products are macOS and iOS device builds that a debugger serves, so the
+cold path is not optimized
 ([history](../../../../docs/optimization-history.md#jit-cold-code-per-process)).
 
 ## Cache budget
