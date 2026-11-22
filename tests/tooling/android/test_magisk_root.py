@@ -55,10 +55,13 @@ PIN_KEYS = {
 }
 
 
-def run_tool(script: str, *arguments: object, timeout: int = 120) -> subprocess.CompletedProcess:
+def run_tool(
+    script: str, *arguments: object, timeout: int = 120, env: dict[str, object] | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-B", str(TOOLS / script), *map(str, arguments)],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False,
+        env=None if env is None else {**os.environ, **{key: str(value) for key, value in env.items()}},
     )
 
 
@@ -858,6 +861,71 @@ class PatcherTests(unittest.TestCase):
                     self.patch_in_process(tool, apk, pin)
                     self.assertEqual(
                         (self.output / "init_boot-magisk.img").read_bytes(), self.fixture.patched_reference())
+
+    NOISE = b'n=0; while [ $n -lt 60 ]; do n=$((n+1)); echo "progress $n"; done\n./magiskboot unpack'
+
+    def run_with_log_directory(self, apk: Path, pin: Path, kept: Path | str):
+        shutil.rmtree(self.output, ignore_errors=True)
+        return run_tool(
+            "magisk-boot.py", "patch", "--magisk-apk", apk, "--disk", self.fixture.disk,
+            "--layout", self.fixture.layout, "--output-dir", self.output, "--pin", pin,
+            env={"MAGISK_BOOT_LOG_DIR": kept})
+
+    def test_the_steps_keep_their_whole_output_where_the_caller_asks(self) -> None:
+        # A refusal repeats the last 40 lines of a failing step and a step that passes
+        # says nothing, which is too little for a first run on a new machine. A caller
+        # that names a directory in the environment (so that a script that runs the
+        # patcher need not pass it on) gets every step's whole output and every image
+        # the script made, for a run that passes and for one that fails.
+        noisy = patch_script().replace(b"./magiskboot unpack", self.NOISE)
+        apk = self.fixture.apk(script=noisy)
+        kept = self.directory / "kept"
+        result = self.run_with_log_directory(apk, self.fixture.pin(apk), kept)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = sorted(path.name for path in kept.iterdir())
+        for run in ("run1", "run2"):
+            self.assertIn(f"{run}-boot_patch.sh.log", names)
+            self.assertIn(f"{run}-new-boot.img", names)
+        log = (kept / "run1-boot_patch.sh.log").read_text()
+        self.assertIn("progress 1\n", log)
+        self.assertIn("progress 60\n", log)
+        self.assertRegex(log, r"exit status 0\n$")
+        self.assertEqual(
+            (kept / "run1-new-boot.img").read_bytes(), (kept / "run2-new-boot.img").read_bytes())
+        # A failing step keeps its whole output and the refusal still says only the tail.
+        failing = patch_script(exit_status=3).replace(b"./magiskboot unpack", self.NOISE)
+        bad = self.fixture.apk("bad.apk", script=failing)
+        kept_bad = self.directory / "kept-bad"
+        refused = self.run_with_log_directory(bad, self.fixture.pin(bad, "bad.env"), kept_bad)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("progress 60", refused.stderr)
+        self.assertNotIn("progress 1\n", refused.stderr)
+        self.assertIn("progress 1\n", (kept_bad / "run1-boot_patch.sh.log").read_text())
+        self.assertRegex((kept_bad / "run1-boot_patch.sh.log").read_text(), r"exit status 3\n$")
+        self.assertTrue((kept_bad / "run1-new-boot.img").is_file())
+        # Without the variable nothing is written, and a relative path is refused first.
+        plain = self.run_with_log_directory(apk, self.fixture.pin(apk), "")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        relative = self.run_with_log_directory(apk, self.fixture.pin(apk), "kept-relative")
+        self.assertNotEqual(relative.returncode, 0)
+        self.assertRegex(relative.stderr, "MAGISK_BOOT_LOG_DIR must be an absolute")
+        self.assertFalse(self.output.exists())
+
+    def test_runs_that_differ_say_where_and_keep_both_images(self) -> None:
+        # The two runs of the patcher must agree. When they do not, the refusal names
+        # the first byte that differs and both images are kept for a comparison.
+        varying = patch_script().replace(
+            b"cp -af ramdisk.cpio ramdisk.cpio.orig", b"cp -af ramdisk.cpio ramdisk.cpio.orig\necho $$ > pid"
+        ).replace(
+            b'"mkdir 0750 overlay.d/sbin" \\', b'"mkdir 0750 overlay.d/sbin" \\\n"add 0644 overlay.d/sbin/pid pid" \\')
+        apk = self.fixture.apk(script=varying)
+        kept = self.directory / "kept-differ"
+        result = self.run_with_log_directory(apk, self.fixture.pin(apk), kept)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stderr, r"gave different images \(run 1: [0-9a-f]{64}, run 2: [0-9a-f]{64}, "
+                                        r"first difference at byte \d+\)")
+        self.assertTrue((kept / "run1-new-boot.img").is_file())
+        self.assertTrue((kept / "run2-new-boot.img").is_file())
 
     def test_the_tail_of_a_failing_step_shows_the_scripts_own_words(self) -> None:
         script = patch_script(exit_status=3).replace(

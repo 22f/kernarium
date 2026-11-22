@@ -16,6 +16,9 @@ results must be identical, and the result must verify as the stock image plus ex
 adds (magisk_image.py). DIR, which must not exist or be empty, then holds
 init_boot-magisk.img and the unmodified APK under its official name, which is how a
 release carries them as its root/ files; the pair appears together or not at all.
+It refuses to run as the machine's root and accepts the root of a user namespace.
+With MAGISK_BOOT_LOG_DIR set to an absolute directory, every step's whole output and
+every image the script made are kept there, whether the run passes or fails.
 
 The script cannot name the data disk's userdata partition, which it asks the
 guest's own magisk for; the tool therefore writes the missing PREINITDEVICE line
@@ -55,6 +58,9 @@ STEP_TIMEOUT_SECONDS = 300
 # How much of a failing step's own output the refusal repeats.
 TAIL_LINES = 40
 UID_MAP = "/proc/self/uid_map"
+# A directory (absolute) for the whole output of every step and the images the script
+# made, for a run that passes and for one that fails.
+LOG_DIRECTORY_VARIABLE = "MAGISK_BOOT_LOG_DIR"
 TOOL_PATH = "/usr/bin:/bin"
 PATCHED_NAME = Path(magisk_image.PATCHED_PATH).name
 NEW_IMAGE = "new-boot.img"
@@ -95,7 +101,37 @@ def root_of_the_system() -> bool:
     return True
 
 
-def run_step(arguments: list[str], work: Path, env: dict[str, str], label: str) -> str:
+class Keeper:
+    """Where one run of the patcher keeps its steps' output and its images."""
+
+    def __init__(self, directory: Path | None, run: int) -> None:
+        self.directory = directory
+        self.prefix = f"run{run}-"
+
+    def _create(self, name: str):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+        return os.fdopen(os.open(self.directory / (self.prefix + name), flags, 0o644), "wb")
+
+    def step(self, name: str, arguments: list[str], output: str, outcome: str) -> None:
+        if self.directory is None:
+            return
+        text = f"$ {' '.join(arguments)}\n{output}"
+        if text and not text.endswith("\n"):
+            text += "\n"
+        with self._create(f"{name}.log") as handle:
+            handle.write(f"{text}{outcome}\n".encode(errors="replace"))
+
+    def image(self, name: str, path: Path) -> None:
+        if self.directory is None or path.is_symlink() or not path.is_file():
+            return
+        with path.open("rb") as source, self._create(name) as handle:
+            shutil.copyfileobj(source, handle)
+
+
+def run_step(
+    arguments: list[str], work: Path, env: dict[str, str], label: str,
+    keep: Keeper | None = None, name: str = "step",
+) -> str:
     """Run one step in its own process group, which a timeout kills whole."""
     try:
         process = subprocess.Popen(
@@ -115,16 +151,29 @@ def run_step(arguments: list[str], work: Path, env: dict[str, str], label: str) 
         output, _ = process.communicate(timeout=STEP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
+        output, _ = process.communicate()
+        if keep is not None:
+            keep.step(name, arguments, output, f"killed after {STEP_TIMEOUT_SECONDS} s")
         raise error(f"{label} did not finish in {STEP_TIMEOUT_SECONDS} s") from None
+    if keep is not None:
+        keep.step(name, arguments, output, f"exit status {process.returncode}")
     if process.returncode != 0:
         tail = "\n".join(output.splitlines()[-TAIL_LINES:])
         raise error(f"{label} failed ({process.returncode}):\n{tail}")
     return output
 
 
-def patch_once(archive, stock: bytes, preinit: str, work: Path) -> bytes:
+def patch_once(archive, stock: bytes, preinit: str, work: Path, keep: Keeper | None = None) -> bytes:
     """One run of Magisk's patcher in the private directory `work`."""
+    try:
+        return patch_in(archive, stock, preinit, work, keep)
+    finally:
+        if keep is not None:
+            keep.image(NEW_IMAGE, work / NEW_IMAGE)
+            keep.image("final-boot.img", work / "final-boot.img")
+
+
+def patch_in(archive, stock: bytes, preinit: str, work: Path, keep: Keeper | None) -> bytes:
     for name, member, mode in STAGED:
         path = work / name
         path.write_bytes(magisk_image.apk_member(archive, member, error))
@@ -137,7 +186,10 @@ def patch_once(archive, stock: bytes, preinit: str, work: Path) -> bytes:
         **dict(magisk_image.PATCH_FLAGS),
         "PREINITDEVICE": preinit,
     }
-    run_step([SHELL, "boot_patch.sh", STOCK_IMAGE], work, env, "Magisk's boot_patch.sh")
+    run_step(
+        [SHELL, "boot_patch.sh", STOCK_IMAGE], work, env, "Magisk's boot_patch.sh",
+        keep, "boot_patch.sh",
+    )
     produced = work / NEW_IMAGE
     if produced.is_symlink() or not produced.is_file():
         raise error(f"boot_patch.sh produced no {NEW_IMAGE}")
@@ -165,16 +217,36 @@ def patch_once(archive, stock: bytes, preinit: str, work: Path) -> bytes:
     run_step(
         [str(work / "magiskboot"), "cpio", "ramdisk.cpio",
          f"add 000 {magisk_image.CONFIG_ENTRY} config.new"],
-        work, env, "magiskboot cpio",
+        work, env, "magiskboot cpio", keep, "magiskboot-cpio",
     )
     run_step(
         [str(work / "magiskboot"), "repack", STOCK_IMAGE, "final-boot.img"],
-        work, env, "magiskboot repack",
+        work, env, "magiskboot repack", keep, "magiskboot-repack",
     )
     final = work / "final-boot.img"
     if final.is_symlink() or not final.is_file():
         raise error("magiskboot repack produced no image")
     return magisk_image.read_file(final, len(stock), "the image magiskboot repacked", error)
+
+
+def first_difference(left: bytes, right: bytes) -> int:
+    for offset, (one, other) in enumerate(zip(left, right)):
+        if one != other:
+            return offset
+    return min(len(left), len(right))
+
+
+def log_directory() -> Path | None:
+    value = os.environ.get(LOG_DIRECTORY_VARIABLE)
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise error(f"{LOG_DIRECTORY_VARIABLE} must be an absolute local path")
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise error(f"{LOG_DIRECTORY_VARIABLE} must be a real directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def write_new(path: Path, data: bytes) -> None:
@@ -190,6 +262,7 @@ def patch(arguments: argparse.Namespace) -> None:
         # Magisk's script unmounts and moves system directories when it aborts
         # outside a booted system. In a user namespace those are the namespace's.
         raise error("the patcher must not run as root: run it as the build user")
+    logs = log_directory()
     pin = magisk_image.read_pin(arguments.pin, error)
     apk = arguments.magisk_apk
     if not apk.is_absolute():
@@ -215,17 +288,21 @@ def patch(arguments: argparse.Namespace) -> None:
     preinit = magisk_image.preinit_device(layout, error)
     results: list[bytes] = []
     with magisk_image.open_apk(snapshot, error) as archive:
-        for _ in range(RUNS):
+        for run in range(1, RUNS + 1):
             work = Path(tempfile.mkdtemp(prefix=".magisk-boot."))
             try:
-                results.append(patch_once(archive, stock, preinit, work))
+                results.append(patch_once(archive, stock, preinit, work, Keeper(logs, run)))
             finally:
                 shutil.rmtree(work, ignore_errors=True)
-        if any(result != results[0] for result in results):
-            raise error(
-                f"{RUNS} runs of the patcher on the same inputs gave different images: "
-                "the result must be a function of the stock image, the APK and the flags"
-            )
+        for number, result in enumerate(results[1:], 2):
+            if result != results[0]:
+                raise error(
+                    f"{RUNS} runs of the patcher on the same inputs gave different images "
+                    f"(run 1: {magisk_image.sha256_bytes(results[0])}, run {number}: "
+                    f"{magisk_image.sha256_bytes(result)}, first difference at byte "
+                    f"{first_difference(results[0], result)}): the result must be a function "
+                    "of the stock image, the APK and the flags"
+                )
         magisk_image.verify_patched(results[0], stock, archive, preinit, error)
 
     # Both files are written in a private directory beside the output and published
