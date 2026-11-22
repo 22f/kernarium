@@ -582,6 +582,19 @@ ActiveGeneration &active_thread_generation()
 	return active;
 }
 
+/* The execution context this thread has entered, innermost first, or null.
+ * The thread's active generation is what the kernel last selected for its
+ * mapping-management calls, and a vCPU thread that ran another process's task
+ * since may hold that process's. A guest instruction that reaches the address
+ * space without naming a generation (IC IVAU) belongs to the generation being
+ * run, which is the entered context's. Only an entered context is ever here:
+ * begin links it and end, or its destruction while entered, unlinks it. */
+ExecutionContext *&entered_thread_context() noexcept
+{
+	static thread_local ExecutionContext *entered{};
+	return entered;
+}
+
 class AddressSpace;
 
 std::atomic_uint64_t &domain_retirement_sequence_storage()
@@ -1418,12 +1431,28 @@ public:
 		return static_cast<int>(count);
 	}
 
-	/* A guest code synchronization (IC IVAU) at `address`, in the thread's
-	 * active generation. False when the address names a guest page that the
-	 * generation maps nothing at: the instruction would have faulted on
-	 * hardware, and which frame it meant is unknown. */
+	/* A guest code synchronization (IC IVAU) at `address`, in the generation
+	 * the thread is running when it has entered an execution context of this
+	 * address space, else in the thread's active generation. False when the
+	 * address names a guest page that the generation maps nothing at: the
+	 * instruction would have faulted on hardware, and which frame it meant is
+	 * unknown. */
 	bool invalidate_code(std::uint64_t address)
 	{
+		if (AddressLayout::is_guest(address)) {
+			if (const auto *entered = entered_thread_context();
+			    entered != nullptr && entered->state &&
+			    entered->state->address_space_lifetime == lifetime_) {
+				/* A generation destroyed under its run has nothing to
+				 * publish to, and the active generation is not a
+				 * substitute for it. */
+				if (entered->state->retired.load(
+					    std::memory_order_acquire))
+					return true;
+				return synchronize_code(
+					*entered->state, entered->generation, address);
+			}
+		}
 		const auto &active = active_thread_generation();
 		/* Translated execution normally publishes through its cached context.
 		 * Keep this routed fallback coherent with the same physical-page stamp,
@@ -2002,12 +2031,25 @@ public:
 			std::move(state), generation, 0, false};
 	}
 
+	/* Gives the thread's entered context back to the one `context` replaced.
+	 * Contexts end innermost first, and no production path nests them; a
+	 * caller that ends an outer context first leaves the chain pointing at a
+	 * context that has ended, which is the caller's contract to keep. */
+	static void unlink_entered(ExecutionContext *context) noexcept
+	{
+		if (entered_thread_context() == context)
+			entered_thread_context() = context->previous_entered;
+		context->previous_entered = nullptr;
+	}
+
 	static void destroy_execution_context(ExecutionContext *context)
 	{
 		if (context == nullptr)
 			return;
-		if (context->entered)
+		if (context->entered) {
+			unlink_entered(context);
 			execution_reader_end(*context->state);
+		}
 		delete context;
 	}
 
@@ -2027,6 +2069,8 @@ public:
 					    guest_pc))
 			return -1;
 		context->entered = true;
+		context->previous_entered = entered_thread_context();
+		entered_thread_context() = context;
 		return 0;
 	}
 
@@ -2034,6 +2078,7 @@ public:
 	{
 		if (context == nullptr || !context->entered)
 			return -1;
+		unlink_entered(context);
 		execution_reader_end(*context->state);
 		context->entered = false;
 		return 0;
@@ -3743,7 +3788,8 @@ extern "C" void darwin_uml_static_vm_invalidate_code(unsigned long address)
 
 extern "C" int darwin_uml_static_vm_synchronize_code(unsigned long address)
 {
-	/* A host that cannot say (no address space) has nothing to fault in. */
+	/* No address space for the thread makes the bridge answer -1, which the
+	 * helper takes for an unmapped address, as it does any non-zero answer. */
 	return with_address_space([&](auto &space) {
 		return space.invalidate_code(address) ? 0 : 1;
 	});

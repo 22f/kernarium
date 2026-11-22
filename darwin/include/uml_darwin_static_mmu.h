@@ -165,7 +165,12 @@ int darwin_uml_static_vm_mapping_changes(
 	struct darwin_uml_static_mapping_change *changes, size_t capacity,
 	uint64_t *current_sequence);
 /* A cached execution context keeps the generation alive and avoids resolving
- * thread-local address-space state at every translated-block boundary. */
+ * thread-local address-space state at every translated-block boundary. One
+ * thread begins and ends it, runs inside it nested with any other it enters,
+ * and while it is entered the guest instructions the thread runs belong to its
+ * generation: darwin_uml_static_vm_synchronize_code() and
+ * darwin_uml_static_vm_invalidate_code() resolve a guest address there, not in
+ * the generation the thread last activated. */
 void *darwin_uml_static_vm_execution_context_create(unsigned long generation);
 void darwin_uml_static_vm_execution_context_destroy(void *context);
 int darwin_uml_static_vm_execution_context_begin(void *context,
@@ -201,11 +206,14 @@ int darwin_uml_static_vm_execution_context_code_change_ranges(
 void darwin_uml_static_vm_invalidate_code(unsigned long address);
 /* darwin_uml_static_vm_invalidate_code() for a guest's own code
  * synchronization (IC IVAU) that must say whether it found the frame: 1 when
- * the active generation maps nothing at `address`, a guest page whose page
- * table entry the walker has not installed yet. Hardware faults such an
+ * the generation maps nothing at `address` (the entered execution context's
+ * where the thread is inside one, else the active one), a guest page whose
+ * page table entry the walker has not installed yet. Hardware faults such an
  * instruction like a load; the caller reports that fault so the kernel maps
  * the page, and runs the instruction again. Everything else publishes as
- * darwin_uml_static_vm_invalidate_code() does and answers 0. */
+ * darwin_uml_static_vm_invalidate_code() does and answers 0. A host with no
+ * address space for the thread answers -1, and the helper treats any non-zero
+ * answer as an unmapped address and faults. */
 int darwin_uml_static_vm_synchronize_code(unsigned long address);
 int darwin_uml_static_vm_invalidate_code_generation(
 	unsigned long generation, unsigned long address, unsigned long length);
