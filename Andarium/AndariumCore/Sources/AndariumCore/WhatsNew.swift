@@ -8,10 +8,10 @@ import Foundation
 /// nothing.
 public struct WhatsNewRelease: Identifiable, Hashable, Decodable, Sendable {
     /// The build (`CFBundleVersion`) that first carried these notes. The
-    /// Every build shares one marketing version, so the build orders
-    /// releases; every archive's is above the one before.
+    /// marketing version can change between releases ("1.0", then "1.1"), so
+    /// the build orders them; every archive's is above the one before.
     public let build: Int
-    /// The version as Info shows it: "1.0 (12)".
+    /// The version as Info shows it: "1.1 (16)".
     public let version: String
     /// The day the release came out, "2026-11-12"; left out where the day is
     /// not known when the notes are written.
@@ -88,8 +88,8 @@ public struct WhatsNewEntry: Identifiable, Hashable, Decodable, Sendable {
     public let symbol: String
     /// Where the feature lives, for one the person finds outside Home.
     public var place: WhatsNewPlace?
-    /// What the device and the build must offer for the ribbon and its notes
-    /// to show the entry at all.
+    /// What the device must offer for the ribbon and its notes to show the
+    /// entry at all.
     public var requirement: WhatsNewRequirement?
 
     public init(
@@ -172,7 +172,7 @@ public enum WhatsNewPlace: String, Hashable, Decodable, Sendable {
 }
 
 /// What a device must offer for an entry to be announced. A
-/// field the code does not know, a `device` it does not know, a
+/// field the code does not know, a `device` or `feature` it does not know, a
 /// field set to `null`, or no field at all is a mistake in the notes and
 /// refuses them: the notes and the code that reads them ship in one build, so
 /// such a value is caught where they are bundled and never shown without
@@ -183,6 +183,11 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     public var memoryAboveMiB: Int?
     /// The kind of device the feature is for.
     public var device: WhatsNewDevice?
+    /// The feature the entry is about, for one that the application shows
+    /// only where its own rule says so. The rule is the feature's, never the
+    /// notes': it is asked each time the notes are drawn (`isShown`), not at
+    /// launch (`isMet`).
+    public var feature: WhatsNewFeature?
     /// `true` is an entry for a device that can give the guest a compass (an
     /// iPhone, an iPad), which a Mac and the Simulator cannot. `false` is no
     /// requirement and is refused.
@@ -193,17 +198,18 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     public var camera: Bool?
 
     public init(
-        memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil,
+        memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil, feature: WhatsNewFeature? = nil,
         compass: Bool? = nil, camera: Bool? = nil
     ) {
         self.memoryAboveMiB = memoryAboveMiB
         self.device = device
+        self.feature = feature
         self.compass = compass
         self.camera = camera
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case memoryAboveMiB, device, compass, camera
+        case memoryAboveMiB, device, feature, compass, camera
     }
 
     public init(from decoder: any Decoder) throws {
@@ -214,6 +220,7 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
         memoryAboveMiB = try values.contains(.memoryAboveMiB)
             ? values.decode(Int.self, forKey: .memoryAboveMiB) : nil
         device = try values.contains(.device) ? values.decode(WhatsNewDevice.self, forKey: .device) : nil
+        feature = try values.contains(.feature) ? values.decode(WhatsNewFeature.self, forKey: .feature) : nil
         compass = try values.contains(.compass) ? values.decode(Bool.self, forKey: .compass) : nil
         camera = try values.contains(.camera) ? values.decode(Bool.self, forKey: .camera) : nil
         guard compass != false else {
@@ -224,19 +231,27 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "\"camera\" is true or absent"))
         }
-        guard memoryAboveMiB != nil || device != nil || compass != nil || camera != nil else {
+        guard memoryAboveMiB != nil || device != nil || feature != nil || compass != nil || camera != nil else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "a requirement states nothing"))
         }
     }
 
-    /// Whether the device offers all it asks for.
+    /// Whether the device offers all it asks for that a launch can know: its
+    /// memory, kind, compass and camera. The feature is not asked here
+    /// (`isShown`).
     public func isMet(by host: HostDevice, vCPUs: Int) -> Bool {
         if let memoryAboveMiB, host.memory.maximumMiB(vCPUs: vCPUs) <= memoryAboveMiB { return false }
         if let device, !device.isMet(by: host) { return false }
         if compass == true, !host.hasCompass { return false }
         if camera == true, !host.hasCamera { return false }
         return true
+    }
+
+    /// Whether the feature the entry is about is shown now, by the
+    /// application's own rule for it (`shows`); true when it names none.
+    public func isShown(by shows: (WhatsNewFeature) -> Bool) -> Bool {
+        feature.map(shows) ?? true
     }
 }
 
@@ -256,6 +271,15 @@ public enum WhatsNewDevice: String, Hashable, Decodable, Sendable {
         case .haptics: host.hasHaptics
         }
     }
+}
+
+/// A feature that the application shows only where its own rule says so,
+/// written in the notes as `"addToHomeScreen"`. An entry about one is left out
+/// of the ribbon and its notes on a device that does not show the feature, and
+/// stays in Info's history as written.
+public enum WhatsNewFeature: String, Hashable, Decodable, Sendable, CaseIterable {
+    /// Add to Home Screen, in Settings.
+    case addToHomeScreen
 }
 
 private struct AnyKey: CodingKey {

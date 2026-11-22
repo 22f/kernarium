@@ -917,6 +917,14 @@ final class AppModel {
         self.capabilities = capabilities
         self.createRequirementBytes = createRequirementBytes
         snapshots.app = self
+        // The notes show an entry about a feature only where the feature's own
+        // rule offers it on this device.
+        whatsNew.showsFeature = { [weak self] feature in
+            guard let self else { return true }
+            return switch feature {
+            case .addToHomeScreen: hostOffersAddToHomeScreen
+            }
+        }
     }
 
     var guest: Guest? {

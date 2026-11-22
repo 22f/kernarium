@@ -11,7 +11,9 @@
     { "catalog": "Localizable", "key": "%@", "reason": "The name under an app's icon is Android's own label of the app, in the language Android is in; no catalog translates it." },
     { "catalog": "Localizable", "key": "Root", "reason": "The name of the access, which every language keeps as Android's own words for it do." },
     { "catalog": "AndariumCore", "key": "VRAM", "reason": "A technical name every language keeps." },
-    { "catalog": "AndariumCore", "key": "%lld vCPUs", "reason": "Japanese counts vCPUs as a number and the unit name, as it counts GiB." }
+    { "catalog": "AndariumCore", "key": "%lld vCPUs", "reason": "Japanese counts vCPUs as a number and the unit name, as it counts GiB." },
+    { "catalog": "WhatsNew", "key": "AOT", "reason": "A term every language keeps in English." },
+    { "catalog": "WhatsNew", "key": "120 Hz", "reason": "The unit of a display's refresh rate, kept by every language." }
   ],
   "english": [
     { "text": "JIT", "file": "Andarium/Andarium/Shared/HomeSections.swift", "reason": "A section only development builds have." },

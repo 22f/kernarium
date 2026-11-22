@@ -197,7 +197,7 @@ class CaptureLanguageTests(unittest.TestCase):
         listing = io.StringIO()
         with contextlib.redirect_stdout(listing):
             self.assertEqual(self.script.main(["--list"]), 0)
-        for shot in ("snapshots", "snapshots-detail", "whatsnew-open"):
+        for shot in ("snapshots", "snapshots-detail", "whatsnew-open", "whatsnew-open-unsupported"):
             self.assertIn(f"{shot}\t", listing.getvalue())
 
 

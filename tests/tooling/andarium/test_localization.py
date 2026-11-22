@@ -375,6 +375,12 @@ class CheckTests(unittest.TestCase):
         self.tree.files["Localizable"]["strings"]["JIT"] = entry(ja="JIT", zh_Hans="即时编译", zh_Hant="即時編譯")
         self.assertFinds("a catalog translates it")
 
+    def test_a_note_with_the_text_of_an_english_text_translates_nothing(self) -> None:
+        self.tree.files["WhatsNew"]["strings"]["JIT"] = entry(ja="JIT", zh_Hans="JIT", zh_Hant="JIT")
+        self.tree.whats_new[0]["entries"].append({"title": "JIT", "text": NOTE})
+        self.tree.english_only["identical"].append({"catalog": "WhatsNew", "key": "JIT", "reason": "a term"})
+        self.assertEqual(self.problems(), [])
+
     def test_a_permission_text_without_an_entry(self) -> None:
         del self.tree.files["InfoPlist"]["strings"]["NSMicrophoneUsageDescription"]
         self.assertFinds("has no entry for NSMicrophoneUsageDescription")

@@ -254,6 +254,41 @@ struct WhatsNewRequirementTests {
         #expect(both.isMet(by: host(maximumMiB: 4096, hasCompass: true, hasCamera: true), vCPUs: 6))
     }
 
+    /// An entry about a feature is left out where the application's own rule for
+    /// the feature does not offer it. The rule is asked of the application each
+    /// time the notes are drawn, so a launch's question (`isMet`) does not
+    /// include it.
+    @Test func aFeatureRequirementIsAskedWhenTheNotesAreDrawnAndNotWhenALaunchDecides() {
+        let requirement = WhatsNewRequirement(feature: .addToHomeScreen)
+        for host in [iPhone, iPhoneWithoutHaptics, iPad, mac] { #expect(requirement.isMet(by: host, vCPUs: 6)) }
+        #expect(requirement.isShown(by: { $0 == .addToHomeScreen }))
+        #expect(!requirement.isShown(by: { _ in false }))
+        // A requirement that names no feature is shown whatever the features say.
+        #expect(WhatsNewRequirement(device: .pad).isShown(by: { _ in false }))
+        // The device and the feature each have their say.
+        let both = WhatsNewRequirement(device: .pad, feature: .addToHomeScreen)
+        #expect(both.isMet(by: iPad, vCPUs: 6) && !both.isMet(by: iPhone, vCPUs: 6))
+        #expect(both.isShown(by: { $0 == .addToHomeScreen }) && !both.isShown(by: { _ in false }))
+    }
+
+    /// The ribbon's launch keeps an entry about a feature, whatever the device
+    /// is: only the notes drawn later leave it out.
+    @Test func aLaunchKeepsAnEntryAboutAFeatureOnEveryKindOfDevice() {
+        let entries = [
+            WhatsNewEntry(id: "everyone", title: "E", text: "T", symbol: "star"),
+            WhatsNewEntry(
+                id: "feature", title: "F", text: "T", symbol: "star",
+                requirement: WhatsNewRequirement(feature: .addToHomeScreen)),
+        ]
+        let notes = [WhatsNewRelease(build: 9, version: "1.0 (9)", entries: entries)]
+        for host in [iPhone, iPad, mac] {
+            let launch = WhatsNewRules.launch(
+                releases: notes, record: WhatsNewRecord(seenBuild: 8), currentBuild: 9, hasGuest: true,
+                offers: { $0.requirement?.isMet(by: host, vCPUs: 6) ?? true })
+            #expect(launch.pending.flatMap { $0.entries.map(\.id) } == ["everyone", "feature"])
+        }
+    }
+
     @Test func aRequirementOfACompassIsMetOnlyWhereTheDeviceCanGiveOne() {
         let requirement = WhatsNewRequirement(compass: true)
         #expect(requirement.isMet(by: host(maximumMiB: 4096, hasCompass: true), vCPUs: 6))
@@ -331,14 +366,30 @@ struct WhatsNewCatalogTests {
             decoded.first?.entries.first?.requirement == WhatsNewRequirement(memoryAboveMiB: 4096, device: .pad))
     }
 
-    /// A field the code no longer knows refuses the notes: the removed
-    /// `feature` requirement is one.
+    /// A requirement the code does not know refuses the notes: a feature it
+    /// no longer has is one.
     @Test func aRequirementFieldTheCodeDoesNotKnowRefusesTheNotes() {
         #expect(throws: (any Error).self) {
             try decode(notes(entry: entry + #", "requirement": {"feature": "sendFeedback"}"#))
         }
         #expect(throws: (any Error).self) {
             try decode(notes(entry: entry + #", "requirement": {"device": "pad", "mail": true}"#))
+        }
+    }
+
+    @Test func aFeatureRequirementDecodesAloneOrBesideAnotherAndOnlyAsAKnownFeature() throws {
+        let alone = try decode(notes(entry: entry + #", "requirement": {"feature": "addToHomeScreen"}"#))
+        #expect(alone.first?.entries.first?.requirement == WhatsNewRequirement(feature: .addToHomeScreen))
+        let beside = try decode(
+            notes(entry: entry + #", "requirement": {"device": "pad", "feature": "addToHomeScreen"}"#))
+        #expect(
+            beside.first?.entries.first?.requirement
+                == WhatsNewRequirement(device: .pad, feature: .addToHomeScreen))
+        // A word that is not a feature, and one that no longer is, refuse the notes.
+        for feature in [#""Pad""#, #""120Hz""#, #""highRefresh""#, #""""#, "3", "null", #"["addToHomeScreen"]"#, "true"] {
+            #expect(throws: (any Error).self, "\(feature)") {
+                try decode(notes(entry: entry + #", "requirement": {"feature": \#(feature)}"#))
+            }
         }
     }
 
@@ -374,6 +425,8 @@ struct WhatsNewCatalogTests {
         // decoding them proves.
         let named = releases.flatMap(\.entries).compactMap(\.requirement)
         #expect(named.contains { $0.device == .pad })
+        // The entry about a feature that only some devices show.
+        #expect(Set(named.compactMap(\.feature)) == Set(WhatsNewFeature.allCases))
     }
 
     @Test func anEmptyListIsNotes() throws {
